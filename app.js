@@ -60,6 +60,7 @@ let activeToken = null;
 let activeLoginId = null;
 let isAuthorized = false;
 let tradeResults = [];
+let openContractSubs = new Map();
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -322,6 +323,9 @@ function onMessage(event) {
   if (data.msg_type === "balance" && data.balance) {
     updateAccountSummary(data.balance);
   }
+  if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
+    handleOpenContractUpdate(data.proposal_open_contract, data.subscription?.id);
+  }
 }
 
 function formatPrice(value, pip) {
@@ -424,6 +428,44 @@ function renderAccountList() {
       accountSummary.innerHTML = `<span class="acct-label">${current.loginid}</span><span>${current.currency || ""}</span>`;
     }
   }
+}
+
+function subscribeOpenContract(contractId) {
+  if (!contractId) return;
+  ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }));
+}
+
+function handleOpenContractUpdate(contract, subscriptionId) {
+  const contractId = contract.contract_id;
+  if (!contractId) return;
+  if (subscriptionId) {
+    openContractSubs.set(contractId, subscriptionId);
+  }
+
+  const index = tradeResults.findIndex((t) => t.contractId === contractId);
+  if (index === -1) return;
+
+  const buyPrice = contract.buy_price ?? tradeResults[index].price ?? null;
+  const sellPrice = contract.sell_price ?? null;
+  const profit = contract.profit ?? (sellPrice != null && buyPrice != null ? sellPrice - buyPrice : tradeResults[index].profit ?? null);
+  const isSold = contract.is_sold ?? contract.status === "sold";
+  const expiry = contract.date_expiry ?? tradeResults[index].expiry ?? null;
+
+  tradeResults[index] = {
+    ...tradeResults[index],
+    price: buyPrice,
+    profit,
+    isSold,
+    expiry,
+    success: isSold ? (profit != null ? profit >= 0 : tradeResults[index].success) : tradeResults[index].success,
+  };
+
+  if (isSold && subscriptionId) {
+    ws.send(JSON.stringify({ forget: subscriptionId }));
+    openContractSubs.delete(contractId);
+  }
+
+  renderTradeResults();
 }
 
 async function authorizeWithToken(token) {
@@ -852,9 +894,10 @@ function renderTradeResults() {
     const status = item.success ? "Success" : "Failed";
     const profitText = item.profit != null ? item.profit.toFixed(2) : "--";
     const priceText = item.price != null ? item.price.toFixed(2) : "--";
+    const timeLeft = item.expiry && !item.isSold ? ` • Time left: ${formatCountdown(item.expiry)}` : "";
     return `
       <div class="trade-btn ${item.direction === "CALL" ? "higher" : "lower"}">
-        <div class="trade-title">${status} • ${time}</div>
+        <div class="trade-title">${status} • ${time}${timeLeft}</div>
         <div class="trade-meta">Contract: ${item.contractId || "--"}</div>
         <div class="trade-meta">Price: ${priceText} • Profit: ${profitText}</div>
       </div>
@@ -867,6 +910,7 @@ function startCountdowns() {
   countdownTimer = setInterval(() => {
     const changed = rollExpiries();
     renderTradeList();
+    renderTradeResults();
     if (changed) {
       scheduleProposalRefresh(true);
     }
@@ -961,9 +1005,14 @@ function init() {
           price: buyPrice,
           profit: null,
           direction: currentDirection,
+          isSold: false,
+          expiry: null,
         });
         tradeResults = tradeResults.slice(0, 20);
         renderTradeResults();
+        if (contractId && contractId !== "--") {
+          subscribeOpenContract(contractId);
+        }
       })
       .catch((err) => {
         setStatus(err.message || "Buy failed", true);
@@ -974,6 +1023,8 @@ function init() {
           price: price,
           profit: null,
           direction: currentDirection,
+          isSold: true,
+          expiry: null,
         });
         tradeResults = tradeResults.slice(0, 20);
         renderTradeResults();
