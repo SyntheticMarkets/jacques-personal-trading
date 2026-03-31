@@ -55,6 +55,7 @@ const MIN_REFRESH_MS = 1500;
 let storedAccounts = [];
 let activeToken = null;
 let activeLoginId = null;
+let isAuthorized = false;
 
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
@@ -257,6 +258,7 @@ function renderAccountList() {
 async function authorizeWithToken(token) {
   if (!token) return;
   await wsRequest({ authorize: token });
+  isAuthorized = true;
   await wsRequest({ balance: 1, subscribe: 1 });
 }
 
@@ -493,6 +495,7 @@ async function refreshProposals() {
           durationSec,
         });
         const payout = proposal.payout;
+        const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
         const profitPct = ((payout - stake) / stake) * 100;
         results.push({
           expiry,
@@ -501,6 +504,7 @@ async function refreshProposals() {
           profitPct,
           offset: signedOffset,
           proposalId: proposal.id,
+          askPrice,
         });
         ok += 1;
       } catch (err) {
@@ -624,14 +628,15 @@ function renderTradeList() {
     const profitText = profit == null ? "--" : profit.toFixed(2);
     const pctText = item.profitPct == null ? "--" : item.profitPct.toFixed(1);
     const proposalId = item.proposalId ? `data-proposal=\"${item.proposalId}\"` : "";
+    const priceAttr = item.askPrice != null ? `data-price=\"${item.askPrice}\"` : "";
     return `
       <div class="trade-row">
-        <button class="trade-btn ${dirClass}" data-expiry="${expiry}" ${proposalId}>
+        <button class="trade-btn ${dirClass}" data-expiry="${expiry}" ${proposalId} ${priceAttr}>
           <div class="trade-title"><span class="trade-tag">${directionLabel}</span> • ends in ${countdown}</div>
           <div class="trade-meta">Profit: ${profitText} (${pctText}%)</div>
           <div class="trade-meta">Barrier: ${barrierText} (offset ${offsetText})</div>
         </button>
-        <button class="buy-btn" data-expiry="${expiry}" ${proposalId}>Buy</button>
+        <button class="buy-btn" data-expiry="${expiry}" ${proposalId} ${priceAttr}>Buy</button>
       </div>
     `;
   }).join("");
@@ -696,11 +701,32 @@ function init() {
     if (!target.classList.contains("buy-btn")) return;
 
     const proposalId = target.getAttribute("data-proposal");
+    const priceStr = target.getAttribute("data-price");
     if (!proposalId) {
       setStatus("Proposal not ready yet", true);
       return;
     }
-    setStatus("Buy requested. Connect account to execute trade.", true);
+    if (!activeToken || !isAuthorized) {
+      setStatus("Please log in to execute trades.", true);
+      window.location.href = OAUTH_URL;
+      return;
+    }
+    const price = priceStr ? Number(priceStr) : Number(stakeInput?.value || "0");
+    if (!price) {
+      setStatus("Invalid buy price", true);
+      return;
+    }
+    setStatus("Placing trade...");
+    wsRequest({ buy: proposalId, price })
+      .then((res) => {
+        const buy = res.buy;
+        const contractId = buy?.contract_id ?? "--";
+        const buyPrice = buy?.buy_price ?? price;
+        setStatus(`Trade opened. Contract ${contractId}, price ${buyPrice}`);
+      })
+      .catch((err) => {
+        setStatus(err.message || "Buy failed", true);
+      });
   });
 
   tabs.forEach((tab) => {
@@ -749,6 +775,7 @@ function init() {
     storedAccounts = [];
     activeToken = null;
     activeLoginId = null;
+    isAuthorized = false;
     if (accountSummary) {
       accountSummary.innerHTML = "<span class=\"acct-label\">Log in</span>";
     }
