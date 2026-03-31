@@ -295,6 +295,12 @@ button.small {
   padding-right: 2px;
 }
 
+.trade-list.collapsed {
+  max-height: 0;
+  padding-right: 0;
+  overflow: hidden;
+}
+
 .trade-btn {
   width: 100%;
   text-align: left;

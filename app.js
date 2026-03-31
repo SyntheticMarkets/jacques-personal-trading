@@ -27,6 +27,9 @@ let btn1m;
 let btn2m;
 let directionButtons;
 let tradeListEl;
+let tradeResultsEl;
+let toggleProposalsBtn;
+let toggleResultsBtn;
 
 let ws;
 let wsIndex = 0;
@@ -56,6 +59,7 @@ let storedAccounts = [];
 let activeToken = null;
 let activeLoginId = null;
 let isAuthorized = false;
+let tradeResults = [];
 
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
@@ -642,6 +646,27 @@ function renderTradeList() {
   }).join("");
 }
 
+function renderTradeResults() {
+  if (!tradeResultsEl) return;
+  if (!tradeResults.length) {
+    tradeResultsEl.innerHTML = "<div class=\"trade-meta\">No trades yet</div>";
+    return;
+  }
+  tradeResultsEl.innerHTML = tradeResults.map((item) => {
+    const time = new Date(item.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const status = item.success ? "Success" : "Failed";
+    const profitText = item.profit != null ? item.profit.toFixed(2) : "--";
+    const priceText = item.price != null ? item.price.toFixed(2) : "--";
+    return `
+      <div class="trade-btn ${item.direction === "CALL" ? "higher" : "lower"}">
+        <div class="trade-title">${status} • ${time}</div>
+        <div class="trade-meta">Contract: ${item.contractId || "--"}</div>
+        <div class="trade-meta">Price: ${priceText} • Profit: ${profitText}</div>
+      </div>
+    `;
+  }).join("");
+}
+
 function startCountdowns() {
   if (countdownTimer) clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
@@ -686,6 +711,9 @@ function init() {
   btn1m = document.getElementById("btn1m");
   btn2m = document.getElementById("btn2m");
   tradeListEl = document.getElementById("tradeList");
+  tradeResultsEl = document.getElementById("tradeResults");
+  toggleProposalsBtn = document.getElementById("toggleProposals");
+  toggleResultsBtn = document.getElementById("toggleResults");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -723,9 +751,29 @@ function init() {
         const contractId = buy?.contract_id ?? "--";
         const buyPrice = buy?.buy_price ?? price;
         setStatus(`Trade opened. Contract ${contractId}, price ${buyPrice}`);
+        tradeResults.unshift({
+          time: Date.now(),
+          success: true,
+          contractId,
+          price: buyPrice,
+          profit: null,
+          direction: currentDirection,
+        });
+        tradeResults = tradeResults.slice(0, 20);
+        renderTradeResults();
       })
       .catch((err) => {
         setStatus(err.message || "Buy failed", true);
+        tradeResults.unshift({
+          time: Date.now(),
+          success: false,
+          contractId: null,
+          price: price,
+          profit: null,
+          direction: currentDirection,
+        });
+        tradeResults = tradeResults.slice(0, 20);
+        renderTradeResults();
       });
   });
 
@@ -738,6 +786,22 @@ function init() {
       const isCollapsed = tradeBody.classList.toggle("collapsed");
       toggleTradeBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleTradeBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleProposalsBtn && tradeListEl) {
+    toggleProposalsBtn.addEventListener("click", () => {
+      const isCollapsed = tradeListEl.classList.toggle("collapsed");
+      toggleProposalsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleProposalsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleResultsBtn && tradeResultsEl) {
+    toggleResultsBtn.addEventListener("click", () => {
+      const isCollapsed = tradeResultsEl.classList.toggle("collapsed");
+      toggleResultsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleResultsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
 
@@ -810,6 +874,7 @@ function init() {
   if (activeToken) {
     authorizeWithToken(activeToken).catch(() => {});
   }
+  renderTradeResults();
 }
 
 window.addEventListener("DOMContentLoaded", init);
