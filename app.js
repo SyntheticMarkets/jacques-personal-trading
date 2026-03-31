@@ -3,6 +3,8 @@ const WS_URLS = [
   `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`,
   `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`,
 ];
+const REDIRECT_URI = "https://jacques-personal-trading.vercel.app";
+const OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
 
 let tabs;
 let hlButtons;
@@ -15,6 +17,8 @@ let symbolPrice;
 let statusEl;
 let accountSummary;
 let accountPanel;
+let accountListEl;
+let logoutBtn;
 let toggleTradeBtn;
 let tradeBody;
 let barrierInput;
@@ -43,6 +47,14 @@ let proposalExpiries = [];
 let proposals = [];
 let countdownTimer = null;
 let lastProposalError = null;
+let rateLimitUntil = 0;
+let pingTimer = null;
+const PING_INTERVAL_MS = 30000;
+const RATE_LIMIT_COOLDOWN_MS = 15000;
+const MIN_REFRESH_MS = 1500;
+let storedAccounts = [];
+let activeToken = null;
+let activeLoginId = null;
 
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
@@ -58,19 +70,37 @@ function connectWS() {
 
   ws.addEventListener("open", () => {
     setStatus(`Connected (${new URL(url).host})`);
+    startPing();
   });
 
   ws.addEventListener("close", () => {
     setStatus("Disconnected. Retrying...", true);
+    stopPing();
     scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
     setStatus("WebSocket error. Retrying...", true);
+    stopPing();
     scheduleReconnect(true);
   });
 
   ws.addEventListener("message", onMessage);
+}
+
+function startPing() {
+  stopPing();
+  pingTimer = setInterval(() => {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({ ping: 1 }));
+  }, PING_INTERVAL_MS);
+}
+
+function stopPing() {
+  if (pingTimer) {
+    clearInterval(pingTimer);
+    pingTimer = null;
+  }
 }
 
 function scheduleReconnect(forceNext = false) {
@@ -117,6 +147,9 @@ function onMessage(event) {
     tickStreamId = data.tick.id || tickStreamId;
     scheduleProposalRefresh();
   }
+  if (data.msg_type === "balance" && data.balance) {
+    updateAccountSummary(data.balance);
+  }
 }
 
 function formatPrice(value, pip) {
@@ -142,6 +175,97 @@ function setActiveTab(tabName) {
   hlButtons.style.display = isHL ? "grid" : "none";
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
+}
+
+function parseOAuthTokens() {
+  const searchParams = new URLSearchParams(window.location.search);
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const params = searchParams.has("token1") ? searchParams : hashParams;
+  const accounts = [];
+
+  if (params.has("token1")) {
+    for (let i = 1; i < 50; i++) {
+      const token = params.get(`token${i}`);
+      const loginid = params.get(`acct${i}`);
+      const currency = params.get(`cur${i}`);
+      if (!token || !loginid) break;
+      accounts.push({ token, loginid, currency: currency || "" });
+    }
+  } else {
+    // Fallback: accept any tokenN/acctN pair in params
+    const tokens = Array.from(params.keys())
+      .filter((k) => k.startsWith("token"))
+      .map((k) => ({ key: k, idx: Number(k.replace("token", "")) }))
+      .filter((t) => Number.isFinite(t.idx))
+      .sort((a, b) => a.idx - b.idx);
+    for (const t of tokens) {
+      const token = params.get(t.key);
+      const loginid = params.get(`acct${t.idx}`);
+      const currency = params.get(`cur${t.idx}`);
+      if (token && loginid) {
+        accounts.push({ token, loginid, currency: currency || "" });
+      }
+    }
+  }
+
+  if (!accounts.length) return;
+
+  if (accounts.length) {
+    localStorage.setItem("deriv_accounts", JSON.stringify(accounts));
+    storedAccounts = accounts;
+    activeToken = accounts[0].token;
+    activeLoginId = accounts[0].loginid;
+  }
+
+  window.history.replaceState({}, document.title, window.location.pathname);
+}
+
+function loadStoredAccounts() {
+  const raw = localStorage.getItem("deriv_accounts");
+  if (!raw) return;
+  try {
+    storedAccounts = JSON.parse(raw) || [];
+  } catch {
+    storedAccounts = [];
+  }
+  if (storedAccounts.length) {
+    activeToken = storedAccounts[0].token;
+    activeLoginId = storedAccounts[0].loginid;
+  }
+}
+
+function renderAccountList() {
+  if (!accountListEl) return;
+  if (!storedAccounts.length) {
+    accountListEl.innerHTML = "<div class=\"trade-meta\">Not logged in</div>";
+    return;
+  }
+  accountListEl.innerHTML = storedAccounts.map((acc) => {
+    const label = `${acc.loginid} ${acc.currency || ""}`.trim();
+    const active = acc.loginid === activeLoginId ? "active" : "";
+    return `<button class="account-item ${active}" data-loginid="${acc.loginid}">${label}</button>`;
+  }).join("");
+
+  if (accountSummary && activeLoginId) {
+    const current = storedAccounts.find((acc) => acc.loginid === activeLoginId);
+    if (current) {
+      accountSummary.innerHTML = `<span class="acct-label">${current.loginid}</span><span>${current.currency || ""}</span>`;
+    }
+  }
+}
+
+async function authorizeWithToken(token) {
+  if (!token) return;
+  await wsRequest({ authorize: token });
+  await wsRequest({ balance: 1, subscribe: 1 });
+}
+
+function updateAccountSummary(balance) {
+  if (!accountSummary) return;
+  const login = activeLoginId ? `${activeLoginId}` : "Account";
+  const amount = balance.balance != null ? balance.balance.toFixed(2) : "--";
+  const cur = balance.currency || "";
+  accountSummary.innerHTML = `<span class="acct-label">${login}</span><span>${amount} ${cur}</span>`;
 }
 
 function isDerivedMarket(symbol) {
@@ -326,8 +450,9 @@ async function getProposal({ symbol, contractType, barrier, stake, durationSec }
 function scheduleProposalRefresh(force = false) {
   if (!currentSymbol || !lastSpot) return;
   if (calcInFlight) return;
+  if (Date.now() < rateLimitUntil) return;
   const now = Date.now();
-  if (!force && now - lastCalcAt < 900) return;
+  if (!force && now - lastCalcAt < MIN_REFRESH_MS) return;
   lastCalcAt = now;
   refreshProposals().catch((err) => {
     setStatus(err.message, true);
@@ -380,6 +505,9 @@ async function refreshProposals() {
         ok += 1;
       } catch (err) {
         lastProposalError = err?.message || "Proposal error";
+        if (lastProposalError.toLowerCase().includes("rate limit")) {
+          rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        }
         results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
       }
     }
@@ -546,6 +674,8 @@ function init() {
   statusEl = document.getElementById("status");
   accountSummary = document.getElementById("accountSummary");
   accountPanel = document.getElementById("accountPanel");
+  accountListEl = document.getElementById("accountList");
+  logoutBtn = document.getElementById("logoutBtn");
   barrierInput = document.getElementById("barrierInput");
   stakeInput = document.getElementById("stakeInput");
   btn1m = document.getElementById("btn1m");
@@ -587,6 +717,10 @@ function init() {
 
   if (accountSummary && accountPanel) {
     accountSummary.addEventListener("click", () => {
+      if (!storedAccounts.length) {
+        window.location.href = OAUTH_URL;
+        return;
+      }
       accountPanel.classList.toggle("hidden");
     });
     document.addEventListener("click", (event) => {
@@ -596,6 +730,31 @@ function init() {
       accountPanel.classList.add("hidden");
     });
   }
+
+  accountListEl?.addEventListener("click", async (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const loginid = target.getAttribute("data-loginid");
+    if (!loginid) return;
+    const account = storedAccounts.find((acc) => acc.loginid === loginid);
+    if (!account) return;
+    activeLoginId = account.loginid;
+    activeToken = account.token;
+    renderAccountList();
+    await authorizeWithToken(activeToken);
+  });
+
+  logoutBtn?.addEventListener("click", () => {
+    localStorage.removeItem("deriv_accounts");
+    storedAccounts = [];
+    activeToken = null;
+    activeLoginId = null;
+    if (accountSummary) {
+      accountSummary.innerHTML = "<span class=\"acct-label\">Log in</span>";
+    }
+    renderAccountList();
+    accountPanel?.classList.add("hidden");
+  });
 
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
@@ -617,6 +776,13 @@ function init() {
   loadActiveSymbols();
   setExpiryMinutes(1);
   startCountdowns();
+
+  parseOAuthTokens();
+  loadStoredAccounts();
+  renderAccountList();
+  if (activeToken) {
+    authorizeWithToken(activeToken).catch(() => {});
+  }
 }
 
 window.addEventListener("DOMContentLoaded", init);
