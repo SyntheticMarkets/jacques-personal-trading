@@ -1,0 +1,96 @@
+﻿<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Deriv Trader UI</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="phone">
+      <header class="topbar">
+        <div id="accountSummary" class="account-summary">
+          <span class="acct-label">Log in</span>
+        </div>
+        <div class="status" id="status">Connecting...</div>
+      </header>
+
+      <div id="accountPanel" class="account-panel hidden">
+        <div class="account-tabs">
+          <button class="pill active">Real</button>
+          <button class="pill">Demo</button>
+        </div>
+        <div class="account-list">
+          <div class="account-item">
+            <span>US Dollar</span>
+            <span>-- USD</span>
+          </div>
+          <div class="account-item">
+            <span>Bitcoin</span>
+            <span>-- BTC</span>
+          </div>
+          <div class="account-item">
+            <span>Litecoin</span>
+            <span>-- LTC</span>
+          </div>
+        </div>
+        <button class="ghost small account-manage">Manage accounts</button>
+      </div>
+
+      <nav class="trade-tabs" role="tablist">
+        <button class="tab active" data-tab="rise_fall" role="tab" aria-selected="true">Rise/Fall</button>
+        <button class="tab" data-tab="higher_lower" role="tab" aria-selected="false">Higher/Lower</button>
+      </nav>
+
+      <section class="symbol-row">
+        <div class="symbol-icon"></div>
+        <div class="symbol-info">
+          <div class="symbol-name" id="symbolName">--</div>
+          <div class="symbol-price" id="symbolPrice">--</div>
+        </div>
+        <div class="symbol-select">
+          <select id="marketSelect" aria-label="Market"></select>
+          <select id="symbolSelect" aria-label="Symbol"></select>
+        </div>
+      </section>
+
+      <section class="card">
+        <header class="card-head">
+          <h2>Set your trade</h2>
+          <button id="toggleTrade" class="ghost small" aria-expanded="true">Collapse</button>
+        </header>
+
+        <div id="tradeBody" class="trade-body">
+          <div id="hlButtons" class="hl-buttons" role="group" aria-label="Higher or Lower">
+            <button class="pill active">Higher</button>
+            <button class="pill">Lower</button>
+          </div>
+
+          <div id="quickRow" class="quick-row">
+            <button class="pill" id="btn1m">1 min</button>
+            <button class="pill" id="btn2m">2 min</button>
+          </div>
+
+          <div id="barrierField" class="field">
+            <div class="field-label">Barrier offset</div>
+            <input id="barrierInput" class="field-input" type="number" min="0.0001" step="0.0001" value="0.5" />
+          </div>
+
+          <div class="field">
+            <div class="field-label">Stake</div>
+            <input id="stakeInput" class="field-input" type="number" min="0.35" step="0.01" value="1" />
+          </div>
+        </div>
+      </section>
+
+      <section class="card trade-section">
+        <header class="card-head">
+          <h2>Trade proposals</h2>
+        </header>
+        <div id="tradeList" class="trade-list"></div>
+      </section>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
