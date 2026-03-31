@@ -60,6 +60,169 @@ let activeToken = null;
 let activeLoginId = null;
 let isAuthorized = false;
 let tradeResults = [];
+let sigTrendEl;
+let sigDivEl;
+let sigSweepEl;
+let sigConfEl;
+let sigSignalEl;
+let sigTimeEl;
+let signalBodyEl;
+let toggleSignalBtn;
+
+class CandleBuilder {
+  constructor(timeframe = 60) {
+    this.timeframe = timeframe;
+    this.currentCandle = null;
+    this.candles = [];
+  }
+
+  reset() {
+    this.currentCandle = null;
+    this.candles = [];
+  }
+
+  update(tick) {
+    const time = Math.floor(tick.epoch / this.timeframe) * this.timeframe;
+    const price = tick.quote;
+    let newCandleFormed = false;
+
+    if (!this.currentCandle || this.currentCandle.time !== time) {
+      if (this.currentCandle) {
+        this.candles.push(this.currentCandle);
+        if (this.candles.length > MAX_CANDLES) {
+          this.candles.shift();
+        }
+        newCandleFormed = true;
+      }
+      this.currentCandle = { time, open: price, high: price, low: price, close: price };
+    } else {
+      this.currentCandle.high = Math.max(this.currentCandle.high, price);
+      this.currentCandle.low = Math.min(this.currentCandle.low, price);
+      this.currentCandle.close = price;
+    }
+
+    return { candles: this.candles, newCandleFormed };
+  }
+}
+
+const candleBuilder = new CandleBuilder(60);
+const MIN_SIGNAL_CANDLES = 20;
+const MAX_CANDLES = 200;
+let lastSignalState = {
+  trend: "--",
+  divergence: "--",
+  sweep: "--",
+  confidence: "--",
+  signal: "--",
+  time: null,
+};
+
+function calculateOBV(candles) {
+  const obv = [0];
+  for (let i = 1; i < candles.length; i++) {
+    const prev = candles[i - 1];
+    const curr = candles[i];
+    const volume = Math.abs(curr.close - prev.close) * 1000;
+    if (curr.close > prev.close) obv.push(obv[i - 1] + volume);
+    else if (curr.close < prev.close) obv.push(obv[i - 1] - volume);
+    else obv.push(obv[i - 1]);
+  }
+  return obv;
+}
+
+function detectTrend(candles, length = 10) {
+  if (candles.length < length) return "SIDEWAYS";
+  const recent = candles.slice(-length);
+  const avg = recent.reduce((sum, c) => sum + c.close, 0) / length;
+  const last = recent[recent.length - 1].close;
+  if (last > avg) return "UP";
+  if (last < avg) return "DOWN";
+  return "SIDEWAYS";
+}
+
+function detectLiquiditySweep(candles) {
+  if (candles.length < 2) return null;
+  const last = candles[candles.length - 1];
+  const prev = candles[candles.length - 2];
+  if (last.high > prev.high && last.close < prev.high) return "SWEEP_HIGH";
+  if (last.low < prev.low && last.close > prev.low) return "SWEEP_LOW";
+  return null;
+}
+
+function detectDivergence(candles, obv, lookback = 5) {
+  if (candles.length < lookback + 1) return null;
+  const i = candles.length - 1;
+  let priceHigh = -Infinity;
+  let priceLow = Infinity;
+  let obvHigh = -Infinity;
+  let obvLow = Infinity;
+
+  for (let j = i - lookback; j < i; j++) {
+    priceHigh = Math.max(priceHigh, candles[j].high);
+    priceLow = Math.min(priceLow, candles[j].low);
+    obvHigh = Math.max(obvHigh, obv[j]);
+    obvLow = Math.min(obvLow, obv[j]);
+  }
+
+  const curr = candles[i];
+  if (curr.high >= priceHigh && obv[i] < obvHigh) return "SELL";
+  if (curr.low <= priceLow && obv[i] > obvLow) return "BUY";
+  return null;
+}
+
+function calculateConfidence({ divergence, trend, sweep }) {
+  let score = 0;
+  if (divergence) score += 40;
+  if (divergence === "BUY" && trend === "UP") score += 20;
+  if (divergence === "SELL" && trend === "DOWN") score += 20;
+  if (sweep === "SWEEP_LOW" && divergence === "BUY") score += 20;
+  if (sweep === "SWEEP_HIGH" && divergence === "SELL") score += 20;
+  return score;
+}
+
+function updateSignalUI({ trend, divergence, sweep, confidence, signal, time }) {
+  if (sigTrendEl) sigTrendEl.textContent = trend || "--";
+  if (sigDivEl) sigDivEl.textContent = divergence || "--";
+  if (sigSweepEl) sigSweepEl.textContent = sweep || "--";
+  if (sigConfEl) sigConfEl.textContent = confidence != null ? `${confidence}%` : "--";
+  if (sigSignalEl) sigSignalEl.textContent = signal || "--";
+  if (sigTimeEl) sigTimeEl.textContent = time ? new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
+}
+
+function updateSignalFromCandles(candles) {
+  const allCandles = candles;
+  const buildPct = Math.min(100, Math.floor((allCandles.length / MIN_SIGNAL_CANDLES) * 100));
+  const trend = allCandles.length >= 2
+    ? detectTrend(allCandles, Math.min(10, allCandles.length))
+    : `BUILDING ${buildPct}%`;
+
+  if (allCandles.length >= MIN_SIGNAL_CANDLES) {
+    const obv = calculateOBV(allCandles);
+    const divergence = detectDivergence(allCandles, obv);
+    const sweep = detectLiquiditySweep(allCandles);
+    const confidence = calculateConfidence({ divergence, trend, sweep });
+    let signal = null;
+    if (divergence && confidence >= 60) {
+      if (currentDirection === "CALL" && divergence === "BUY") signal = "BUY";
+      if (currentDirection === "PUT" && divergence === "SELL") signal = "SELL";
+    }
+    lastSignalState = {
+      trend,
+      divergence: divergence || "--",
+      sweep: sweep || "--",
+      confidence,
+      signal: signal || "--",
+      time: Date.now(),
+    };
+  } else {
+    lastSignalState = {
+      ...lastSignalState,
+      trend: `BUILDING ${buildPct}%`,
+    };
+  }
+
+  updateSignalUI(lastSignalState);
+}
 
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
@@ -151,6 +314,10 @@ function onMessage(event) {
     if (symbolPrice) symbolPrice.textContent = formatPrice(price, currentPip);
     tickStreamId = data.tick.id || tickStreamId;
     scheduleProposalRefresh();
+
+    const { candles } = candleBuilder.update(data.tick);
+    const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
+    updateSignalFromCandles(allCandles);
   }
   if (data.msg_type === "balance" && data.balance) {
     updateAccountSummary(data.balance);
@@ -369,7 +536,35 @@ function onSymbolChange() {
     ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
   }
 
+  candleBuilder.reset();
+  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
+  loadTickHistory(symbol).catch(() => {});
   loadContractsFor(symbol).catch(() => {});
+}
+
+async function loadTickHistory(symbol) {
+  if (!symbol) return;
+  try {
+    const res = await wsRequest({
+      ticks_history: symbol,
+      end: "latest",
+      count: 1200,
+      style: "ticks",
+    });
+    const history = res.history || {};
+    const prices = history.prices || [];
+    const times = history.times || [];
+    const len = Math.min(prices.length, times.length);
+    for (let i = 0; i < len; i++) {
+      candleBuilder.update({ epoch: times[i], quote: prices[i] });
+    }
+    const built = candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+    updateSignalFromCandles(built);
+  } catch (err) {
+    setStatus(err?.message || "History load failed", true);
+  }
 }
 
 function parseDurationToSeconds(value) {
@@ -714,6 +909,14 @@ function init() {
   tradeResultsEl = document.getElementById("tradeResults");
   toggleProposalsBtn = document.getElementById("toggleProposals");
   toggleResultsBtn = document.getElementById("toggleResults");
+  sigTrendEl = document.getElementById("sigTrend");
+  sigDivEl = document.getElementById("sigDiv");
+  sigSweepEl = document.getElementById("sigSweep");
+  sigConfEl = document.getElementById("sigConf");
+  sigSignalEl = document.getElementById("sigSignal");
+  sigTimeEl = document.getElementById("sigTime");
+  signalBodyEl = document.getElementById("signalBody");
+  toggleSignalBtn = document.getElementById("toggleSignal");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -802,6 +1005,14 @@ function init() {
       const isCollapsed = tradeResultsEl.classList.toggle("collapsed");
       toggleResultsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleResultsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleSignalBtn && signalBodyEl) {
+    toggleSignalBtn.addEventListener("click", () => {
+      const isCollapsed = signalBodyEl.classList.toggle("collapsed");
+      toggleSignalBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
 

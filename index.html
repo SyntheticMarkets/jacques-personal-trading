@@ -72,6 +72,39 @@
 
       <section class="card trade-section">
         <header class="card-head">
+          <h2>Signal</h2>
+          <button id="toggleSignal" class="ghost small" aria-expanded="true">Collapse</button>
+        </header>
+        <div id="signalBody" class="signal-grid">
+          <div class="signal-item">
+            <div class="field-label">Trend</div>
+            <div id="sigTrend" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Divergence</div>
+            <div id="sigDiv" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Sweep</div>
+            <div id="sigSweep" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Confidence</div>
+            <div id="sigConf" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Signal</div>
+            <div id="sigSignal" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Last Update</div>
+            <div id="sigTime" class="field-value">--</div>
+          </div>
+        </div>
+      </section>
+
+      <section class="card trade-section">
+        <header class="card-head">
           <h2>Trade proposals</h2>
           <button id="toggleProposals" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
@@ -85,6 +118,7 @@
         </header>
         <div id="tradeResults" class="trade-list"></div>
       </section>
+
     </main>
 
     <script src="app.js"></script>
