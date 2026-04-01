@@ -287,7 +287,7 @@ function renderMiniChart(candles) {
     ctx.stroke();
 
     if (isLarge) {
-      ctx.fillStyle = up ? "#2d8cff" : "#ff9f1a";
+      ctx.fillStyle = up ? "#2d8cff" : "#f2f2e9";
     } else {
       ctx.fillStyle = up ? "#0db787" : "#e15b64";
     }
@@ -1222,7 +1222,7 @@ function init() {
   }, { passive: false });
 
   zoomInBtn?.addEventListener("click", () => {
-    chartPoints = Math.max(20, chartPoints - 10);
+    chartPoints = Math.max(10, chartPoints - 10);
     const built = candleBuilder.currentCandle
       ? [...candleBuilder.candles, candleBuilder.currentCandle]
       : candleBuilder.candles;
@@ -1230,7 +1230,7 @@ function init() {
   });
 
   zoomOutBtn?.addEventListener("click", () => {
-    chartPoints = Math.min(200, chartPoints + 10);
+    chartPoints = Math.min(300, chartPoints + 10);
     const built = candleBuilder.currentCandle
       ? [...candleBuilder.candles, candleBuilder.currentCandle]
       : candleBuilder.candles;
