@@ -72,6 +72,8 @@ let toggleSignalBtn;
 let chartBodyEl;
 let toggleChartBtn;
 let miniChartCanvas;
+let zoomInBtn;
+let zoomOutBtn;
 
 class CandleBuilder {
   constructor(timeframe = 60) {
@@ -1085,6 +1087,8 @@ function init() {
   chartBodyEl = document.getElementById("chartBody");
   toggleChartBtn = document.getElementById("toggleChart");
   miniChartCanvas = document.getElementById("miniChart");
+  zoomInBtn = document.getElementById("zoomIn");
+  zoomOutBtn = document.getElementById("zoomOut");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -1216,6 +1220,22 @@ function init() {
       : candleBuilder.candles;
     renderMiniChart(built);
   }, { passive: false });
+
+  zoomInBtn?.addEventListener("click", () => {
+    chartPoints = Math.max(20, chartPoints - 10);
+    const built = candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+    renderMiniChart(built);
+  });
+
+  zoomOutBtn?.addEventListener("click", () => {
+    chartPoints = Math.min(200, chartPoints + 10);
+    const built = candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+    renderMiniChart(built);
+  });
 
   if (accountSummary && accountPanel) {
     accountSummary.addEventListener("click", () => {

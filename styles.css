@@ -367,6 +367,12 @@ button.small {
   margin: 0;
 }
 
+.chart-controls {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
 .chart-body {
   margin-top: 6px;
   background: #0f141c;

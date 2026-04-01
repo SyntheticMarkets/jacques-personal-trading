@@ -103,7 +103,11 @@
         </div>
         <div class="card-head signal-chart-head">
           <h3>Mini Chart</h3>
-          <button id="toggleChart" class="ghost small" aria-expanded="true">Collapse</button>
+          <div class="chart-controls">
+            <button id="zoomOut" class="ghost small" type="button">-</button>
+            <button id="zoomIn" class="ghost small" type="button">+</button>
+            <button id="toggleChart" class="ghost small" aria-expanded="true">Collapse</button>
+          </div>
         </div>
         <div id="chartBody" class="chart-body">
           <canvas id="miniChart" aria-label="Mini chart"></canvas>
