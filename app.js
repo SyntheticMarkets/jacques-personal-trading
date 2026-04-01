@@ -81,6 +81,9 @@ let zoomOutBtn;
 let autoToggleEl;
 let autoAccountSelect;
 let autoResultsEl;
+let autoBodyEl;
+let toggleAutoBtn;
+let toggleAutoResultsBtn;
 
 class CandleBuilder {
   constructor(timeframe = 60) {
@@ -1233,6 +1236,9 @@ function init() {
   autoToggleEl = document.getElementById("autoToggle");
   autoAccountSelect = document.getElementById("autoAccountSelect");
   autoResultsEl = document.getElementById("autoResults");
+  autoBodyEl = document.getElementById("autoBody");
+  toggleAutoBtn = document.getElementById("toggleAuto");
+  toggleAutoResultsBtn = document.getElementById("toggleAutoResults");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -1339,6 +1345,22 @@ function init() {
     });
   }
 
+  if (toggleAutoBtn && autoBodyEl) {
+    toggleAutoBtn.addEventListener("click", () => {
+      const isCollapsed = autoBodyEl.classList.toggle("collapsed");
+      toggleAutoBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleAutoBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleAutoResultsBtn && autoResultsEl) {
+    toggleAutoResultsBtn.addEventListener("click", () => {
+      const isCollapsed = autoResultsEl.classList.toggle("collapsed");
+      toggleAutoResultsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleAutoResultsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
   if (toggleChartBtn && chartBodyEl) {
     toggleChartBtn.addEventListener("click", () => {
       const isCollapsed = chartBodyEl.classList.toggle("collapsed");
@@ -1390,6 +1412,15 @@ function init() {
 
   autoAccountSelect?.addEventListener("change", () => {
     autoTradeLoginId = autoAccountSelect.value;
+    if (autoTradeLoginId) {
+      const account = storedAccounts.find((acc) => acc.loginid === autoTradeLoginId);
+      if (account) {
+        activeLoginId = account.loginid;
+        activeToken = account.token;
+        authorizeWithToken(activeToken).catch(() => {});
+        renderAccountList();
+      }
+    }
   });
 
   if (accountSummary && accountPanel) {
@@ -1417,6 +1448,7 @@ function init() {
     if (!account) return;
     activeLoginId = account.loginid;
     activeToken = account.token;
+    autoTradeLoginId = account.loginid;
     renderAccountList();
     await authorizeWithToken(activeToken);
   });
@@ -1463,6 +1495,22 @@ function init() {
   }
   renderTradeResults();
   renderAutoTradeResults();
+
+  // Default collapsed state for sections
+  tradeBody?.classList.add("collapsed");
+  toggleTradeBtn && (toggleTradeBtn.textContent = "Expand", toggleTradeBtn.setAttribute("aria-expanded", "false"));
+  tradeListEl?.classList.add("collapsed");
+  toggleProposalsBtn && (toggleProposalsBtn.textContent = "Expand", toggleProposalsBtn.setAttribute("aria-expanded", "false"));
+  tradeResultsEl?.classList.add("collapsed");
+  toggleResultsBtn && (toggleResultsBtn.textContent = "Expand", toggleResultsBtn.setAttribute("aria-expanded", "false"));
+  signalBodyEl?.classList.add("collapsed");
+  toggleSignalBtn && (toggleSignalBtn.textContent = "Expand", toggleSignalBtn.setAttribute("aria-expanded", "false"));
+  chartBodyEl?.classList.add("collapsed");
+  toggleChartBtn && (toggleChartBtn.textContent = "Expand", toggleChartBtn.setAttribute("aria-expanded", "false"));
+  autoBodyEl?.classList.add("collapsed");
+  toggleAutoBtn && (toggleAutoBtn.textContent = "Expand", toggleAutoBtn.setAttribute("aria-expanded", "false"));
+  autoResultsEl?.classList.add("collapsed");
+  toggleAutoResultsBtn && (toggleAutoResultsBtn.textContent = "Expand", toggleAutoResultsBtn.setAttribute("aria-expanded", "false"));
 }
 
 window.addEventListener("DOMContentLoaded", init);

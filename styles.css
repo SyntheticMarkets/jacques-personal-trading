@@ -378,6 +378,11 @@ button.small {
   gap: 10px;
 }
 
+.auto-row.collapsed {
+  max-height: 0;
+  overflow: hidden;
+}
+
 .auto-toggle {
   display: inline-flex;
   align-items: center;

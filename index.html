@@ -133,8 +133,9 @@
       <section class="card trade-section">
         <header class="card-head">
           <h2>Auto trade</h2>
+          <button id="toggleAuto" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
-        <div class="auto-row">
+        <div id="autoBody" class="auto-row">
           <label class="auto-toggle">
             <input id="autoToggle" type="checkbox" />
             <span>Enable auto trade</span>
@@ -148,6 +149,7 @@
       <section class="card trade-section">
         <header class="card-head">
           <h2>Auto trade results</h2>
+          <button id="toggleAutoResults" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
         <div id="autoResults" class="trade-list"></div>
       </section>
