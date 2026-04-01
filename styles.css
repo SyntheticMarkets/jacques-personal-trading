@@ -373,6 +373,23 @@ button.small {
   align-items: center;
 }
 
+.auto-row {
+  display: grid;
+  gap: 10px;
+}
+
+.auto-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.auto-toggle input {
+  accent-color: #0db787;
+}
+
 .chart-body {
   margin-top: 6px;
   background: #0f141c;

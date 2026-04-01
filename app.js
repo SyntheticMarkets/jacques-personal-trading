@@ -61,6 +61,10 @@ let activeLoginId = null;
 let isAuthorized = false;
 let tradeResults = [];
 let openContractSubs = new Map();
+let autoTradeResults = [];
+let autoTradeEnabled = false;
+let autoTradeLoginId = "";
+let lastAutoTradeCandle = null;
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -74,6 +78,9 @@ let toggleChartBtn;
 let miniChartCanvas;
 let zoomInBtn;
 let zoomOutBtn;
+let autoToggleEl;
+let autoAccountSelect;
+let autoResultsEl;
 
 class CandleBuilder {
   constructor(timeframe = 60) {
@@ -230,6 +237,95 @@ function updateSignalFromCandles(candles) {
 
   updateSignalUI(lastSignalState);
   renderMiniChart(candles);
+
+  if (autoTradeEnabled && lastSignalState.signal && candles.length >= MIN_SIGNAL_CANDLES) {
+    const candleTime = candleBuilder.currentCandle?.time || candles[candles.length - 1]?.time;
+    if (candleTime && candleTime !== lastAutoTradeCandle) {
+      tryAutoTrade();
+      lastAutoTradeCandle = candleTime;
+    }
+  }
+}
+
+function tryAutoTrade() {
+  if (!autoTradeEnabled) return;
+  if (!autoTradeLoginId) {
+    setStatus("Select an account for auto trade", true);
+    return;
+  }
+  const proposal = proposals[0];
+  if (!proposal || !proposal.proposalId) {
+    setStatus("Auto trade: proposal not ready", true);
+    return;
+  }
+
+  const trend = lastSignalState.trend;
+  const divergence = lastSignalState.divergence;
+  const sweep = lastSignalState.sweep;
+  const confidence = Number(lastSignalState.confidence || 0);
+  const signal = lastSignalState.signal;
+
+  const buyConditions =
+    trend === "UP" &&
+    divergence === "BUY" &&
+    sweep === "SWEEP_HIGH" &&
+    confidence >= 60 &&
+    signal === "BUY";
+  const sellConditions =
+    trend === "DOWN" &&
+    divergence === "SELL" &&
+    sweep === "SWEEP_LOW" &&
+    confidence >= 60 &&
+    signal === "SELL";
+
+  if (!(buyConditions || sellConditions)) return;
+
+  const account = storedAccounts.find((acc) => acc.loginid === autoTradeLoginId);
+  if (!account) {
+    setStatus("Auto trade: account not found", true);
+    return;
+  }
+
+  const price = proposal.askPrice ?? Number(stakeInput?.value || "0");
+  setStatus("Auto trade: placing...");
+  authorizeWithToken(account.token)
+    .then(() => wsRequest({ buy: proposal.proposalId, price }))
+    .then((res) => {
+      const buy = res.buy;
+      const contractId = buy?.contract_id ?? "--";
+      const buyPrice = buy?.buy_price ?? price;
+      autoTradeResults.unshift({
+        time: Date.now(),
+        success: true,
+        contractId,
+        price: buyPrice,
+        profit: null,
+        direction: currentDirection,
+        isSold: false,
+        expiry: null,
+      });
+      autoTradeResults = autoTradeResults.slice(0, 20);
+      renderAutoTradeResults();
+      if (contractId && contractId !== "--") {
+        subscribeOpenContract(contractId);
+      }
+      setStatus(`Auto trade opened. Contract ${contractId}`);
+    })
+    .catch((err) => {
+      autoTradeResults.unshift({
+        time: Date.now(),
+        success: false,
+        contractId: null,
+        price: price,
+        profit: null,
+        direction: currentDirection,
+        isSold: true,
+        expiry: null,
+      });
+      autoTradeResults = autoTradeResults.slice(0, 20);
+      renderAutoTradeResults();
+      setStatus(err?.message || "Auto trade failed", true);
+    });
 }
 
 function renderMiniChart(candles) {
@@ -551,6 +647,15 @@ function renderAccountList() {
       accountSummary.innerHTML = `<span class="acct-label">${current.loginid}</span><span>${current.currency || ""}</span>`;
     }
   }
+
+  if (autoAccountSelect) {
+    autoAccountSelect.innerHTML = `<option value="">Select account</option>` + storedAccounts
+      .map((acc) => `<option value="${acc.loginid}">${acc.loginid} ${acc.currency || ""}</option>`)
+      .join("");
+    if (autoTradeLoginId) {
+      autoAccountSelect.value = autoTradeLoginId;
+    }
+  }
 }
 
 function subscribeOpenContract(contractId) {
@@ -566,7 +671,8 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   }
 
   const index = tradeResults.findIndex((t) => t.contractId === contractId);
-  if (index === -1) return;
+  const autoIndex = autoTradeResults.findIndex((t) => t.contractId === contractId);
+  if (index === -1 && autoIndex === -1) return;
 
   const buyPrice = contract.buy_price ?? tradeResults[index].price ?? null;
   const sellPrice = contract.sell_price ?? null;
@@ -574,14 +680,26 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   const isSold = contract.is_sold ?? contract.status === "sold";
   const expiry = contract.date_expiry ?? tradeResults[index].expiry ?? null;
 
-  tradeResults[index] = {
-    ...tradeResults[index],
-    price: buyPrice,
-    profit,
-    isSold,
-    expiry,
-    success: isSold ? (profit != null ? profit >= 0 : tradeResults[index].success) : tradeResults[index].success,
-  };
+  if (index !== -1) {
+    tradeResults[index] = {
+      ...tradeResults[index],
+      price: buyPrice,
+      profit,
+      isSold,
+      expiry,
+      success: isSold ? (profit != null ? profit >= 0 : tradeResults[index].success) : tradeResults[index].success,
+    };
+  }
+  if (autoIndex !== -1) {
+    autoTradeResults[autoIndex] = {
+      ...autoTradeResults[autoIndex],
+      price: buyPrice,
+      profit,
+      isSold,
+      expiry,
+      success: isSold ? (profit != null ? profit >= 0 : autoTradeResults[autoIndex].success) : autoTradeResults[autoIndex].success,
+    };
+  }
 
   if (isSold && subscriptionId) {
     ws.send(JSON.stringify({ forget: subscriptionId }));
@@ -589,6 +707,7 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   }
 
   renderTradeResults();
+  renderAutoTradeResults();
 }
 
 async function authorizeWithToken(token) {
@@ -1028,6 +1147,28 @@ function renderTradeResults() {
   }).join("");
 }
 
+function renderAutoTradeResults() {
+  if (!autoResultsEl) return;
+  if (!autoTradeResults.length) {
+    autoResultsEl.innerHTML = "<div class=\"trade-meta\">No auto trades yet</div>";
+    return;
+  }
+  autoResultsEl.innerHTML = autoTradeResults.map((item) => {
+    const time = new Date(item.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    const status = item.success ? "Success" : "Failed";
+    const profitText = item.profit != null ? item.profit.toFixed(2) : "--";
+    const priceText = item.price != null ? item.price.toFixed(2) : "--";
+    const timeLeft = item.expiry && !item.isSold ? ` • Time left: ${formatCountdown(item.expiry)}` : "";
+    return `
+      <div class="trade-btn ${item.direction === "CALL" ? "higher" : "lower"}">
+        <div class="trade-title">${status} • ${time}${timeLeft}</div>
+        <div class="trade-meta">Contract: ${item.contractId || "--"}</div>
+        <div class="trade-meta">Price: ${priceText} • Profit: ${profitText}</div>
+      </div>
+    `;
+  }).join("");
+}
+
 function startCountdowns() {
   if (countdownTimer) clearInterval(countdownTimer);
   countdownTimer = setInterval(() => {
@@ -1089,6 +1230,9 @@ function init() {
   miniChartCanvas = document.getElementById("miniChart");
   zoomInBtn = document.getElementById("zoomIn");
   zoomOutBtn = document.getElementById("zoomOut");
+  autoToggleEl = document.getElementById("autoToggle");
+  autoAccountSelect = document.getElementById("autoAccountSelect");
+  autoResultsEl = document.getElementById("autoResults");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -1237,6 +1381,17 @@ function init() {
     renderMiniChart(built);
   });
 
+  autoToggleEl?.addEventListener("change", () => {
+    autoTradeEnabled = autoToggleEl.checked;
+    if (autoTradeEnabled && !storedAccounts.length) {
+      window.location.href = OAUTH_URL;
+    }
+  });
+
+  autoAccountSelect?.addEventListener("change", () => {
+    autoTradeLoginId = autoAccountSelect.value;
+  });
+
   if (accountSummary && accountPanel) {
     accountSummary.addEventListener("click", () => {
       if (!storedAccounts.length) {
@@ -1307,6 +1462,7 @@ function init() {
     authorizeWithToken(activeToken).catch(() => {});
   }
   renderTradeResults();
+  renderAutoTradeResults();
 }
 
 window.addEventListener("DOMContentLoaded", init);
