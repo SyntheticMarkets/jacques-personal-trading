@@ -69,6 +69,9 @@ let sigSignalEl;
 let sigTimeEl;
 let signalBodyEl;
 let toggleSignalBtn;
+let chartBodyEl;
+let toggleChartBtn;
+let miniChartCanvas;
 
 class CandleBuilder {
   constructor(timeframe = 60) {
@@ -109,6 +112,7 @@ class CandleBuilder {
 const candleBuilder = new CandleBuilder(60);
 const MIN_SIGNAL_CANDLES = 20;
 const MAX_CANDLES = 200;
+let chartPoints = 60;
 let lastSignalState = {
   trend: "--",
   divergence: "--",
@@ -223,6 +227,123 @@ function updateSignalFromCandles(candles) {
   }
 
   updateSignalUI(lastSignalState);
+  renderMiniChart(candles);
+}
+
+function renderMiniChart(candles) {
+  if (!miniChartCanvas || !candles.length) return;
+  const ctx = miniChartCanvas.getContext("2d");
+  if (!ctx) return;
+
+  const points = candles.slice(-chartPoints);
+  const lows = points.map((c) => c.low);
+  const highs = points.map((c) => c.high);
+  const min = Math.min(...lows);
+  const max = Math.max(...highs);
+  const width = miniChartCanvas.clientWidth;
+  const height = miniChartCanvas.clientHeight;
+  const leftPad = 6;
+  const rightPad = 72;
+  const topPad = 6;
+  const bottomPad = 6;
+
+  if (width === 0 || height === 0) return;
+  if (miniChartCanvas.width !== width || miniChartCanvas.height !== height) {
+    miniChartCanvas.width = width;
+    miniChartCanvas.height = height;
+  }
+
+  ctx.clearRect(0, 0, width, height);
+  ctx.strokeStyle = "#1f2735";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(leftPad, height - bottomPad - 0.5);
+  ctx.lineTo(width - rightPad, height - bottomPad - 0.5);
+  ctx.stroke();
+
+  if (max === min) return;
+  // Candlesticks
+  const plotW = width - leftPad - rightPad;
+  const plotH = height - topPad - bottomPad;
+  const candleGap = 2;
+  const candleW = Math.max(2, Math.floor(plotW / points.length) - candleGap);
+  points.forEach((c, i) => {
+    const x = leftPad + i * (plotW / points.length) + candleGap / 2;
+    const openY = height - bottomPad - ((c.open - min) / (max - min)) * plotH;
+    const closeY = height - bottomPad - ((c.close - min) / (max - min)) * plotH;
+    const highY = height - bottomPad - ((c.high - min) / (max - min)) * plotH;
+    const lowY = height - bottomPad - ((c.low - min) / (max - min)) * plotH;
+    const up = c.close >= c.open;
+    const barrierOffset = Number(barrierInput?.value || "0");
+    const bodySize = Math.abs(c.close - c.open);
+    const isLarge = barrierOffset > 0 && bodySize >= barrierOffset;
+    ctx.strokeStyle = "#3a465a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(x + candleW / 2, highY);
+    ctx.lineTo(x + candleW / 2, lowY);
+    ctx.stroke();
+
+    if (isLarge) {
+      ctx.fillStyle = up ? "#2d8cff" : "#ff9f1a";
+    } else {
+      ctx.fillStyle = up ? "#0db787" : "#e15b64";
+    }
+    const bodyY = Math.min(openY, closeY);
+    const bodyH = Math.max(2, Math.abs(closeY - openY));
+    ctx.fillRect(x, bodyY, candleW, bodyH);
+  });
+
+  // Current price dot and right-side labels
+  if (points.length >= 2) {
+    const last = points[points.length - 1];
+    const prev = points[points.length - 2];
+    const lastY = height - bottomPad - ((last.close - min) / (max - min)) * (height - topPad - bottomPad);
+    const lastX = width - rightPad;
+
+    let dotColor = "#0db787";
+    if (last.close > prev.high) dotColor = "#2d8cff";
+    else if (last.close < prev.low) dotColor = "#e15b64";
+
+    ctx.strokeStyle = dotColor;
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(leftPad, lastY);
+    ctx.lineTo(width - rightPad, lastY);
+    ctx.stroke();
+
+    ctx.fillStyle = dotColor;
+    ctx.beginPath();
+    ctx.arc(lastX, lastY, 2.2, 0, Math.PI * 2);
+    ctx.fill();
+
+    const highY = height - bottomPad - ((prev.high - min) / (max - min)) * (height - topPad - bottomPad);
+    const lowY = height - bottomPad - ((prev.low - min) / (max - min)) * (height - topPad - bottomPad);
+    const labelX = width - rightPad + 8;
+    ctx.fillStyle = "#9aa7b8";
+    ctx.font = "10px Inter, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const diff =
+      last.close > prev.high ? last.close - prev.high :
+      last.close < prev.low ? prev.low - last.close : 0;
+    const priceLabel = `${formatPrice(last.close, currentPip)}`;
+    const diffLabel = diff > 0 ? `Δ ${formatPrice(diff, currentPip)}` : "Δ 0";
+
+    ctx.fillStyle = dotColor;
+    const priceY = lastY - 10;
+    const diffY = lastY + 10;
+    if (Math.abs(priceY - highY) < 10 || Math.abs(priceY - lowY) < 10) {
+      ctx.fillText(priceLabel, labelX, lastY - 20);
+    } else {
+      ctx.fillText(priceLabel, labelX, priceY);
+    }
+    if (Math.abs(diffY - highY) < 10 || Math.abs(diffY - lowY) < 10) {
+      ctx.fillText(diffLabel, labelX, lastY + 20);
+    } else {
+      ctx.fillText(diffLabel, labelX, diffY);
+    }
+  }
 }
 
 function setStatus(msg, isError = false) {
@@ -961,6 +1082,9 @@ function init() {
   sigTimeEl = document.getElementById("sigTime");
   signalBodyEl = document.getElementById("signalBody");
   toggleSignalBtn = document.getElementById("toggleSignal");
+  chartBodyEl = document.getElementById("chartBody");
+  toggleChartBtn = document.getElementById("toggleChart");
+  miniChartCanvas = document.getElementById("miniChart");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
@@ -1066,6 +1190,32 @@ function init() {
       toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
+
+  if (toggleChartBtn && chartBodyEl) {
+    toggleChartBtn.addEventListener("click", () => {
+      const isCollapsed = chartBodyEl.classList.toggle("collapsed");
+      toggleChartBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleChartBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  window.addEventListener("resize", () => {
+    const built = candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+    renderMiniChart(built);
+  });
+
+  miniChartCanvas?.addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const delta = Math.sign(event.deltaY);
+    if (delta > 0) chartPoints = Math.min(200, chartPoints + 10);
+    else chartPoints = Math.max(20, chartPoints - 10);
+    const built = candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+    renderMiniChart(built);
+  }, { passive: false });
 
   if (accountSummary && accountPanel) {
     accountSummary.addEventListener("click", () => {

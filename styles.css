@@ -358,6 +358,36 @@ button.small {
   overflow: hidden;
 }
 
+.signal-chart-head {
+  margin-top: 10px;
+}
+
+.signal-chart-head h3 {
+  font-size: 12px;
+  margin: 0;
+}
+
+.chart-body {
+  margin-top: 6px;
+  background: #0f141c;
+  border: 1px solid #1d2635;
+  border-radius: 10px;
+  padding: 6px;
+}
+
+.chart-body.collapsed {
+  max-height: 0;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+}
+
+#miniChart {
+  width: 100%;
+  height: 120px;
+  display: block;
+}
+
 .trade-row {
   display: grid;
   grid-template-columns: 1fr auto;
