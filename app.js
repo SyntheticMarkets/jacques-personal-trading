@@ -1061,7 +1061,7 @@ function buildExpiries() {
   const step = baseMinutes * 60;
   const minHold = Math.max(minDurationSec, step);
   const firstAligned = Math.ceil((now + minHold) / step) * step;
-  proposalExpiries = Array.from({ length: 5 }, (_, i) => firstAligned + step * i);
+  proposalExpiries = Array.from({ length: 3 }, (_, i) => firstAligned + step * i);
   renderTradeList();
   scheduleProposalRefresh(true);
 }
