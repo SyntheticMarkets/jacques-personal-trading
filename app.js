@@ -75,6 +75,9 @@ let signalBodyEl;
 let toggleSignalBtn;
 let chartBodyEl;
 let toggleChartBtn;
+let chartTfLabelEl;
+let chartTfPickerEl;
+let chartTfSelectEl;
 let miniChartCanvas;
 let zoomInBtn;
 let zoomOutBtn;
@@ -85,8 +88,28 @@ let autoBodyEl;
 let toggleAutoBtn;
 let toggleAutoResultsBtn;
 
+const TIMEFRAME_OPTIONS = [
+  { seconds: 10, label: "10s" },
+  { seconds: 20, label: "20s" },
+  { seconds: 30, label: "30s" },
+  { seconds: 45, label: "45s" },
+  { seconds: 60, label: "1m" },
+  { seconds: 90, label: "1.5m" },
+  { seconds: 120, label: "2m" },
+  { seconds: 180, label: "3m" },
+  { seconds: 240, label: "4m" },
+  { seconds: 300, label: "5m" },
+  { seconds: 600, label: "10m" },
+  { seconds: 900, label: "15m" },
+  { seconds: 1200, label: "20m" },
+  { seconds: 1800, label: "30m" },
+  { seconds: 2700, label: "45m" },
+  { seconds: 3600, label: "1h" },
+];
+const DEFAULT_TIMEFRAME_SEC = 60;
+
 class CandleBuilder {
-  constructor(timeframe = 60) {
+  constructor(timeframe = DEFAULT_TIMEFRAME_SEC) {
     this.timeframe = timeframe;
     this.currentCandle = null;
     this.candles = [];
@@ -95,6 +118,23 @@ class CandleBuilder {
   reset() {
     this.currentCandle = null;
     this.candles = [];
+  }
+
+  setHistory(candles) {
+    const normalized = (candles || [])
+      .map((c) => ({
+        time: Number(c.time ?? c.epoch ?? 0),
+        open: Number(c.open),
+        high: Number(c.high),
+        low: Number(c.low),
+        close: Number(c.close),
+      }))
+      .filter((c) => c.time && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close))
+      .sort((a, b) => a.time - b.time);
+
+    const limited = normalized.slice(-MAX_CANDLES);
+    this.currentCandle = limited.length ? limited[limited.length - 1] : null;
+    this.candles = this.currentCandle ? limited.slice(0, -1) : limited;
   }
 
   update(tick) {
@@ -121,10 +161,16 @@ class CandleBuilder {
   }
 }
 
-const candleBuilder = new CandleBuilder(60);
+const candleBuilder = new CandleBuilder(DEFAULT_TIMEFRAME_SEC);
 const MIN_SIGNAL_CANDLES = 20;
-const MAX_CANDLES = 200;
-let chartPoints = 60;
+const MAX_CANDLES = 2000;
+let chartPoints = 24;
+let chartOffset = 0;
+let chartDragX = null;
+let chartGestureMoved = false;
+let chartMouseTapCount = 0;
+let chartLastMouseTapAt = 0;
+let chartLastTouchTapAt = 0;
 let lastSignalState = {
   trend: "--",
   divergence: "--",
@@ -241,7 +287,7 @@ function updateSignalFromCandles(candles) {
   updateSignalUI(lastSignalState);
   renderMiniChart(candles);
 
-  if (autoTradeEnabled && lastSignalState.signal && candles.length >= MIN_SIGNAL_CANDLES) {
+  if (autoTradeEnabled && lastSignalState.signal !== "--" && candles.length >= MIN_SIGNAL_CANDLES) {
     const candleTime = candleBuilder.currentCandle?.time || candles[candles.length - 1]?.time;
     if (candleTime && candleTime !== lastAutoTradeCandle) {
       tryAutoTrade();
@@ -250,15 +296,20 @@ function updateSignalFromCandles(candles) {
   }
 }
 
-function tryAutoTrade() {
+function setDirection(direction, { refresh = true } = {}) {
+  currentDirection = direction === "PUT" ? "PUT" : "CALL";
+  directionButtons.forEach((btn) => {
+    const isLower = btn.textContent.trim().toLowerCase() === "lower";
+    btn.classList.toggle("active", currentDirection === "PUT" ? isLower : !isLower);
+  });
+  renderTradeList();
+  if (refresh) scheduleProposalRefresh(true);
+}
+
+async function tryAutoTrade() {
   if (!autoTradeEnabled) return;
   if (!autoTradeLoginId) {
     setStatus("Select an account for auto trade", true);
-    return;
-  }
-  const proposal = proposals[0];
-  if (!proposal || !proposal.proposalId) {
-    setStatus("Auto trade: proposal not ready", true);
     return;
   }
 
@@ -271,17 +322,23 @@ function tryAutoTrade() {
   const buyConditions =
     trend === "UP" &&
     divergence === "BUY" &&
-    sweep === "SWEEP_HIGH" &&
+    sweep === "SWEEP_LOW" &&
     confidence >= 60 &&
     signal === "BUY";
   const sellConditions =
     trend === "DOWN" &&
     divergence === "SELL" &&
-    sweep === "SWEEP_LOW" &&
+    sweep === "SWEEP_HIGH" &&
     confidence >= 60 &&
     signal === "SELL";
 
   if (!(buyConditions || sellConditions)) return;
+  const direction = currentDirection;
+  const proposal = proposals[0];
+  if (!proposal || !proposal.proposalId) {
+    setStatus("Auto trade: proposal not ready", true);
+    return;
+  }
 
   const account = storedAccounts.find((acc) => acc.loginid === autoTradeLoginId);
   if (!account) {
@@ -303,7 +360,7 @@ function tryAutoTrade() {
         contractId,
         price: buyPrice,
         profit: null,
-        direction: currentDirection,
+        direction,
         isSold: false,
         expiry: null,
       });
@@ -321,7 +378,7 @@ function tryAutoTrade() {
         contractId: null,
         price: price,
         profit: null,
-        direction: currentDirection,
+        direction,
         isSold: true,
         expiry: null,
       });
@@ -332,29 +389,34 @@ function tryAutoTrade() {
 }
 
 function renderMiniChart(candles) {
-  if (!miniChartCanvas || !candles.length) return;
+  if (!miniChartCanvas) return;
   const ctx = miniChartCanvas.getContext("2d");
   if (!ctx) return;
+  const width = miniChartCanvas.clientWidth;
+  const height = miniChartCanvas.clientHeight;
+  if (width > 0 && height > 0 && (miniChartCanvas.width !== width || miniChartCanvas.height !== height)) {
+    miniChartCanvas.width = width;
+    miniChartCanvas.height = height;
+  }
+  ctx.clearRect(0, 0, miniChartCanvas.width, miniChartCanvas.height);
+  if (!candles.length) return;
 
-  const points = candles.slice(-chartPoints);
+  const maxOffset = Math.max(0, candles.length - chartPoints);
+  chartOffset = Math.max(0, Math.min(chartOffset, maxOffset));
+  const end = candles.length - chartOffset;
+  const start = Math.max(0, end - chartPoints);
+  const points = candles.slice(start, end);
+  if (!points.length) return;
   const lows = points.map((c) => c.low);
   const highs = points.map((c) => c.high);
   const min = Math.min(...lows);
   const max = Math.max(...highs);
-  const width = miniChartCanvas.clientWidth;
-  const height = miniChartCanvas.clientHeight;
   const leftPad = 6;
   const rightPad = 72;
   const topPad = 6;
   const bottomPad = 6;
 
   if (width === 0 || height === 0) return;
-  if (miniChartCanvas.width !== width || miniChartCanvas.height !== height) {
-    miniChartCanvas.width = width;
-    miniChartCanvas.height = height;
-  }
-
-  ctx.clearRect(0, 0, width, height);
   ctx.strokeStyle = "#1f2735";
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -445,12 +507,95 @@ function renderMiniChart(candles) {
       ctx.fillText(diffLabel, labelX, diffY);
     }
   }
+
+  const current = points[points.length - 1];
+  const candleSize = current ? Math.abs(current.close - current.open) : 0;
+  const sizeLabel = `Body ${formatPrice(candleSize, currentPip)}`;
+  ctx.fillStyle = "#9aa7b8";
+  ctx.font = "10px Inter, Segoe UI, sans-serif";
+  ctx.textAlign = "right";
+  ctx.textBaseline = "bottom";
+  ctx.fillText(sizeLabel, width - 8, height - 8);
+}
+
+function getBuiltCandles() {
+  return candleBuilder.currentCandle
+    ? [...candleBuilder.candles, candleBuilder.currentCandle]
+    : candleBuilder.candles;
+}
+
+function panChartByPixels(deltaX) {
+  const built = getBuiltCandles();
+  if (!miniChartCanvas || built.length <= chartPoints) {
+    renderMiniChart(built);
+    return;
+  }
+  const plotWidth = Math.max(1, miniChartCanvas.clientWidth - 78);
+  const pixelsPerCandle = plotWidth / Math.max(1, Math.min(chartPoints, built.length));
+  const candleShift = Math.round(deltaX / Math.max(1, pixelsPerCandle));
+  if (!candleShift) return;
+  const maxOffset = Math.max(0, built.length - chartPoints);
+  chartOffset = Math.max(0, Math.min(chartOffset + candleShift, maxOffset));
+  renderMiniChart(built);
 }
 
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
   statusEl.textContent = msg;
   statusEl.style.color = isError ? "#e15b64" : "#9aa7b8";
+}
+
+function getTimeframeLabel(seconds) {
+  return TIMEFRAME_OPTIONS.find((option) => option.seconds === seconds)?.label || `${seconds}s`;
+}
+
+function updateTimeframeUI() {
+  const label = getTimeframeLabel(candleBuilder.timeframe);
+  if (chartTfLabelEl) chartTfLabelEl.textContent = label;
+  if (chartTfSelectEl) chartTfSelectEl.value = String(candleBuilder.timeframe);
+}
+
+function hideTimeframePicker() {
+  chartTfPickerEl?.classList.add("hidden");
+}
+
+function showTimeframePicker() {
+  if (!chartTfPickerEl || !chartTfSelectEl) return;
+  chartTfPickerEl.classList.remove("hidden");
+  chartTfSelectEl.value = String(candleBuilder.timeframe);
+  chartTfSelectEl.focus();
+}
+
+function populateTimeframeOptions() {
+  if (!chartTfSelectEl) return;
+  chartTfSelectEl.innerHTML = TIMEFRAME_OPTIONS
+    .map((option) => `<option value="${option.seconds}">${option.label}</option>`)
+    .join("");
+  updateTimeframeUI();
+}
+
+async function setChartTimeframe(seconds) {
+  const next = Number(seconds);
+  if (!next || next === candleBuilder.timeframe) {
+    updateTimeframeUI();
+    hideTimeframePicker();
+    return;
+  }
+
+  candleBuilder.timeframe = next;
+  chartOffset = 0;
+  chartDragX = null;
+  chartGestureMoved = false;
+  lastAutoTradeCandle = null;
+  candleBuilder.reset();
+  updateTimeframeUI();
+  hideTimeframePicker();
+  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
+  renderMiniChart([]);
+
+  if (currentSymbol) {
+    await loadTickHistory(currentSymbol);
+  }
 }
 
 function connectWS() {
@@ -824,6 +969,7 @@ function onSymbolChange() {
   }
 
   candleBuilder.reset();
+  chartOffset = 0;
   updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
   loadTickHistory(symbol).catch(() => {});
   loadContractsFor(symbol).catch(() => {});
@@ -835,16 +981,29 @@ async function loadTickHistory(symbol) {
     const res = await wsRequest({
       ticks_history: symbol,
       end: "latest",
-      count: 1200,
-      style: "ticks",
+      count: MAX_CANDLES,
+      style: "candles",
+      granularity: candleBuilder.timeframe,
     });
-    const history = res.history || {};
-    const prices = history.prices || [];
-    const times = history.times || [];
-    const len = Math.min(prices.length, times.length);
-    for (let i = 0; i < len; i++) {
-      candleBuilder.update({ epoch: times[i], quote: prices[i] });
+
+    const candleHistory = Array.isArray(res.candles)
+      ? res.candles
+      : Array.isArray(res.history?.candles)
+        ? res.history.candles
+        : [];
+
+    if (candleHistory.length) {
+      candleBuilder.setHistory(candleHistory);
+    } else {
+      const history = res.history || {};
+      const prices = history.prices || [];
+      const times = history.times || [];
+      const len = Math.min(prices.length, times.length);
+      for (let i = 0; i < len; i++) {
+        candleBuilder.update({ epoch: times[i], quote: prices[i] });
+      }
     }
+
     const built = candleBuilder.currentCandle
       ? [...candleBuilder.candles, candleBuilder.currentCandle]
       : candleBuilder.candles;
@@ -1230,6 +1389,9 @@ function init() {
   toggleSignalBtn = document.getElementById("toggleSignal");
   chartBodyEl = document.getElementById("chartBody");
   toggleChartBtn = document.getElementById("toggleChart");
+  chartTfLabelEl = document.getElementById("chartTfLabel");
+  chartTfPickerEl = document.getElementById("chartTfPicker");
+  chartTfSelectEl = document.getElementById("chartTfSelect");
   miniChartCanvas = document.getElementById("miniChart");
   zoomInBtn = document.getElementById("zoomIn");
   zoomOutBtn = document.getElementById("zoomOut");
@@ -1248,6 +1410,7 @@ function init() {
 
   marketSelect.addEventListener("change", updateSymbols);
   symbolSelect.addEventListener("change", onSymbolChange);
+  populateTimeframeOptions();
   tradeListEl?.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -1370,36 +1533,102 @@ function init() {
   }
 
   window.addEventListener("resize", () => {
-    const built = candleBuilder.currentCandle
-      ? [...candleBuilder.candles, candleBuilder.currentCandle]
-      : candleBuilder.candles;
-    renderMiniChart(built);
+    renderMiniChart(getBuiltCandles());
+  });
+
+  document.addEventListener("pointerdown", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    if (chartTfPickerEl?.contains(target)) return;
+    if (chartBodyEl?.contains(target)) return;
+    hideTimeframePicker();
   });
 
   miniChartCanvas?.addEventListener("wheel", (event) => {
     event.preventDefault();
-    const delta = Math.sign(event.deltaY);
-    if (delta > 0) chartPoints = Math.min(200, chartPoints + 10);
-    else chartPoints = Math.max(20, chartPoints - 10);
-    const built = candleBuilder.currentCandle
-      ? [...candleBuilder.candles, candleBuilder.currentCandle]
-      : candleBuilder.candles;
+    const built = getBuiltCandles();
+    if (event.shiftKey) {
+      const step = Math.max(1, Math.floor(chartPoints / 6));
+      const direction = Math.sign(event.deltaY || event.deltaX);
+      const maxOffset = Math.max(0, built.length - chartPoints);
+      chartOffset = Math.max(0, Math.min(chartOffset + (direction * step), maxOffset));
+    } else {
+      const delta = Math.sign(event.deltaY);
+      if (delta > 0) chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
+      else chartPoints = Math.max(20, chartPoints - 10);
+      const maxOffset = Math.max(0, built.length - chartPoints);
+      chartOffset = Math.min(chartOffset, maxOffset);
+    }
     renderMiniChart(built);
   }, { passive: false });
 
+  miniChartCanvas?.addEventListener("pointerdown", (event) => {
+    chartDragX = event.clientX;
+    chartGestureMoved = false;
+    miniChartCanvas.setPointerCapture?.(event.pointerId);
+  });
+
+  miniChartCanvas?.addEventListener("pointermove", (event) => {
+    if (chartDragX == null) return;
+    const deltaX = chartDragX - event.clientX;
+    if (Math.abs(deltaX) < 4) return;
+    chartDragX = event.clientX;
+    chartGestureMoved = true;
+    panChartByPixels(deltaX);
+  });
+
+  miniChartCanvas?.addEventListener("pointerup", (event) => {
+    if (!chartGestureMoved) {
+      const now = Date.now();
+      if (event.pointerType === "mouse") {
+        chartMouseTapCount = now - chartLastMouseTapAt < 550 ? chartMouseTapCount + 1 : 1;
+        chartLastMouseTapAt = now;
+        if (chartMouseTapCount >= 3) {
+          chartMouseTapCount = 0;
+          showTimeframePicker();
+        }
+      } else {
+        if (now - chartLastTouchTapAt < 350) {
+          chartLastTouchTapAt = 0;
+          showTimeframePicker();
+        } else {
+          chartLastTouchTapAt = now;
+        }
+      }
+    }
+    chartDragX = null;
+    chartGestureMoved = false;
+  });
+
+  miniChartCanvas?.addEventListener("pointercancel", () => {
+    chartDragX = null;
+    chartGestureMoved = false;
+  });
+
+  miniChartCanvas?.addEventListener("pointerleave", () => {
+    chartDragX = null;
+    chartGestureMoved = false;
+  });
+
+  chartTfSelectEl?.addEventListener("change", () => {
+    setChartTimeframe(chartTfSelectEl.value).catch((err) => {
+      setStatus(err?.message || "Timeframe change failed", true);
+    });
+  });
+
   zoomInBtn?.addEventListener("click", () => {
     chartPoints = Math.max(10, chartPoints - 10);
-    const built = candleBuilder.currentCandle
-      ? [...candleBuilder.candles, candleBuilder.currentCandle]
-      : candleBuilder.candles;
+    const built = getBuiltCandles();
+    const maxOffset = Math.max(0, built.length - chartPoints);
+    chartOffset = Math.min(chartOffset, maxOffset);
     renderMiniChart(built);
   });
 
   zoomOutBtn?.addEventListener("click", () => {
-    chartPoints = Math.min(300, chartPoints + 10);
-    const built = candleBuilder.currentCandle
-      ? [...candleBuilder.candles, candleBuilder.currentCandle]
-      : candleBuilder.candles;
+    chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
+    const built = getBuiltCandles();
+    const maxOffset = Math.max(0, built.length - chartPoints);
+    chartOffset = Math.min(chartOffset, maxOffset);
     renderMiniChart(built);
   });
 
@@ -1468,11 +1697,8 @@ function init() {
 
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      directionButtons.forEach((b) => b.classList.remove("active"));
-      btn.classList.add("active");
-      currentDirection = btn.textContent.trim().toLowerCase() === "lower" ? "PUT" : "CALL";
-      scheduleProposalRefresh(true);
-      renderTradeList();
+      const direction = btn.textContent.trim().toLowerCase() === "lower" ? "PUT" : "CALL";
+      setDirection(direction);
     });
   });
 
