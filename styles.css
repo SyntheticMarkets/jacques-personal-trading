@@ -188,6 +188,10 @@ button.small {
   margin-bottom: 10px;
 }
 
+.proposal-direction {
+  margin-top: -2px;
+}
+
 .pill {
   border-radius: 12px;
   padding: 10px 0;

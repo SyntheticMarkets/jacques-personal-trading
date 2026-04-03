@@ -48,11 +48,6 @@
         </header>
 
         <div id="tradeBody" class="trade-body">
-          <div id="hlButtons" class="hl-buttons" role="group" aria-label="Higher or Lower">
-            <button class="pill active">Higher</button>
-            <button class="pill">Lower</button>
-          </div>
-
           <div id="quickRow" class="quick-row">
             <button class="pill" id="btn1m">1 min</button>
             <button class="pill" id="btn2m">2 min</button>
@@ -122,6 +117,10 @@
           <h2>Trade proposals</h2>
           <button id="toggleProposals" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
+        <div id="hlButtons" class="hl-buttons proposal-direction" role="group" aria-label="Higher or Lower">
+          <button class="pill active">Higher</button>
+          <button class="pill">Lower</button>
+        </div>
         <div id="tradeList" class="trade-list"></div>
       </section>
 

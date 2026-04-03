@@ -715,7 +715,7 @@ function setActiveTab(tabName) {
   });
 
   const isHL = tabName === "higher_lower";
-  hlButtons.style.display = isHL ? "grid" : "none";
+  if (hlButtons) hlButtons.style.display = isHL ? "grid" : "none";
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
 }
