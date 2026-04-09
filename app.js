@@ -75,6 +75,8 @@ let sigTimeEl;
 let sigRejectEl;
 let sigEntryEl;
 let sigLevelEl;
+let sigBlueEl;
+let sigWhiteEl;
 let signalBodyEl;
 let toggleSignalBtn;
 let chartBodyEl;
@@ -681,6 +683,11 @@ function updateFrameSignalUI(signalState) {
   phoneEl.classList.add("frame-neutral");
 }
 
+function updateVisibleCandleCountUI(blueCount, whiteCount) {
+  if (sigBlueEl) sigBlueEl.textContent = Number.isFinite(blueCount) ? String(blueCount) : "--";
+  if (sigWhiteEl) sigWhiteEl.textContent = Number.isFinite(whiteCount) ? String(whiteCount) : "--";
+}
+
 function getLiquidityPanelState(candles) {
   if (candles.length < MIN_SIGNAL_CANDLES) {
     return {
@@ -853,14 +860,31 @@ function renderMiniChart(candles) {
     miniChartCanvas.height = height;
   }
   ctx.clearRect(0, 0, miniChartCanvas.width, miniChartCanvas.height);
-  if (!candles.length) return;
+  if (!candles.length) {
+    updateVisibleCandleCountUI(null, null);
+    return;
+  }
 
   const maxOffset = Math.max(0, candles.length - chartPoints);
   chartOffset = Math.max(0, Math.min(chartOffset, maxOffset));
   const end = candles.length - chartOffset;
   const start = Math.max(0, end - chartPoints);
   const points = candles.slice(start, end);
-  if (!points.length) return;
+  if (!points.length) {
+    updateVisibleCandleCountUI(null, null);
+    return;
+  }
+  const barrierOffset = Number(barrierInput?.value || "0");
+  let blueCount = 0;
+  let whiteCount = 0;
+  points.forEach((candle) => {
+    const bodySize = Math.abs(candle.close - candle.open);
+    const isLarge = barrierOffset > 0 && bodySize >= barrierOffset;
+    if (!isLarge) return;
+    if (candle.close >= candle.open) blueCount += 1;
+    else whiteCount += 1;
+  });
+  updateVisibleCandleCountUI(blueCount, whiteCount);
   const lows = points.map((c) => c.low);
   const highs = points.map((c) => c.high);
   const min = Math.min(...lows);
@@ -891,7 +915,6 @@ function renderMiniChart(candles) {
     const highY = height - bottomPad - ((c.high - min) / (max - min)) * plotH;
     const lowY = height - bottomPad - ((c.low - min) / (max - min)) * plotH;
     const up = c.close >= c.open;
-    const barrierOffset = Number(barrierInput?.value || "0");
     const bodySize = Math.abs(c.close - c.open);
     const isLarge = barrierOffset > 0 && bodySize >= barrierOffset;
     ctx.strokeStyle = "#3a465a";
@@ -1857,6 +1880,8 @@ function init() {
   sigRejectEl = document.getElementById("sigReject");
   sigEntryEl = document.getElementById("sigEntry");
   sigLevelEl = document.getElementById("sigLevel");
+  sigBlueEl = document.getElementById("sigBlue");
+  sigWhiteEl = document.getElementById("sigWhite");
   signalBodyEl = document.getElementById("signalBody");
   toggleSignalBtn = document.getElementById("toggleSignal");
   chartBodyEl = document.getElementById("chartBody");
