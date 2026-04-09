@@ -426,7 +426,7 @@ function getSignalState(candles) {
     sweep: sweepState.sweepType ? `${sweepState.sweepLabel} ${sweepState.rejectionLabel}` : "--",
     confidence,
     signal,
-    time: current ? current.time * 1000 : Date.now(),
+    time: Date.now(),
     allowEntry,
     tradeDirection,
   };
