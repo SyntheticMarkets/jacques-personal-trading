@@ -181,6 +181,38 @@ button.small {
   opacity: 0;
 }
 
+.signal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  transition: max-height 200ms ease, opacity 200ms ease;
+  max-height: 500px;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.signal-grid.collapsed {
+  max-height: 0;
+  opacity: 0;
+}
+
+.signal-subcard {
+  background: #10151e;
+  border: 1px solid #202a3a;
+  border-radius: 12px;
+  padding: 10px;
+  margin-top: 10px;
+}
+
+.signal-subhead {
+  margin-bottom: 8px;
+}
+
+.signal-subhead h3 {
+  font-size: 12px;
+  margin: 0;
+}
+
 .hl-buttons {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -344,22 +376,11 @@ button.small {
   color: var(--red);
 }
 
-.signal-grid {
-  display: grid;
-  grid-template-columns: 1fr 1fr;
-  gap: 8px;
-}
-
 .signal-item {
   background: #10151e;
   border: 1px solid #1d2635;
   border-radius: 10px;
   padding: 8px 10px;
-}
-
-.signal-grid.collapsed {
-  max-height: 0;
-  overflow: hidden;
 }
 
 .signal-chart-head {

@@ -73,6 +73,14 @@ let sigSignalEl;
 let sigTimeEl;
 let signalBodyEl;
 let toggleSignalBtn;
+let sweepTrendEl;
+let sweepTypeEl;
+let sweepRejectEl;
+let sweepConfEl;
+let sweepEntryEl;
+let sweepLevelEl;
+let sweepBodyEl;
+let toggleSweepBtn;
 let chartBodyEl;
 let toggleChartBtn;
 let chartTfLabelEl;
@@ -164,6 +172,10 @@ class CandleBuilder {
 const candleBuilder = new CandleBuilder(DEFAULT_TIMEFRAME_SEC);
 const MIN_SIGNAL_CANDLES = 20;
 const MAX_CANDLES = 2000;
+const SIGNAL_STRUCTURE_LOOKBACK = 20;
+const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
+const SIGNAL_ENTRY_SECOND = 50;
+const MAX_AUTO_TRADES_PER_SESSION = 5;
 let chartPoints = 24;
 let chartOffset = 0;
 let chartDragX = null;
@@ -171,6 +183,7 @@ let chartGestureMoved = false;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
+let autoTradeSessionCount = 0;
 let lastSignalState = {
   trend: "--",
   divergence: "--",
@@ -178,7 +191,21 @@ let lastSignalState = {
   confidence: "--",
   signal: "--",
   time: null,
+  allowEntry: false,
+  tradeDirection: null,
 };
+let lastSweepState = {
+  trend: "--",
+  sweep: "--",
+  rejection: "--",
+  confidence: "--",
+  entry: "--",
+  level: "--",
+};
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value));
+}
 
 function calculateOBV(candles) {
   const obv = [0];
@@ -193,27 +220,47 @@ function calculateOBV(candles) {
   return obv;
 }
 
-function detectTrend(candles, length = 10) {
-  if (candles.length < length) return "SIDEWAYS";
-  const recent = candles.slice(-length);
-  const avg = recent.reduce((sum, c) => sum + c.close, 0) / length;
-  const last = recent[recent.length - 1].close;
-  if (last > avg) return "UP";
-  if (last < avg) return "DOWN";
-  return "SIDEWAYS";
+function averageRange(candles, lookback = SIGNAL_STRUCTURE_LOOKBACK) {
+  const sample = candles.slice(-lookback);
+  if (!sample.length) return 0;
+  return sample.reduce((sum, candle) => sum + Math.abs(candle.high - candle.low), 0) / sample.length;
 }
 
-function detectLiquiditySweep(candles) {
-  if (candles.length < 2) return null;
-  const last = candles[candles.length - 1];
-  const prev = candles[candles.length - 2];
-  if (last.high > prev.high && last.close < prev.high) return "SWEEP_HIGH";
-  if (last.low < prev.low && last.close > prev.low) return "SWEEP_LOW";
-  return null;
+function calculateEMA(values, period) {
+  if (!values.length) return null;
+  const k = 2 / (period + 1);
+  let ema = values[0];
+  for (let i = 1; i < values.length; i++) {
+    ema = (values[i] * k) + (ema * (1 - k));
+  }
+  return ema;
+}
+
+function getLevelThreshold(candles) {
+  const avg = averageRange(candles);
+  const pip = currentPip || 0;
+  const fallback = candles[candles.length - 1]?.close ? candles[candles.length - 1].close * 0.0001 : 0.0001;
+  return Math.max(pip * 2, avg * 0.15, fallback);
+}
+
+function detectTrend(candles) {
+  if (candles.length < 21) {
+    return { trend: "SIDEWAYS", ema9: null, ema21: null, trendStrength: 0 };
+  }
+  const closes = candles.map((c) => c.close);
+  const ema9 = calculateEMA(closes, 9);
+  const ema21 = calculateEMA(closes, 21);
+  const avg = averageRange(candles) || Math.abs(closes[closes.length - 1]) || 1;
+  const diff = Math.abs((ema9 || 0) - (ema21 || 0));
+  const trendStrength = clamp(diff / avg, 0, 1);
+  let trend = "SIDEWAYS";
+  if (ema9 > ema21) trend = "UP";
+  else if (ema9 < ema21) trend = "DOWN";
+  return { trend, ema9, ema21, trendStrength };
 }
 
 function detectDivergence(candles, obv, lookback = 5) {
-  if (candles.length < lookback + 1) return null;
+  if (candles.length < lookback + 1 || obv.length < candles.length) return null;
   const i = candles.length - 1;
   let priceHigh = -Infinity;
   let priceLow = Infinity;
@@ -227,64 +274,242 @@ function detectDivergence(candles, obv, lookback = 5) {
     obvLow = Math.min(obvLow, obv[j]);
   }
 
-  const curr = candles[i];
-  if (curr.high >= priceHigh && obv[i] < obvHigh) return "SELL";
-  if (curr.low <= priceLow && obv[i] > obvLow) return "BUY";
+  const current = candles[i];
+  if (current.high >= priceHigh && obv[i] < obvHigh) return "SELL";
+  if (current.low <= priceLow && obv[i] > obvLow) return "BUY";
   return null;
 }
 
-function calculateConfidence({ divergence, trend, sweep }) {
-  let score = 0;
-  if (divergence) score += 40;
-  if (divergence === "BUY" && trend === "UP") score += 20;
-  if (divergence === "SELL" && trend === "DOWN") score += 20;
-  if (sweep === "SWEEP_LOW" && divergence === "BUY") score += 20;
-  if (sweep === "SWEEP_HIGH" && divergence === "SELL") score += 20;
-  return score;
+function collectEqualLevels(candles, side, threshold) {
+  const recent = candles.slice(-SIGNAL_EQUAL_LEVEL_LOOKBACK);
+  const levels = [];
+  for (let i = 1; i < recent.length; i++) {
+    const current = side === "high" ? recent[i].high : recent[i].low;
+    const previous = side === "high" ? recent[i - 1].high : recent[i - 1].low;
+    if (Math.abs(current - previous) <= threshold) {
+      levels.push((current + previous) / 2);
+    }
+  }
+  return levels;
+}
+
+function analyzeRejection(candle) {
+  const upperWick = candle.high - Math.max(candle.open, candle.close);
+  const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+  const body = Math.abs(candle.close - candle.open);
+  const safeBody = Math.max(body, currentPip || 0.0001);
+  return {
+    upperWick,
+    lowerWick,
+    body,
+    safeBody,
+    strongSellRejection: upperWick > safeBody * 1.5,
+    strongBuyRejection: lowerWick > safeBody * 1.5,
+    bullishConfirm: candle.close > candle.open,
+    bearishConfirm: candle.close < candle.open,
+  };
+}
+
+function detectLiquiditySweepState(candles) {
+  if (candles.length < MIN_SIGNAL_CANDLES) {
+    return {
+      sweepType: null,
+      sweepLabel: "--",
+      rejectionLabel: "--",
+      referenceLevel: null,
+      penetration: 0,
+      wickStrength: 0,
+      candleStrength: 0,
+      levelStrength: 0,
+      rejection: null,
+    };
+  }
+
+  const current = candles[candles.length - 1];
+  const structureCandles = candles.slice(-(SIGNAL_STRUCTURE_LOOKBACK + 1), -1);
+  const previousHigh = Math.max(...structureCandles.map((c) => c.high));
+  const previousLow = Math.min(...structureCandles.map((c) => c.low));
+  const threshold = getLevelThreshold(structureCandles);
+  const equalHighs = collectEqualLevels(structureCandles, "high", threshold);
+  const equalLows = collectEqualLevels(structureCandles, "low", threshold);
+  const highLiquidity = equalHighs.length ? Math.max(previousHigh, ...equalHighs) : previousHigh;
+  const lowLiquidity = equalLows.length ? Math.min(previousLow, ...equalLows) : previousLow;
+  const rejection = analyzeRejection(current);
+  const avgRange = averageRange(structureCandles) || threshold || 1;
+
+  let sweepType = null;
+  let referenceLevel = null;
+  let penetration = 0;
+
+  if (current.high > highLiquidity && current.close < highLiquidity) {
+    sweepType = "SELL";
+    referenceLevel = highLiquidity;
+    penetration = current.high - highLiquidity;
+  } else if (current.low < lowLiquidity && current.close > lowLiquidity) {
+    sweepType = "BUY";
+    referenceLevel = lowLiquidity;
+    penetration = lowLiquidity - current.low;
+  }
+
+  const wick = sweepType === "SELL" ? rejection.upperWick : sweepType === "BUY" ? rejection.lowerWick : 0;
+  const wickStrength = sweepType ? clamp(wick / (rejection.safeBody * 3), 0, 1) : 0;
+  const candleStrength = clamp(rejection.safeBody / avgRange, 0, 1);
+  const levelStrength = sweepType ? clamp(penetration / avgRange, 0, 1) : 0;
+  let rejectionLabel = "WEAK";
+  if (sweepType === "BUY" && rejection.strongBuyRejection && rejection.bullishConfirm) rejectionLabel = "BUY REJECT";
+  if (sweepType === "SELL" && rejection.strongSellRejection && rejection.bearishConfirm) rejectionLabel = "SELL REJECT";
+
+  return {
+    sweepType,
+    sweepLabel: sweepType ? `SWEEP_${sweepType}` : "--",
+    rejectionLabel,
+    referenceLevel,
+    penetration,
+    wickStrength,
+    candleStrength,
+    levelStrength,
+    rejection,
+  };
+}
+
+function calculateConfidence({ trendStrength, wickStrength, candleStrength, levelStrength }) {
+  const score =
+    (trendStrength * 0.3) +
+    (wickStrength * 0.3) +
+    (candleStrength * 0.2) +
+    (levelStrength * 0.2);
+  return Math.round(clamp(score, 0, 1) * 100);
+}
+
+function getSignalState(candles) {
+  const trendState = detectTrend(candles);
+  const obv = calculateOBV(candles);
+  const divergence = detectDivergence(candles, obv);
+  const sweepState = detectLiquiditySweepState(candles);
+  const current = candles[candles.length - 1];
+  let confidence = calculateConfidence({
+    trendStrength: trendState.trendStrength,
+    wickStrength: sweepState.wickStrength,
+    candleStrength: sweepState.candleStrength,
+    levelStrength: sweepState.levelStrength,
+  });
+  if (divergence && divergence === sweepState.sweepType) {
+    confidence = Math.min(100, confidence + 15);
+  }
+  const allowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
+
+  let signal = "--";
+  let tradeDirection = null;
+  const rejection = sweepState.rejection;
+  const buyReady =
+    trendState.trend === "UP" &&
+    sweepState.sweepType === "BUY" &&
+    rejection?.strongBuyRejection &&
+    rejection?.bullishConfirm;
+  const sellReady =
+    trendState.trend === "DOWN" &&
+    sweepState.sweepType === "SELL" &&
+    rejection?.strongSellRejection &&
+    rejection?.bearishConfirm;
+
+  if (buyReady) {
+    signal = allowEntry ? "ENTER NOW BUY" : "WAIT BUY";
+    tradeDirection = "CALL";
+  } else if (sellReady) {
+    signal = allowEntry ? "ENTER NOW SELL" : "WAIT SELL";
+    tradeDirection = "PUT";
+  }
+
+  return {
+    trend: trendState.trend,
+    divergence: divergence || "--",
+    sweep: sweepState.sweepType ? `${sweepState.sweepLabel} ${sweepState.rejectionLabel}` : "--",
+    confidence,
+    signal,
+    time: current ? current.time * 1000 : Date.now(),
+    allowEntry,
+    tradeDirection,
+  };
 }
 
 function updateSignalUI({ trend, divergence, sweep, confidence, signal, time }) {
   if (sigTrendEl) sigTrendEl.textContent = trend || "--";
   if (sigDivEl) sigDivEl.textContent = divergence || "--";
   if (sigSweepEl) sigSweepEl.textContent = sweep || "--";
-  if (sigConfEl) sigConfEl.textContent = confidence != null ? `${confidence}%` : "--";
+  if (sigConfEl) sigConfEl.textContent = Number.isFinite(confidence) ? `${confidence}%` : "--";
   if (sigSignalEl) sigSignalEl.textContent = signal || "--";
   if (sigTimeEl) sigTimeEl.textContent = time ? new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
+}
+
+function updateLiquiditySweepUI({ trend, sweep, rejection, confidence, entry, level }) {
+  if (sweepTrendEl) sweepTrendEl.textContent = trend || "--";
+  if (sweepTypeEl) sweepTypeEl.textContent = sweep || "--";
+  if (sweepRejectEl) sweepRejectEl.textContent = rejection || "--";
+  if (sweepConfEl) sweepConfEl.textContent = Number.isFinite(confidence) ? `${confidence}%` : confidence || "--";
+  if (sweepEntryEl) sweepEntryEl.textContent = entry || "--";
+  if (sweepLevelEl) sweepLevelEl.textContent = level || "--";
+}
+
+function getLiquidityPanelState(candles) {
+  if (candles.length < MIN_SIGNAL_CANDLES) {
+    return {
+      trend: `BUILDING ${Math.min(100, Math.floor((candles.length / MIN_SIGNAL_CANDLES) * 100))}%`,
+      sweep: "--",
+      rejection: "--",
+      confidence: "--",
+      entry: "--",
+      level: "--",
+    };
+  }
+
+  const trendState = detectTrend(candles);
+  const sweepState = detectLiquiditySweepState(candles);
+  const confidence = calculateConfidence({
+    trendStrength: trendState.trendStrength,
+    wickStrength: sweepState.wickStrength,
+    candleStrength: sweepState.candleStrength,
+    levelStrength: sweepState.levelStrength,
+  });
+  const level = sweepState.referenceLevel != null ? formatPrice(sweepState.referenceLevel, currentPip) : "--";
+  let entry = "WAIT";
+  if (sweepState.sweepType === "BUY" && sweepState.rejection?.strongBuyRejection && sweepState.rejection?.bullishConfirm) {
+    entry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND ? "ENTER NOW BUY" : "WAIT BUY";
+  } else if (sweepState.sweepType === "SELL" && sweepState.rejection?.strongSellRejection && sweepState.rejection?.bearishConfirm) {
+    entry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND ? "ENTER NOW SELL" : "WAIT SELL";
+  }
+
+  return {
+    trend: trendState.trend,
+    sweep: sweepState.sweepLabel,
+    rejection: sweepState.rejectionLabel,
+    confidence,
+    entry,
+    level,
+  };
 }
 
 function updateSignalFromCandles(candles) {
   const allCandles = candles;
   const buildPct = Math.min(100, Math.floor((allCandles.length / MIN_SIGNAL_CANDLES) * 100));
-  const trend = allCandles.length >= 2
-    ? detectTrend(allCandles, Math.min(10, allCandles.length))
-    : `BUILDING ${buildPct}%`;
 
   if (allCandles.length >= MIN_SIGNAL_CANDLES) {
-    const obv = calculateOBV(allCandles);
-    const divergence = detectDivergence(allCandles, obv);
-    const sweep = detectLiquiditySweep(allCandles);
-    const confidence = calculateConfidence({ divergence, trend, sweep });
-    let signal = null;
-    if (divergence && confidence >= 60) {
-      if (currentDirection === "CALL" && divergence === "BUY") signal = "BUY";
-      if (currentDirection === "PUT" && divergence === "SELL") signal = "SELL";
-    }
-    lastSignalState = {
-      trend,
-      divergence: divergence || "--",
-      sweep: sweep || "--",
-      confidence,
-      signal: signal || "--",
-      time: Date.now(),
-    };
+    lastSignalState = getSignalState(allCandles);
   } else {
     lastSignalState = {
       ...lastSignalState,
       trend: `BUILDING ${buildPct}%`,
+      divergence: "--",
+      sweep: "--",
+      confidence: "--",
+      signal: "--",
+      allowEntry: false,
+      tradeDirection: null,
     };
   }
 
   updateSignalUI(lastSignalState);
+  lastSweepState = getLiquidityPanelState(allCandles);
+  updateLiquiditySweepUI(lastSweepState);
   renderMiniChart(candles);
 
   if (autoTradeEnabled && lastSignalState.signal !== "--" && candles.length >= MIN_SIGNAL_CANDLES) {
@@ -308,32 +533,26 @@ function setDirection(direction, { refresh = true } = {}) {
 
 async function tryAutoTrade() {
   if (!autoTradeEnabled) return;
+  if (autoTradeSessionCount >= MAX_AUTO_TRADES_PER_SESSION) {
+    setStatus(`Auto trade session limit reached (${MAX_AUTO_TRADES_PER_SESSION})`, true);
+    return;
+  }
   if (!autoTradeLoginId) {
     setStatus("Select an account for auto trade", true);
     return;
   }
-
-  const trend = lastSignalState.trend;
-  const divergence = lastSignalState.divergence;
-  const sweep = lastSignalState.sweep;
-  const confidence = Number(lastSignalState.confidence || 0);
   const signal = lastSignalState.signal;
+  const confidence = Number(lastSignalState.confidence || 0);
+  const direction = lastSignalState.tradeDirection;
 
-  const buyConditions =
-    trend === "UP" &&
-    divergence === "BUY" &&
-    sweep === "SWEEP_LOW" &&
-    confidence >= 60 &&
-    signal === "BUY";
-  const sellConditions =
-    trend === "DOWN" &&
-    divergence === "SELL" &&
-    sweep === "SWEEP_HIGH" &&
-    confidence >= 60 &&
-    signal === "SELL";
+  if (!lastSignalState.allowEntry || !signal.startsWith("ENTER NOW") || !direction || confidence < 60) return;
+  if (calcInFlight) return;
 
-  if (!(buyConditions || sellConditions)) return;
-  const direction = currentDirection;
+  if (currentDirection !== direction) {
+    setDirection(direction, { refresh: false });
+    await refreshProposals();
+  }
+
   const proposal = proposals[0];
   if (!proposal || !proposal.proposalId) {
     setStatus("Auto trade: proposal not ready", true);
@@ -369,6 +588,7 @@ async function tryAutoTrade() {
       if (contractId && contractId !== "--") {
         subscribeOpenContract(contractId);
       }
+      autoTradeSessionCount += 1;
       setStatus(`Auto trade opened. Contract ${contractId}`);
     })
     .catch((err) => {
@@ -1387,6 +1607,14 @@ function init() {
   sigTimeEl = document.getElementById("sigTime");
   signalBodyEl = document.getElementById("signalBody");
   toggleSignalBtn = document.getElementById("toggleSignal");
+  sweepTrendEl = document.getElementById("sweepTrend");
+  sweepTypeEl = document.getElementById("sweepType");
+  sweepRejectEl = document.getElementById("sweepReject");
+  sweepConfEl = document.getElementById("sweepConf");
+  sweepEntryEl = document.getElementById("sweepEntry");
+  sweepLevelEl = document.getElementById("sweepLevel");
+  sweepBodyEl = document.getElementById("sweepBody");
+  toggleSweepBtn = document.getElementById("toggleSweep");
   chartBodyEl = document.getElementById("chartBody");
   toggleChartBtn = document.getElementById("toggleChart");
   chartTfLabelEl = document.getElementById("chartTfLabel");
@@ -1505,6 +1733,14 @@ function init() {
       const isCollapsed = signalBodyEl.classList.toggle("collapsed");
       toggleSignalBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleSweepBtn && sweepBodyEl) {
+    toggleSweepBtn.addEventListener("click", () => {
+      const isCollapsed = sweepBodyEl.classList.toggle("collapsed");
+      toggleSweepBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleSweepBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
 
@@ -1731,6 +1967,8 @@ function init() {
   toggleResultsBtn && (toggleResultsBtn.textContent = "Expand", toggleResultsBtn.setAttribute("aria-expanded", "false"));
   signalBodyEl?.classList.add("collapsed");
   toggleSignalBtn && (toggleSignalBtn.textContent = "Expand", toggleSignalBtn.setAttribute("aria-expanded", "false"));
+  sweepBodyEl?.classList.add("collapsed");
+  toggleSweepBtn && (toggleSweepBtn.textContent = "Expand", toggleSweepBtn.setAttribute("aria-expanded", "false"));
   chartBodyEl?.classList.add("collapsed");
   toggleChartBtn && (toggleChartBtn.textContent = "Expand", toggleChartBtn.setAttribute("aria-expanded", "false"));
   autoBodyEl?.classList.add("collapsed");
