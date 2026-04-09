@@ -92,44 +92,32 @@
             <div id="sigSignal" class="field-value">--</div>
           </div>
           <div class="signal-item">
+            <div class="field-label">Rejection</div>
+            <div id="sigReject" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Entry</div>
+            <div id="sigEntry" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
+            <div class="field-label">Level</div>
+            <div id="sigLevel" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
             <div class="field-label">Last Update</div>
             <div id="sigTime" class="field-value">--</div>
           </div>
         </div>
-        <div class="signal-subcard">
-          <div class="card-head signal-subhead">
-            <h3>Liquidity Sweep</h3>
-            <button id="toggleSweep" class="ghost small" aria-expanded="true">Collapse</button>
-          </div>
-          <div id="sweepBody" class="signal-grid">
-            <div class="signal-item">
-              <div class="field-label">Trend</div>
-              <div id="sweepTrend" class="field-value">--</div>
-            </div>
-            <div class="signal-item">
-              <div class="field-label">Sweep</div>
-              <div id="sweepType" class="field-value">--</div>
-            </div>
-            <div class="signal-item">
-              <div class="field-label">Rejection</div>
-              <div id="sweepReject" class="field-value">--</div>
-            </div>
-            <div class="signal-item">
-              <div class="field-label">Confidence</div>
-              <div id="sweepConf" class="field-value">--</div>
-            </div>
-            <div class="signal-item">
-              <div class="field-label">Entry</div>
-              <div id="sweepEntry" class="field-value">--</div>
-            </div>
-            <div class="signal-item">
-              <div class="field-label">Level</div>
-              <div id="sweepLevel" class="field-value">--</div>
-            </div>
-          </div>
-        </div>
         <div class="card-head signal-chart-head">
-          <h3>Mini Chart <span id="chartTfLabel" class="chart-tf-label">1m</span></h3>
+          <div class="signal-chart-meta">
+            <h3>Mini Chart <span id="chartTfLabel" class="chart-tf-label">1m</span></h3>
+            <select id="trendModeSelect" class="field-input chart-mode-select" aria-label="Trend mode">
+              <option value="EMA">EMA Trend</option>
+              <option value="AVG">AVG Trend</option>
+              <option value="OBV">OBV Trend</option>
+              <option value="STACK">Stack Trend</option>
+            </select>
+          </div>
           <div class="chart-controls">
             <button id="zoomOut" class="ghost small" type="button">-</button>
             <button id="zoomIn" class="ghost small" type="button">+</button>

@@ -8,6 +8,7 @@ const OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&red
 
 let tabs;
 let hlButtons;
+let phoneEl;
 let barrierField;
 let quickRow;
 let marketSelect;
@@ -71,21 +72,17 @@ let sigSweepEl;
 let sigConfEl;
 let sigSignalEl;
 let sigTimeEl;
+let sigRejectEl;
+let sigEntryEl;
+let sigLevelEl;
 let signalBodyEl;
 let toggleSignalBtn;
-let sweepTrendEl;
-let sweepTypeEl;
-let sweepRejectEl;
-let sweepConfEl;
-let sweepEntryEl;
-let sweepLevelEl;
-let sweepBodyEl;
-let toggleSweepBtn;
 let chartBodyEl;
 let toggleChartBtn;
 let chartTfLabelEl;
 let chartTfPickerEl;
 let chartTfSelectEl;
+let trendModeSelectEl;
 let miniChartCanvas;
 let zoomInBtn;
 let zoomOutBtn;
@@ -176,6 +173,7 @@ const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
 const MAX_AUTO_TRADES_PER_SESSION = 5;
+const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK"];
 let chartPoints = 24;
 let chartOffset = 0;
 let chartDragX = null;
@@ -184,6 +182,7 @@ let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
 let autoTradeSessionCount = 0;
+let currentTrendMode = "EMA";
 let lastSignalState = {
   trend: "--",
   divergence: "--",
@@ -236,6 +235,24 @@ function calculateEMA(values, period) {
   return ema;
 }
 
+function calculateRSI(candles, period = 14) {
+  if (candles.length < period + 1) return null;
+  let gains = 0;
+  let losses = 0;
+
+  for (let i = candles.length - period; i < candles.length; i++) {
+    const change = candles[i].close - candles[i - 1].close;
+    if (change > 0) gains += change;
+    else losses += Math.abs(change);
+  }
+
+  const avgGain = gains / period;
+  const avgLoss = losses / period;
+  if (avgLoss === 0) return 100;
+  const rs = avgGain / avgLoss;
+  return 100 - (100 / (1 + rs));
+}
+
 function getLevelThreshold(candles) {
   const avg = averageRange(candles);
   const pip = currentPip || 0;
@@ -243,7 +260,22 @@ function getLevelThreshold(candles) {
   return Math.max(pip * 2, avg * 0.15, fallback);
 }
 
-function detectTrend(candles) {
+function detectAverageTrend(candles, length = 10) {
+  if (candles.length < length) {
+    return { trend: "SIDEWAYS", trendStrength: 0 };
+  }
+  const recent = candles.slice(-length);
+  const avgClose = recent.reduce((sum, candle) => sum + candle.close, 0) / recent.length;
+  const lastClose = recent[recent.length - 1].close;
+  const avgRange = averageRange(recent) || Math.abs(lastClose) || 1;
+  const distance = Math.abs(lastClose - avgClose);
+  let trend = "SIDEWAYS";
+  if (lastClose > avgClose) trend = "UP";
+  else if (lastClose < avgClose) trend = "DOWN";
+  return { trend, trendStrength: clamp(distance / avgRange, 0, 1) };
+}
+
+function detectEmaTrend(candles) {
   if (candles.length < 21) {
     return { trend: "SIDEWAYS", ema9: null, ema21: null, trendStrength: 0 };
   }
@@ -257,6 +289,196 @@ function detectTrend(candles) {
   if (ema9 > ema21) trend = "UP";
   else if (ema9 < ema21) trend = "DOWN";
   return { trend, ema9, ema21, trendStrength };
+}
+
+function detectObvTrend(candles) {
+  if (candles.length < 21) {
+    return { trend: "SIDEWAYS", trendStrength: 0 };
+  }
+  const emaTrend = detectEmaTrend(candles);
+  const obv = calculateOBV(candles);
+  const recent = obv.slice(-10);
+  if (recent.length < 2) return emaTrend;
+  const obvDelta = recent[recent.length - 1] - recent[0];
+  const lastPrice = candles[candles.length - 1].close;
+  const prevPrice = candles[Math.max(0, candles.length - 10)].close;
+  const priceDelta = lastPrice - prevPrice;
+  const obvBias = obvDelta > 0 ? "UP" : obvDelta < 0 ? "DOWN" : "SIDEWAYS";
+  const priceBias = priceDelta > 0 ? "UP" : priceDelta < 0 ? "DOWN" : "SIDEWAYS";
+  let trend = emaTrend.trend;
+  if (obvBias !== "SIDEWAYS" && priceBias === obvBias) {
+    trend = obvBias;
+  } else if (priceBias === "SIDEWAYS" || obvBias === "SIDEWAYS") {
+    trend = emaTrend.trend;
+  } else if (priceBias !== obvBias) {
+    trend = "SIDEWAYS";
+  }
+  return { trend, trendStrength: emaTrend.trendStrength };
+}
+
+function detectStructureTrend(candles) {
+  if (candles.length < 5) {
+    return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED" };
+  }
+  const recent = candles.slice(-5);
+  let higherHighs = 0;
+  let higherLows = 0;
+  let lowerHighs = 0;
+  let lowerLows = 0;
+
+  for (let i = 1; i < recent.length; i++) {
+    if (recent[i].high > recent[i - 1].high) higherHighs += 1;
+    if (recent[i].low > recent[i - 1].low) higherLows += 1;
+    if (recent[i].high < recent[i - 1].high) lowerHighs += 1;
+    if (recent[i].low < recent[i - 1].low) lowerLows += 1;
+  }
+
+  if (higherHighs >= 2 && higherLows >= 2) {
+    return {
+      trend: "UP",
+      trendStrength: clamp((higherHighs + higherLows) / 8, 0, 1),
+      structureBias: "HH_HL",
+    };
+  }
+  if (lowerHighs >= 2 && lowerLows >= 2) {
+    return {
+      trend: "DOWN",
+      trendStrength: clamp((lowerHighs + lowerLows) / 8, 0, 1),
+      structureBias: "LL_LH",
+    };
+  }
+
+  return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED" };
+}
+
+function assessCandleContinuation(candles) {
+  if (candles.length < 3) {
+    return { bullScore: 0, bearScore: 0, bodyStrength: 0 };
+  }
+  const recent = candles.slice(-3);
+  const avgRange = averageRange(recent, recent.length) || 1;
+  let bullScore = 0;
+  let bearScore = 0;
+  let bodyTotal = 0;
+
+  recent.forEach((candle) => {
+    const body = Math.abs(candle.close - candle.open);
+    const upperWick = candle.high - Math.max(candle.open, candle.close);
+    const lowerWick = Math.min(candle.open, candle.close) - candle.low;
+    const bodyRatio = clamp(body / avgRange, 0, 1);
+    bodyTotal += bodyRatio;
+
+    if (candle.close > candle.open && upperWick <= body * 0.75) {
+      bullScore += 1;
+    }
+    if (candle.close < candle.open && lowerWick <= body * 0.75) {
+      bearScore += 1;
+    }
+  });
+
+  return {
+    bullScore,
+    bearScore,
+    bodyStrength: clamp(bodyTotal / recent.length, 0, 1),
+  };
+}
+
+function assessPullbackBehavior(candles, trendState) {
+  if (candles.length < 8 || trendState.trend === "SIDEWAYS") {
+    return { valid: false, score: 0 };
+  }
+  const recent = candles.slice(-8);
+  const closes = recent.map((candle) => candle.close);
+  const ema9 = calculateEMA(closes, Math.min(9, closes.length));
+  const ema21 = calculateEMA(closes, Math.min(21, closes.length));
+  const current = recent[recent.length - 1];
+  const previous = recent[recent.length - 2];
+  const avgRange = averageRange(recent, recent.length) || 1;
+
+  if (trendState.trend === "UP") {
+    const dip = Math.max(0, Math.max(previous.close, ema9 || previous.close) - current.low);
+    const heldEmas = current.close >= (ema21 || current.close);
+    return {
+      valid: heldEmas && dip <= avgRange * 1.4,
+      score: clamp(1 - (dip / (avgRange * 1.4 || 1)), 0, 1),
+    };
+  }
+
+  const bounce = Math.max(0, current.high - Math.min(previous.close, ema9 || previous.close));
+  const heldEmas = current.close <= (ema21 || current.close);
+  return {
+    valid: heldEmas && bounce <= avgRange * 1.4,
+    score: clamp(1 - (bounce / (avgRange * 1.4 || 1)), 0, 1),
+  };
+}
+
+function detectStackTrend(candles) {
+  if (candles.length < 50) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "STACK" };
+  }
+
+  const closes = candles.map((c) => c.close);
+  const ema9 = calculateEMA(closes, 9);
+  const ema21 = calculateEMA(closes, 21);
+  const ema50 = calculateEMA(closes, 50);
+  const structureState = detectStructureTrend(candles);
+  const rsi = calculateRSI(candles, 14);
+  const candleState = assessCandleContinuation(candles);
+  const emaTrend =
+    ema9 > ema21 && ema21 > ema50 ? "UP" :
+    ema9 < ema21 && ema21 < ema50 ? "DOWN" :
+    "SIDEWAYS";
+  const pullbackState = assessPullbackBehavior(candles, { trend: emaTrend });
+  const momentumTrend = rsi == null ? "SIDEWAYS" : rsi > 50 ? "UP" : rsi < 50 ? "DOWN" : "SIDEWAYS";
+
+  let trend = "SIDEWAYS";
+  if (
+    emaTrend === "UP" &&
+    structureState.trend === "UP" &&
+    momentumTrend === "UP" &&
+    candleState.bullScore >= 2 &&
+    pullbackState.valid
+  ) {
+    trend = "UP";
+  } else if (
+    emaTrend === "DOWN" &&
+    structureState.trend === "DOWN" &&
+    momentumTrend === "DOWN" &&
+    candleState.bearScore >= 2 &&
+    pullbackState.valid
+  ) {
+    trend = "DOWN";
+  }
+
+  const emaScore = emaTrend === "SIDEWAYS" ? 0 : 1;
+  const structureScore = structureState.trend === "SIDEWAYS" ? 0 : structureState.trendStrength;
+  const rsiScore = rsi == null ? 0 : clamp(Math.abs(rsi - 50) / 20, 0, 1);
+  const candleScore =
+    trend === "UP" ? clamp(candleState.bullScore / 3, 0, 1) :
+    trend === "DOWN" ? clamp(candleState.bearScore / 3, 0, 1) :
+    0;
+  const trendStrength = trend === "SIDEWAYS"
+    ? 0
+    : clamp((emaScore * 0.3) + (structureScore * 0.25) + (rsiScore * 0.2) + (candleScore * 0.15) + (pullbackState.score * 0.1), 0, 1);
+
+  return {
+    trend,
+    trendStrength,
+    ema9,
+    ema21,
+    ema50,
+    rsi,
+    structureBias: structureState.structureBias,
+    pullbackValid: pullbackState.valid,
+    modeLabel: "STACK",
+  };
+}
+
+function detectTrend(candles, mode = currentTrendMode) {
+  if (mode === "AVG") return detectAverageTrend(candles);
+  if (mode === "OBV") return detectObvTrend(candles);
+  if (mode === "STACK") return detectStackTrend(candles);
+  return detectEmaTrend(candles);
 }
 
 function detectDivergence(candles, obv, lookback = 5) {
@@ -441,13 +663,22 @@ function updateSignalUI({ trend, divergence, sweep, confidence, signal, time }) 
   if (sigTimeEl) sigTimeEl.textContent = time ? new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
 }
 
-function updateLiquiditySweepUI({ trend, sweep, rejection, confidence, entry, level }) {
-  if (sweepTrendEl) sweepTrendEl.textContent = trend || "--";
-  if (sweepTypeEl) sweepTypeEl.textContent = sweep || "--";
-  if (sweepRejectEl) sweepRejectEl.textContent = rejection || "--";
-  if (sweepConfEl) sweepConfEl.textContent = Number.isFinite(confidence) ? `${confidence}%` : confidence || "--";
-  if (sweepEntryEl) sweepEntryEl.textContent = entry || "--";
-  if (sweepLevelEl) sweepLevelEl.textContent = level || "--";
+function updateFrameSignalUI(signalState) {
+  if (!phoneEl) return;
+  phoneEl.classList.remove("frame-neutral", "frame-buy", "frame-sell");
+
+  const hasBuySignal = signalState?.tradeDirection === "CALL" && typeof signalState?.signal === "string" && signalState.signal !== "--";
+  const hasSellSignal = signalState?.tradeDirection === "PUT" && typeof signalState?.signal === "string" && signalState.signal !== "--";
+
+  if (hasBuySignal) {
+    phoneEl.classList.add("frame-buy");
+    return;
+  }
+  if (hasSellSignal) {
+    phoneEl.classList.add("frame-sell");
+    return;
+  }
+  phoneEl.classList.add("frame-neutral");
 }
 
 function getLiquidityPanelState(candles) {
@@ -508,8 +739,11 @@ function updateSignalFromCandles(candles) {
   }
 
   updateSignalUI(lastSignalState);
+  updateFrameSignalUI(lastSignalState);
   lastSweepState = getLiquidityPanelState(allCandles);
-  updateLiquiditySweepUI(lastSweepState);
+  if (sigRejectEl) sigRejectEl.textContent = lastSweepState.rejection || "--";
+  if (sigEntryEl) sigEntryEl.textContent = lastSweepState.entry || "--";
+  if (sigLevelEl) sigLevelEl.textContent = lastSweepState.level || "--";
   renderMiniChart(candles);
 
   if (autoTradeEnabled && lastSignalState.signal !== "--" && candles.length >= MIN_SIGNAL_CANDLES) {
@@ -792,6 +1026,20 @@ function populateTimeframeOptions() {
     .map((option) => `<option value="${option.seconds}">${option.label}</option>`)
     .join("");
   updateTimeframeUI();
+}
+
+function populateTrendModeOptions() {
+  if (!trendModeSelectEl) return;
+  const labels = {
+    EMA: "EMA Trend",
+    AVG: "AVG Trend",
+    OBV: "OBV Trend",
+    STACK: "Stack Trend",
+  };
+  trendModeSelectEl.innerHTML = TREND_MODE_OPTIONS
+    .map((mode) => `<option value="${mode}">${labels[mode] || mode}</option>`)
+    .join("");
+  trendModeSelectEl.value = currentTrendMode;
 }
 
 async function setChartTimeframe(seconds) {
@@ -1578,6 +1826,7 @@ function ensureOpen() {
 function init() {
   tabs = document.querySelectorAll(".tab");
   hlButtons = document.getElementById("hlButtons");
+  phoneEl = document.querySelector(".phone");
   barrierField = document.getElementById("barrierField");
   quickRow = document.getElementById("quickRow");
   tradeBody = document.getElementById("tradeBody");
@@ -1605,21 +1854,17 @@ function init() {
   sigConfEl = document.getElementById("sigConf");
   sigSignalEl = document.getElementById("sigSignal");
   sigTimeEl = document.getElementById("sigTime");
+  sigRejectEl = document.getElementById("sigReject");
+  sigEntryEl = document.getElementById("sigEntry");
+  sigLevelEl = document.getElementById("sigLevel");
   signalBodyEl = document.getElementById("signalBody");
   toggleSignalBtn = document.getElementById("toggleSignal");
-  sweepTrendEl = document.getElementById("sweepTrend");
-  sweepTypeEl = document.getElementById("sweepType");
-  sweepRejectEl = document.getElementById("sweepReject");
-  sweepConfEl = document.getElementById("sweepConf");
-  sweepEntryEl = document.getElementById("sweepEntry");
-  sweepLevelEl = document.getElementById("sweepLevel");
-  sweepBodyEl = document.getElementById("sweepBody");
-  toggleSweepBtn = document.getElementById("toggleSweep");
   chartBodyEl = document.getElementById("chartBody");
   toggleChartBtn = document.getElementById("toggleChart");
   chartTfLabelEl = document.getElementById("chartTfLabel");
   chartTfPickerEl = document.getElementById("chartTfPicker");
   chartTfSelectEl = document.getElementById("chartTfSelect");
+  trendModeSelectEl = document.getElementById("trendModeSelect");
   miniChartCanvas = document.getElementById("miniChart");
   zoomInBtn = document.getElementById("zoomIn");
   zoomOutBtn = document.getElementById("zoomOut");
@@ -1639,6 +1884,7 @@ function init() {
   marketSelect.addEventListener("change", updateSymbols);
   symbolSelect.addEventListener("change", onSymbolChange);
   populateTimeframeOptions();
+  populateTrendModeOptions();
   tradeListEl?.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -1733,14 +1979,6 @@ function init() {
       const isCollapsed = signalBodyEl.classList.toggle("collapsed");
       toggleSignalBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
-    });
-  }
-
-  if (toggleSweepBtn && sweepBodyEl) {
-    toggleSweepBtn.addEventListener("click", () => {
-      const isCollapsed = sweepBodyEl.classList.toggle("collapsed");
-      toggleSweepBtn.textContent = isCollapsed ? "Expand" : "Collapse";
-      toggleSweepBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
 
@@ -1852,6 +2090,11 @@ function init() {
     });
   });
 
+  trendModeSelectEl?.addEventListener("change", () => {
+    currentTrendMode = TREND_MODE_OPTIONS.includes(trendModeSelectEl.value) ? trendModeSelectEl.value : "EMA";
+    updateSignalFromCandles(getBuiltCandles());
+  });
+
   zoomInBtn?.addEventListener("click", () => {
     chartPoints = Math.max(10, chartPoints - 10);
     const built = getBuiltCandles();
@@ -1957,6 +2200,7 @@ function init() {
   }
   renderTradeResults();
   renderAutoTradeResults();
+  updateFrameSignalUI(lastSignalState);
 
   // Default collapsed state for sections
   tradeBody?.classList.add("collapsed");
@@ -1967,8 +2211,6 @@ function init() {
   toggleResultsBtn && (toggleResultsBtn.textContent = "Expand", toggleResultsBtn.setAttribute("aria-expanded", "false"));
   signalBodyEl?.classList.add("collapsed");
   toggleSignalBtn && (toggleSignalBtn.textContent = "Expand", toggleSignalBtn.setAttribute("aria-expanded", "false"));
-  sweepBodyEl?.classList.add("collapsed");
-  toggleSweepBtn && (toggleSweepBtn.textContent = "Expand", toggleSweepBtn.setAttribute("aria-expanded", "false"));
   chartBodyEl?.classList.add("collapsed");
   toggleChartBtn && (toggleChartBtn.textContent = "Expand", toggleChartBtn.setAttribute("aria-expanded", "false"));
   autoBodyEl?.classList.add("collapsed");
