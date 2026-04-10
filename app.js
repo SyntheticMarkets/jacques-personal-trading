@@ -1469,39 +1469,70 @@ function onSymbolChange() {
 async function loadTickHistory(symbol) {
   if (!symbol) return;
   try {
-    const res = await wsRequest({
-      ticks_history: symbol,
-      end: "latest",
-      count: MAX_CANDLES,
-      style: "candles",
-      granularity: candleBuilder.timeframe,
-    });
+    let built = [];
 
-    const candleHistory = Array.isArray(res.candles)
-      ? res.candles
-      : Array.isArray(res.history?.candles)
-        ? res.history.candles
-        : [];
-
-    if (candleHistory.length) {
-      candleBuilder.setHistory(candleHistory);
+    if (candleBuilder.timeframe < 60) {
+      built = await loadAggregatedTickHistory(symbol);
     } else {
-      const history = res.history || {};
-      const prices = history.prices || [];
-      const times = history.times || [];
-      const len = Math.min(prices.length, times.length);
-      for (let i = 0; i < len; i++) {
-        candleBuilder.update({ epoch: times[i], quote: prices[i] });
-      }
+      built = await loadCandleHistory(symbol);
     }
 
-    const built = candleBuilder.currentCandle
-      ? [...candleBuilder.candles, candleBuilder.currentCandle]
-      : candleBuilder.candles;
     updateSignalFromCandles(built);
   } catch (err) {
     setStatus(err?.message || "History load failed", true);
   }
+}
+
+function rebuildCandlesFromHistory(prices, times) {
+  candleBuilder.reset();
+  const len = Math.min(prices.length, times.length);
+  for (let i = 0; i < len; i++) {
+    candleBuilder.update({ epoch: Number(times[i]), quote: Number(prices[i]) });
+  }
+  return candleBuilder.currentCandle
+    ? [...candleBuilder.candles, candleBuilder.currentCandle]
+    : candleBuilder.candles;
+}
+
+async function loadCandleHistory(symbol) {
+  const res = await wsRequest({
+    ticks_history: symbol,
+    end: "latest",
+    count: MAX_CANDLES,
+    style: "candles",
+    granularity: candleBuilder.timeframe,
+  });
+
+  const candleHistory = Array.isArray(res.candles)
+    ? res.candles
+    : Array.isArray(res.history?.candles)
+      ? res.history.candles
+      : [];
+
+  if (candleHistory.length) {
+    candleBuilder.setHistory(candleHistory);
+    return candleBuilder.currentCandle
+      ? [...candleBuilder.candles, candleBuilder.currentCandle]
+      : candleBuilder.candles;
+  }
+
+  const history = res.history || {};
+  return rebuildCandlesFromHistory(history.prices || [], history.times || []);
+}
+
+async function loadAggregatedTickHistory(symbol) {
+  const now = Math.floor(Date.now() / 1000);
+  const lookbackWindowSec = candleBuilder.timeframe * MAX_CANDLES;
+  const res = await wsRequest({
+    ticks_history: symbol,
+    start: now - lookbackWindowSec,
+    end: "latest",
+    style: "ticks",
+    count: 5000,
+  });
+
+  const history = res.history || {};
+  return rebuildCandlesFromHistory(history.prices || [], history.times || []);
 }
 
 function parseDurationToSeconds(value) {
