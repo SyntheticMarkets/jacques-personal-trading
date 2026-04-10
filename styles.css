@@ -387,11 +387,6 @@ button.small {
   margin-top: 10px;
 }
 
-.signal-chart-head h3 {
-  font-size: 12px;
-  margin: 0;
-}
-
 .signal-chart-meta {
   display: flex;
   align-items: center;
@@ -402,6 +397,53 @@ button.small {
 .chart-tf-label {
   color: var(--muted);
   font-weight: 500;
+}
+
+.signal-tf-label {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  min-height: 20px;
+  padding: 0 8px;
+  border: 1px solid #253043;
+  border-radius: 999px;
+  background: #0f141c;
+  font-size: 11px;
+}
+
+.chart-footer {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 0 2px;
+}
+
+.chart-footer-group {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.chart-footer-group-right {
+  justify-self: end;
+}
+
+.chart-footer-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.chart-indicator-select {
+  width: 86px !important;
+  min-width: 86px;
+  max-width: 86px;
+  flex: 0 0 86px;
+  padding: 3px 22px 3px 8px;
+  font-size: 10px;
+  line-height: 1.2;
 }
 
 .chart-controls {
@@ -427,14 +469,31 @@ button.small {
   background-repeat: no-repeat;
 }
 
+.auto-section {
+  display: grid;
+  gap: 10px;
+  transition: max-height 200ms ease, opacity 200ms ease;
+  max-height: 520px;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.auto-section.collapsed {
+  display: none;
+}
+
 .auto-row {
   display: grid;
   gap: 10px;
+  transition: max-height 200ms ease, opacity 200ms ease;
+  max-height: 160px;
+  opacity: 1;
+  overflow: hidden;
 }
 
 .auto-row.collapsed {
   max-height: 0;
-  overflow: hidden;
+  opacity: 0;
 }
 
 .auto-toggle {
@@ -447,6 +506,34 @@ button.small {
 
 .auto-toggle input {
   accent-color: #0db787;
+}
+
+.auto-subsection {
+  background: #10151e;
+  border: 1px solid #1d2635;
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.auto-subhead {
+  margin-bottom: 8px;
+}
+
+.auto-subhead h3 {
+  margin: 0;
+  font-size: 12px;
+}
+
+.auto-results-list {
+  max-height: 160px;
+  transition: max-height 200ms ease, opacity 200ms ease;
+  opacity: 1;
+  overflow: hidden;
+}
+
+.auto-results-list.collapsed {
+  max-height: 0;
+  opacity: 0;
 }
 
 .chart-body {

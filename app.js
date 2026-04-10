@@ -92,7 +92,9 @@ let autoToggleEl;
 let autoAccountSelect;
 let autoResultsEl;
 let autoBodyEl;
+let autoSectionEl;
 let toggleAutoBtn;
+let toggleAutoConfigBtn;
 let toggleAutoResultsBtn;
 
 const TIMEFRAME_OPTIONS = [
@@ -1928,7 +1930,9 @@ function init() {
   autoAccountSelect = document.getElementById("autoAccountSelect");
   autoResultsEl = document.getElementById("autoResults");
   autoBodyEl = document.getElementById("autoBody");
+  autoSectionEl = document.getElementById("autoSection");
   toggleAutoBtn = document.getElementById("toggleAuto");
+  toggleAutoConfigBtn = document.getElementById("toggleAutoConfig");
   toggleAutoResultsBtn = document.getElementById("toggleAutoResults");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
@@ -2038,11 +2042,20 @@ function init() {
     });
   }
 
-  if (toggleAutoBtn && autoBodyEl) {
+  if (toggleAutoBtn && autoSectionEl) {
     toggleAutoBtn.addEventListener("click", () => {
-      const isCollapsed = autoBodyEl.classList.toggle("collapsed");
+      const isCollapsed = autoSectionEl.classList.toggle("collapsed");
+      autoSectionEl.hidden = isCollapsed;
       toggleAutoBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleAutoBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+    });
+  }
+
+  if (toggleAutoConfigBtn && autoBodyEl) {
+    toggleAutoConfigBtn.addEventListener("click", () => {
+      const isCollapsed = autoBodyEl.classList.toggle("collapsed");
+      toggleAutoConfigBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      toggleAutoConfigBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
     });
   }
 
@@ -2269,8 +2282,11 @@ function init() {
   toggleSignalBtn && (toggleSignalBtn.textContent = "Expand", toggleSignalBtn.setAttribute("aria-expanded", "false"));
   chartBodyEl?.classList.add("collapsed");
   toggleChartBtn && (toggleChartBtn.textContent = "Expand", toggleChartBtn.setAttribute("aria-expanded", "false"));
-  autoBodyEl?.classList.add("collapsed");
+  autoSectionEl?.classList.add("collapsed");
+  if (autoSectionEl) autoSectionEl.hidden = true;
   toggleAutoBtn && (toggleAutoBtn.textContent = "Expand", toggleAutoBtn.setAttribute("aria-expanded", "false"));
+  autoBodyEl?.classList.add("collapsed");
+  toggleAutoConfigBtn && (toggleAutoConfigBtn.textContent = "Expand", toggleAutoConfigBtn.setAttribute("aria-expanded", "false"));
   autoResultsEl?.classList.add("collapsed");
   toggleAutoResultsBtn && (toggleAutoResultsBtn.textContent = "Expand", toggleAutoResultsBtn.setAttribute("aria-expanded", "false"));
 }

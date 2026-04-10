@@ -118,7 +118,6 @@
         </div>
         <div class="card-head signal-chart-head">
           <div class="signal-chart-meta">
-            <h3>Mini Chart <span id="chartTfLabel" class="chart-tf-label">1m</span></h3>
             <select id="trendModeSelect" class="field-input chart-mode-select" aria-label="Trend mode">
               <option value="EMA">EMA Trend</option>
               <option value="AVG">AVG Trend</option>
@@ -137,6 +136,20 @@
             <select id="chartTfSelect" class="field-input" aria-label="Chart timeframe"></select>
           </div>
           <canvas id="miniChart" aria-label="Mini chart"></canvas>
+          <div class="chart-footer">
+            <div class="chart-footer-group">
+              <span class="chart-footer-label">Timeframe</span>
+              <span id="chartTfLabel" class="chart-tf-label signal-tf-label">1m</span>
+            </div>
+            <div class="chart-footer-group chart-footer-group-right">
+              <select id="indicatorSelect" class="field-input chart-indicator-select" aria-label="Chart indicator">
+                <option value="NONE">None</option>
+                <option value="EMA">EMA</option>
+                <option value="SMA">SMA</option>
+                <option value="RSI">RSI</option>
+              </select>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -165,23 +178,30 @@
           <h2>Auto trade</h2>
           <button id="toggleAuto" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
-        <div id="autoBody" class="auto-row">
-          <label class="auto-toggle">
-            <input id="autoToggle" type="checkbox" />
-            <span>Enable auto trade</span>
-          </label>
-          <select id="autoAccountSelect" class="field-input">
-            <option value="">Select account</option>
-          </select>
+        <div id="autoSection" class="auto-section">
+          <div class="auto-subsection">
+            <div class="card-head auto-subhead">
+              <h3>Auto trade</h3>
+              <button id="toggleAutoConfig" class="ghost small" aria-expanded="true">Collapse</button>
+            </div>
+            <div id="autoBody" class="auto-row">
+              <label class="auto-toggle">
+                <input id="autoToggle" type="checkbox" />
+                <span>Enable auto trade</span>
+              </label>
+              <select id="autoAccountSelect" class="field-input">
+                <option value="">Select account</option>
+              </select>
+            </div>
+          </div>
+          <div class="auto-subsection">
+            <div class="card-head auto-subhead">
+              <h3>Auto trade results</h3>
+              <button id="toggleAutoResults" class="ghost small" aria-expanded="true">Collapse</button>
+            </div>
+            <div id="autoResults" class="trade-list auto-results-list"></div>
+          </div>
         </div>
-      </section>
-
-      <section class="card trade-section">
-        <header class="card-head">
-          <h2>Auto trade results</h2>
-          <button id="toggleAutoResults" class="ghost small" aria-expanded="true">Collapse</button>
-        </header>
-        <div id="autoResults" class="trade-list"></div>
       </section>
 
     </main>
