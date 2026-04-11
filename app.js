@@ -90,6 +90,7 @@ let chartTfSelectEl;
 let indicatorSelectEl;
 let chartIndicatorListEl;
 let trendModeSelectEl;
+let signalToastLayerEl;
 let miniChartCanvas;
 let zoomInBtn;
 let zoomOutBtn;
@@ -143,6 +144,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "SR_SIGNALS_MTF", label: "Support Resistance Signals MTF" },
   { value: "STRUCTURE_PULLBACK", label: "Structure Pullback Continuation" },
   { value: "TICK_REJECTION", label: "Tick Rejection Microstructure" },
+  { value: "TREND_VOLUME_ACCUM", label: "Trend Volume Accumulation" },
   { value: "EMA", label: "EMA 9" },
 ];
 const CHART_INDICATOR_GROUPS = [
@@ -159,7 +161,7 @@ const CHART_INDICATOR_GROUPS = [
   {
     key: "VOL",
     label: "Volatility",
-    items: ["ADX_VOL_WAVES", "VOLUME_PROFILE_NODES"],
+    items: ["ADX_VOL_WAVES", "VOLUME_PROFILE_NODES", "TREND_VOLUME_ACCUM"],
   },
   {
     key: "BO",
@@ -304,6 +306,8 @@ let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
 let autoTradeSessionCount = 0;
 let currentTrendMode = "EMA";
+let signalToastTimer = null;
+const shownIndicatorSignalKeys = new Set();
 let lastSignalState = {
   trend: "--",
   divergence: "--",
@@ -1353,6 +1357,108 @@ function weightedMovingAverage(values, period) {
   return result;
 }
 
+function volumeWeightedMovingAverage(values, volumes, period) {
+  if (!Array.isArray(values) || !values.length || !Array.isArray(volumes) || period <= 0) return [];
+  const result = new Array(values.length).fill(null);
+  for (let i = period - 1; i < values.length; i += 1) {
+    let weightedSum = 0;
+    let volumeSum = 0;
+    for (let j = i - period + 1; j <= i; j += 1) {
+      const volume = Number(volumes[j] || 0);
+      weightedSum += Number(values[j] || 0) * volume;
+      volumeSum += volume;
+    }
+    result[i] = volumeSum > 0 ? weightedSum / volumeSum : null;
+  }
+  return result;
+}
+
+function hullMovingAverage(values, period) {
+  if (!Array.isArray(values) || !values.length || period <= 0) return [];
+  const half = Math.max(1, Math.round(period / 2));
+  const sqrtLen = Math.max(1, Math.round(Math.sqrt(period)));
+  const wmaFull = weightedMovingAverage(values, period);
+  const wmaHalf = weightedMovingAverage(values, half);
+  const diff = values.map((_, index) => {
+    const full = wmaFull[index];
+    const halfVal = wmaHalf[index];
+    return Number.isFinite(full) && Number.isFinite(halfVal) ? (2 * halfVal) - full : null;
+  });
+  return weightedMovingAverage(diff.map((value) => value ?? 0), sqrtLen);
+}
+
+function superSmootherSeries(values, period) {
+  if (!Array.isArray(values) || !values.length || period <= 0) return [];
+  const result = new Array(values.length).fill(null);
+  const a1 = Math.exp((-1.414 * Math.PI) / period);
+  const b1 = 2 * a1 * Math.cos((1.414 * Math.PI) / period);
+  const c2 = b1;
+  const c3 = -a1 * a1;
+  const c1 = 1 - c2 - c3;
+  for (let i = 0; i < values.length; i += 1) {
+    const src = Number(values[i] || 0);
+    const prevSrc = Number(values[i - 1] ?? src);
+    const prev1 = Number(result[i - 1] ?? 0);
+    const prev2 = Number(result[i - 2] ?? 0);
+    result[i] = (c1 * (src + prevSrc) / 2) + (c2 * prev1) + (c3 * prev2);
+  }
+  return result;
+}
+
+function zeroLagEmaSeries(values, period) {
+  const ema1 = emaSeries(values, period);
+  const ema2 = emaSeries(ema1.map((value) => value ?? 0), period);
+  return values.map((_, index) => {
+    const a = ema1[index];
+    const b = ema2[index];
+    return Number.isFinite(a) && Number.isFinite(b) ? a + (a - b) : null;
+  });
+}
+
+function doubleEmaSeries(values, period) {
+  const ema1 = emaSeries(values, period);
+  const ema2 = emaSeries(ema1.map((value) => value ?? 0), period);
+  return values.map((_, index) => {
+    const a = ema1[index];
+    const b = ema2[index];
+    return Number.isFinite(a) && Number.isFinite(b) ? (2 * a) - b : null;
+  });
+}
+
+function tripleEmaSeries(values, period) {
+  const ema1 = emaSeries(values, period);
+  const ema2 = emaSeries(ema1.map((value) => value ?? 0), period);
+  const ema3 = emaSeries(ema2.map((value) => value ?? 0), period);
+  return values.map((_, index) => {
+    const a = ema1[index];
+    const b = ema2[index];
+    const c = ema3[index];
+    return Number.isFinite(a) && Number.isFinite(b) && Number.isFinite(c) ? (3 * (a - b)) + c : null;
+  });
+}
+
+function triangularMovingAverage(values, period) {
+  return simpleMovingAverage(simpleMovingAverage(values, period).map((value) => value ?? 0), period);
+}
+
+function movingAverageVariant(type, values, period, volumes = []) {
+  switch (type) {
+    case "EMA": return emaSeries(values, period);
+    case "WMA": return weightedMovingAverage(values, period);
+    case "VWMA": return volumeWeightedMovingAverage(values, volumes, period);
+    case "SMMA": return rmaSeries(values, period);
+    case "DEMA": return doubleEmaSeries(values, period);
+    case "TEMA": return tripleEmaSeries(values, period);
+    case "HullMA": return hullMovingAverage(values, period);
+    case "SSMA": return superSmootherSeries(values, period);
+    case "ZEMA": return zeroLagEmaSeries(values, period);
+    case "TMA": return triangularMovingAverage(values, period);
+    case "SMA":
+    default:
+      return simpleMovingAverage(values, period);
+  }
+}
+
 function rollingLowest(values, period) {
   if (!Array.isArray(values) || !values.length || period <= 0) return [];
   const result = new Array(values.length).fill(null);
@@ -1572,6 +1678,68 @@ function buildDynamicZDivergence(candles, config = {}) {
     saLower,
     saColor,
   };
+}
+
+function buildTrendVolumeAccumulation(candles, config = {}) {
+  const useMovingAverage = config.useMovingAverage ?? false;
+  const maType = config.maType ?? "EMA";
+  const maLen = Math.max(1, config.maLen ?? 6);
+  const mode = config.mode ?? "Accumulation";
+
+  if (!Array.isArray(candles) || candles.length < Math.max(8, maLen + 3)) {
+    return { values: [], direction: [], barCount: [], ma: [] };
+  }
+
+  const closes = candles.map((candle) => candle.close);
+  const volumes = candles.map((candle, index) => {
+    const tickVolume = Array.isArray(candle.ticks) ? candle.ticks.length : 0;
+    if (tickVolume > 0) return tickVolume;
+    const prevClose = candles[index - 1]?.close ?? candle.close;
+    return Math.max(1, Math.round(((candle.high - candle.low) + Math.abs(candle.close - prevClose)) * 1000));
+  });
+  const ma = movingAverageVariant(maType, closes, maLen, volumes);
+  const values = new Array(candles.length).fill(null);
+  const direction = new Array(candles.length).fill(0);
+  const barCount = new Array(candles.length).fill(0);
+
+  for (let i = 0; i < candles.length; i += 1) {
+    if (useMovingAverage) {
+      const now = ma[i];
+      const prior1 = ma[i - 1];
+      const prior3 = ma[i - 3];
+      if (Number.isFinite(now) && Number.isFinite(prior1) && Number.isFinite(prior3)) {
+        direction[i] = now > prior1 && prior1 > prior3 ? 1 : now < prior1 && prior1 < prior3 ? -1 : (direction[i - 1] ?? 0);
+      } else {
+        direction[i] = direction[i - 1] ?? 0;
+      }
+    } else {
+      direction[i] = candles[i].close > candles[i].open ? 1 : candles[i].close < candles[i].open ? -1 : (direction[i - 1] ?? 0);
+    }
+
+    const prevBars = barCount[i - 1] ?? 0;
+    if (direction[i] > 0) barCount[i] = prevBars >= 0 ? prevBars + 1 : 1;
+    else if (direction[i] < 0) barCount[i] = prevBars <= 0 ? prevBars - 1 : -1;
+    else barCount[i] = prevBars;
+
+    const prevValue = values[i - 1] ?? 0;
+    const rawVolume = volumes[i];
+    const barMinutes = i > 0 ? Math.max(1, (Number(candles[i].time) - Number(candles[i - 1].time)) / 60) : 1;
+    let deltaT = Math.max(1, Math.abs(barCount[i]) * barMinutes);
+    if (!Number.isFinite(deltaT) || deltaT <= 0) deltaT = 1;
+    const unitVolume = mode === "Normalised" ? rawVolume / barMinutes : rawVolume;
+
+    if (direction[i] > 0) values[i] = prevValue >= 0 ? prevValue + unitVolume : unitVolume;
+    else if (direction[i] < 0) values[i] = prevValue <= 0 ? prevValue - unitVolume : -unitVolume;
+    else values[i] = prevValue;
+
+    if (mode === "Bar Avg") {
+      values[i] = barCount[i] !== 0 ? values[i] / Math.abs(barCount[i]) : null;
+    } else if (mode === "Time Avg") {
+      values[i] = values[i] / deltaT;
+    }
+  }
+
+  return { values, direction, barCount, ma };
 }
 
 function buildVolumeProfileNodes(candles, config = {}) {
@@ -2024,22 +2192,23 @@ function buildStructurePullbackContinuation(candles, config = {}) {
       }
     }
 
-    if (i < 3) continue;
-    const entryCandle = confirmedCandles[i];
-    const setupCandle = confirmedCandles[i - 1];
-    const priorCandle = confirmedCandles[i - 2];
+    if (i < 2) continue;
+    const setupIndex = i;
+    const entryIndex = setupIndex + 1 < candles.length ? setupIndex + 1 : null;
+    if (entryIndex == null) continue;
+    const setupCandle = confirmedCandles[setupIndex];
+    const priorCandle = confirmedCandles[setupIndex - 1];
 
-    const recentFlips = trendHistory.filter((item) => item.index >= i - flipLookback);
+    const recentFlips = trendHistory.filter((item) => item.index >= setupIndex - flipLookback);
     if (recentFlips.length > maxTrendFlips) continue;
 
     const setupRange = Math.max(setupCandle.high - setupCandle.low, 0.0000001);
-    const setupBodyRatio = Math.abs(setupCandle.close - setupCandle.open) / setupRange;
     const lowerWickRatio = (Math.min(setupCandle.open, setupCandle.close) - setupCandle.low) / setupRange;
     const upperWickRatio = (setupCandle.high - Math.max(setupCandle.open, setupCandle.close)) / setupRange;
 
-    if (trend === "uptrend" && lastHighPivot && lastLowPivot && i - 1 > lastHighPivot.index) {
-      const pullbackStart = Math.max(lastHighPivot.index + 1, i - 1 - pullbackLookback);
-      const pullbackSlice = confirmedCandles.slice(pullbackStart, i - 1);
+    if (trend === "uptrend" && lastHighPivot && lastLowPivot && setupIndex > lastHighPivot.index) {
+      const pullbackStart = Math.max(lastHighPivot.index + 1, setupIndex - pullbackLookback);
+      const pullbackSlice = confirmedCandles.slice(pullbackStart, setupIndex);
       const recentPullbackLow = pullbackSlice.length
         ? Math.min(...pullbackSlice.map((candle) => candle.low))
         : setupCandle.low;
@@ -2047,14 +2216,14 @@ function buildStructurePullbackContinuation(candles, config = {}) {
       if (pullbackPhase) {
         const failure = setupCandle.low < recentPullbackLow && setupCandle.close > recentPullbackLow;
         const weakContinuation = priorCandle.close < priorCandle.open
-          && setupCandle.close < setupCandle.open
           && Math.abs(priorCandle.close - priorCandle.open) / Math.max(priorCandle.high - priorCandle.low, 0.0000001) < weakBodyRatio
-          && entryCandle.close > entryCandle.open
-          && entryCandle.close > setupCandle.high;
-        const rejection = lowerWickRatio >= rejectionWickRatio && entryCandle.close > entryCandle.open;
+          && setupCandle.close > setupCandle.open
+          && setupCandle.close > priorCandle.high;
+        const rejection = lowerWickRatio >= rejectionWickRatio
+          && setupCandle.close > setupCandle.open;
 
-        if ((failure || rejection || weakContinuation) && entryCandle.close > entryCandle.open) {
-          const resultCandle = i + 1 < confirmedCandles.length ? confirmedCandles[i + 1] : null;
+        if (failure || rejection || weakContinuation) {
+          const resultCandle = entryIndex + 1 < candles.length ? candles[entryIndex + 1] : null;
           const isWin = resultCandle ? resultCandle.close > resultCandle.open : null;
           if (resultCandle) {
             stats.buy.total += 1;
@@ -2062,8 +2231,8 @@ function buildStructurePullbackContinuation(candles, config = {}) {
           }
           signals.push({
             direction: "BUY",
-            entryIndex: i,
-            setupIndex: i - 1,
+            entryIndex,
+            setupIndex,
             trend,
             reason: failure ? "failure" : rejection ? "rejection" : "continuation",
             reference: recentPullbackLow,
@@ -2075,9 +2244,9 @@ function buildStructurePullbackContinuation(candles, config = {}) {
       }
     }
 
-    if (trend === "downtrend" && lastHighPivot && lastLowPivot && i - 1 > lastLowPivot.index) {
-      const pullbackStart = Math.max(lastLowPivot.index + 1, i - 1 - pullbackLookback);
-      const pullbackSlice = confirmedCandles.slice(pullbackStart, i - 1);
+    if (trend === "downtrend" && lastHighPivot && lastLowPivot && setupIndex > lastLowPivot.index) {
+      const pullbackStart = Math.max(lastLowPivot.index + 1, setupIndex - pullbackLookback);
+      const pullbackSlice = confirmedCandles.slice(pullbackStart, setupIndex);
       const recentPullbackHigh = pullbackSlice.length
         ? Math.max(...pullbackSlice.map((candle) => candle.high))
         : setupCandle.high;
@@ -2085,14 +2254,14 @@ function buildStructurePullbackContinuation(candles, config = {}) {
       if (pullbackPhase) {
         const failure = setupCandle.high > recentPullbackHigh && setupCandle.close < recentPullbackHigh;
         const weakContinuation = priorCandle.close > priorCandle.open
-          && setupCandle.close > setupCandle.open
           && Math.abs(priorCandle.close - priorCandle.open) / Math.max(priorCandle.high - priorCandle.low, 0.0000001) < weakBodyRatio
-          && entryCandle.close < entryCandle.open
-          && entryCandle.close < setupCandle.low;
-        const rejection = upperWickRatio >= rejectionWickRatio && entryCandle.close < entryCandle.open;
+          && setupCandle.close < setupCandle.open
+          && setupCandle.close < priorCandle.low;
+        const rejection = upperWickRatio >= rejectionWickRatio
+          && setupCandle.close < setupCandle.open;
 
-        if ((failure || rejection || weakContinuation) && entryCandle.close < entryCandle.open) {
-          const resultCandle = i + 1 < confirmedCandles.length ? confirmedCandles[i + 1] : null;
+        if (failure || rejection || weakContinuation) {
+          const resultCandle = entryIndex + 1 < candles.length ? candles[entryIndex + 1] : null;
           const isWin = resultCandle ? resultCandle.close < resultCandle.open : null;
           if (resultCandle) {
             stats.sell.total += 1;
@@ -2100,8 +2269,8 @@ function buildStructurePullbackContinuation(candles, config = {}) {
           }
           signals.push({
             direction: "SELL",
-            entryIndex: i,
-            setupIndex: i - 1,
+            entryIndex,
+            setupIndex,
             trend,
             reason: failure ? "failure" : rejection ? "rejection" : "continuation",
             reference: recentPullbackHigh,
@@ -2958,7 +3127,7 @@ function getLiquidityPanelState(candles) {
   };
 }
 
-function updateSignalFromCandles(candles) {
+function updateSignalFromCandles(candles, { live = false } = {}) {
   const allCandles = candles;
   const buildPct = Math.min(100, Math.floor((allCandles.length / MIN_SIGNAL_CANDLES) * 100));
 
@@ -2984,6 +3153,7 @@ function updateSignalFromCandles(candles) {
   if (sigEntryEl) sigEntryEl.textContent = lastSweepState.entry || "--";
   if (sigLevelEl) sigLevelEl.textContent = lastSweepState.level || "--";
   renderMiniChart(candles);
+  if (live) maybeNotifyIndicatorSignals(candles);
 
   if (autoTradeEnabled && lastSignalState.signal !== "--" && candles.length >= MIN_SIGNAL_CANDLES) {
     const candleTime = candleBuilder.currentCandle?.time || candles[candles.length - 1]?.time;
@@ -3164,6 +3334,7 @@ function renderMiniChart(candles) {
   const hasStructurePullback = activeChartIndicators.has("STRUCTURE_PULLBACK");
   const hasSRSignalsMTF = activeChartIndicators.has("SR_SIGNALS_MTF");
   const hasTickRejection = activeChartIndicators.has("TICK_REJECTION");
+  const hasTrendVolumeAccum = activeChartIndicators.has("TREND_VOLUME_ACCUM");
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -4399,6 +4570,62 @@ function renderMiniChart(candles) {
     });
   }
 
+  if (hasTrendVolumeAccum) {
+    const tva = buildTrendVolumeAccumulation(candles, {
+      useMovingAverage: false,
+      maType: "EMA",
+      maLen: 6,
+      mode: "Accumulation",
+    });
+    const visibleValues = [];
+    for (let i = start; i < end; i += 1) {
+      const value = tva.values[i];
+      if (Number.isFinite(value)) visibleValues.push(value);
+    }
+    if (visibleValues.length) {
+      const maxAbs = Math.max(1, ...visibleValues.map((value) => Math.abs(value)));
+      const paneH = Math.max(42, Math.min(70, plotH * 0.26));
+      const paneBottom = height - bottomPad - 2;
+      const paneTop = paneBottom - paneH;
+      const zeroY = paneTop + (paneH / 2);
+
+      ctx.save();
+      ctx.fillStyle = "rgba(12, 16, 22, 0.68)";
+      ctx.fillRect(leftPad, paneTop, plotW, paneH);
+      ctx.strokeStyle = "rgba(52, 62, 78, 0.85)";
+      ctx.lineWidth = 1;
+      ctx.strokeRect(leftPad, paneTop, plotW, paneH);
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, zeroY);
+      ctx.lineTo(leftPad + plotW, zeroY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      for (let i = start; i < end; i += 1) {
+        const value = tva.values[i];
+        if (!Number.isFinite(value)) continue;
+        const x = leftPad + ((i - start) * slotW) + candleGap / 2;
+        const barHeight = Math.max(1, (Math.abs(value) / maxAbs) * ((paneH / 2) - 4));
+        const y = value >= 0 ? zeroY - barHeight : zeroY;
+        ctx.fillStyle = value >= 0 ? "rgba(13, 183, 135, 0.82)" : "rgba(225, 91, 100, 0.82)";
+        ctx.fillRect(x, y, Math.max(2, candleW), barHeight);
+      }
+
+      ctx.fillStyle = "#c4ccd7";
+      ctx.font = "9px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText("TVA", leftPad + 4, paneTop + 4);
+      const lastValue = tva.values[end - 1];
+      if (Number.isFinite(lastValue)) {
+        ctx.textAlign = "right";
+        ctx.fillText(`${lastValue >= 0 ? "+" : ""}${Math.round(lastValue)}`, leftPad + plotW - 4, paneTop + 4);
+      }
+      ctx.restore();
+    }
+  }
+
   // Current price dot and right-side labels
   if (points.length >= 2) {
     const last = points[points.length - 1];
@@ -4514,12 +4741,189 @@ function setStatus(msg, isError = false) {
   statusEl.style.color = isError ? "#e15b64" : "#9aa7b8";
 }
 
+function ensureSignalToastLayer() {
+  if (signalToastLayerEl || !phoneEl) return;
+  signalToastLayerEl = document.createElement("div");
+  signalToastLayerEl.className = "signal-toast-layer hidden";
+  signalToastLayerEl.innerHTML = `
+    <div class="signal-toast toast-neutral" role="status" aria-live="polite" aria-atomic="true">
+      <div class="signal-toast-title"></div>
+      <div class="signal-toast-body"></div>
+    </div>
+  `;
+  phoneEl.appendChild(signalToastLayerEl);
+}
+
+function showSignalToast({ title, body, tone = "neutral" }) {
+  ensureSignalToastLayer();
+  if (!signalToastLayerEl) return;
+  const toastEl = signalToastLayerEl.querySelector(".signal-toast");
+  const titleEl = signalToastLayerEl.querySelector(".signal-toast-title");
+  const bodyEl = signalToastLayerEl.querySelector(".signal-toast-body");
+  if (!toastEl || !titleEl || !bodyEl) return;
+
+  toastEl.classList.remove("toast-buy", "toast-sell", "toast-neutral");
+  toastEl.classList.add(tone === "buy" ? "toast-buy" : tone === "sell" ? "toast-sell" : "toast-neutral");
+  titleEl.textContent = title;
+  bodyEl.textContent = body;
+  signalToastLayerEl.classList.remove("hidden");
+
+  if (signalToastTimer) clearTimeout(signalToastTimer);
+  signalToastTimer = setTimeout(() => {
+    signalToastLayerEl?.classList.add("hidden");
+  }, 4200);
+}
+
 function getTimeframeLabel(seconds) {
   return TIMEFRAME_OPTIONS.find((option) => option.seconds === seconds)?.label || `${seconds}s`;
 }
 
 function getChartIndicatorLabel(value) {
   return CHART_INDICATOR_OPTIONS.find((option) => option.value === value)?.label || value;
+}
+
+function buildIndicatorSignalAlerts(candles) {
+  if (!Array.isArray(candles) || candles.length < 3 || !activeChartIndicators.size) return [];
+  const recentMinIndex = Math.max(0, candles.length - 2);
+  const alerts = [];
+  const addAlert = (indicator, entryIndex, direction, kind) => {
+    if (!Number.isInteger(entryIndex) || entryIndex < recentMinIndex || entryIndex >= candles.length) return;
+    alerts.push({ indicator, entryIndex, direction, kind });
+  };
+
+  if (activeChartIndicators.has("SMC_SETUP_08")) {
+    const smc = buildSMCSetup08(candles, 5);
+    [...smc.bullish, ...smc.bearish].forEach((setup) => {
+      const entryIndex = setup.triggerIndex != null && setup.triggerIndex + 1 < candles.length
+        ? setup.triggerIndex + 1
+        : setup.triggerIndex;
+      addAlert("SMC_SETUP_08", entryIndex, setup.direction === "BULL" ? "BUY" : "SELL", "setup");
+    });
+  }
+
+  if (activeChartIndicators.has("SMC_PRO_COMBO")) {
+    const smc = buildSMCProCombo(candles, {
+      leftLen: 5,
+      rightLen: 5,
+      atrLen: 14,
+      atrMult: 0.1,
+      volLen: 20,
+      minBodyPct: 55,
+      useAtrBuffer: true,
+      useBodyFilter: true,
+    });
+    smc.signals.forEach((signal) => {
+      addAlert("SMC_PRO_COMBO", signal.entryIndex, signal.type.includes("BUY") ? "BUY" : "SELL", signal.type);
+    });
+  }
+
+  if (activeChartIndicators.has("ADX_VOL_WAVES")) {
+    const waves = buildADXVolatilityWaves(candles, {
+      bbLength: 20,
+      bbMult: 1.5,
+      adxLength: 14,
+      adxSmooth: 14,
+      adxInfluence: 0.8,
+      zoneOffset: 1,
+      zoneExpansion: 1,
+      smoothLength: 50,
+      signalCooldown: 20,
+    });
+    waves.signals.forEach((signal) => addAlert("ADX_VOL_WAVES", signal.entryIndex, signal.type, "zone"));
+  }
+
+  if (activeChartIndicators.has("BREAKOUT_TARGETS")) {
+    const breakout = buildBreakoutTargets(candles, {
+      len: 99,
+      preventOverlap: true,
+      atrPeriod: 14,
+      slMultiplier: 5,
+      tp1Multiplier: 0.5,
+      tp2Multiplier: 1,
+      tp3Multiplier: 1.5,
+    });
+    breakout.breakouts.forEach((signal) => addAlert("BREAKOUT_TARGETS", signal.entryIndex, signal.direction === "UP" ? "BUY" : "SELL", "breakout"));
+  }
+
+  if (activeChartIndicators.has("DYNAMIC_Z_DIVERGENCE")) {
+    const dzd = buildDynamicZDivergence(candles, {});
+    dzd.buySignals.forEach((signal) => addAlert("DYNAMIC_Z_DIVERGENCE", signal.entryIndex, "BUY", "mean reversion"));
+    dzd.sellSignals.forEach((signal) => addAlert("DYNAMIC_Z_DIVERGENCE", signal.entryIndex, "SELL", "mean reversion"));
+  }
+
+  if (activeChartIndicators.has("LIQUIDITY_TRENDLINE")) {
+    const lt = buildLiquidityTrendlineSignals(candles, {
+      len: 5,
+      space: 2,
+      colorUp: "#0044ff",
+      colorDown: "#ff2b00",
+    });
+    lt.signals.forEach((signal) => addAlert("LIQUIDITY_TRENDLINE", signal.entryIndex, signal.type === "UP" ? "BUY" : "SELL", "break"));
+  }
+
+  if (activeChartIndicators.has("STRUCTURE_PULLBACK")) {
+    const spc = buildStructurePullbackContinuation(candles, {
+      pivotLen: 4,
+      pullbackLookback: 4,
+      weakBodyRatio: 0.4,
+      rejectionWickRatio: 0.45,
+      maxTrendFlips: 4,
+      flipLookback: 30,
+    });
+    spc.signals.forEach((signal) => addAlert("STRUCTURE_PULLBACK", signal.entryIndex, signal.direction, signal.reason));
+  }
+
+  if (activeChartIndicators.has("SR_SIGNALS_MTF")) {
+    const sr = buildSupportResistanceSignalsMTF(candles, {
+      length: 6,
+      zoneAtrMult: 0.5,
+      securityAtrMult: 0,
+      manipulationMult: 1.3,
+      maxActive: 5,
+      showBroken: true,
+      extendActive: true,
+    });
+    sr.signals.forEach((signal) => addAlert("SR_SIGNALS_MTF", signal.entryIndex, signal.direction, signal.kind));
+  }
+
+  if (activeChartIndicators.has("TICK_REJECTION")) {
+    const rejection = buildTickRejectionMicrostructure(candles, {
+      ticksLookback: 5,
+      minRejectionRatio: 0.5,
+      minRange: Math.max(currentPip || 0.0001, 0.0001),
+    });
+    rejection.signals.forEach((signal) => addAlert("TICK_REJECTION", signal.entryIndex, signal.type === "lower" ? "BUY" : "SELL", "rejection"));
+  }
+
+  return alerts.sort((a, b) => a.entryIndex - b.entryIndex);
+}
+
+function maybeNotifyIndicatorSignals(candles) {
+  const alerts = buildIndicatorSignalAlerts(candles);
+  if (!alerts.length) return;
+
+  const unseen = alerts.filter((alert) => {
+    const key = `${currentSymbol || "symbol"}|${candleBuilder.timeframe}|${alert.indicator}|${alert.entryIndex}|${alert.direction}|${alert.kind}`;
+    alert.key = key;
+    return !shownIndicatorSignalKeys.has(key);
+  });
+  if (!unseen.length) return;
+
+  const latest = unseen[unseen.length - 1];
+  shownIndicatorSignalKeys.add(latest.key);
+  if (shownIndicatorSignalKeys.size > 250) {
+    const oldestKey = shownIndicatorSignalKeys.values().next().value;
+    if (oldestKey) shownIndicatorSignalKeys.delete(oldestKey);
+  }
+
+  const indicatorLabel = getChartIndicatorLabel(latest.indicator);
+  const marketLabel = symbolName?.textContent?.trim() || currentSymbol || "Current market";
+  const timeframeLabel = getTimeframeLabel(candleBuilder.timeframe);
+  showSignalToast({
+    title: `${indicatorLabel}: ${latest.direction}`,
+    body: `${marketLabel} • ${timeframeLabel}${latest.kind ? ` • ${latest.kind}` : ""}`,
+    tone: latest.direction === "BUY" ? "buy" : latest.direction === "SELL" ? "sell" : "neutral",
+  });
 }
 
 function updateTimeframeUI() {
@@ -4654,6 +5058,8 @@ async function setChartTimeframe(seconds) {
   chartDragX = null;
   chartGestureMoved = false;
   lastAutoTradeCandle = null;
+  shownIndicatorSignalKeys.clear();
+  signalToastLayerEl?.classList.add("hidden");
   candleBuilder.reset();
   updateTimeframeUI();
   hideTimeframePicker();
@@ -4752,7 +5158,7 @@ function onMessage(event) {
 
     const { candles } = candleBuilder.update(data.tick);
     const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
-    updateSignalFromCandles(allCandles);
+    updateSignalFromCandles(allCandles, { live: true });
   }
   if (data.msg_type === "balance" && data.balance) {
     updateAccountSummary(data.balance);
@@ -5082,6 +5488,8 @@ function onSymbolChange() {
 
   candleBuilder.reset();
   chartOffset = 0;
+  shownIndicatorSignalKeys.clear();
+  signalToastLayerEl?.classList.add("hidden");
   updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
   loadTickHistory(symbol).catch(() => {});
   loadContractsFor(symbol).catch(() => {});
@@ -5525,6 +5933,7 @@ function init() {
   appPanels = document.querySelectorAll(".app-panel");
   hlButtons = document.getElementById("hlButtons");
   phoneEl = document.querySelector(".phone");
+  ensureSignalToastLayer();
   barrierField = document.getElementById("barrierField");
   quickRow = document.getElementById("quickRow");
   tradeBody = document.getElementById("tradeBody");
