@@ -145,6 +145,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "STRUCTURE_PULLBACK", label: "Structure Pullback Continuation" },
   { value: "TICK_REJECTION", label: "Tick Rejection Microstructure" },
   { value: "TREND_VOLUME_ACCUM", label: "Trend Volume Accumulation" },
+  { value: "CHART_PATTERNS", label: "Chart Patterns Signals" },
   { value: "EMA", label: "EMA 9" },
 ];
 const CHART_INDICATOR_GROUPS = [
@@ -177,6 +178,11 @@ const CHART_INDICATOR_GROUPS = [
     key: "STRUCT",
     label: "Structure",
     items: ["STRUCTURE_PULLBACK", "SR_SIGNALS_MTF"],
+  },
+  {
+    key: "PATTERN",
+    label: "Patterns",
+    items: ["CHART_PATTERNS"],
   },
   {
     key: "MOM",
@@ -2508,6 +2514,373 @@ function buildSupportResistanceSignalsMTF(candles, config = {}) {
   };
 }
 
+function buildChartPatternsSignals(candles, config = {}) {
+  const pivotLen = Math.max(2, config.pivotLen ?? 3);
+  const toleranceMult = config.toleranceMult ?? 0.45;
+  const maxPatternAge = config.maxPatternAge ?? 60;
+  const confirmedCandles = candles.slice(0, -1);
+
+  if (!Array.isArray(candles) || confirmedCandles.length < 30) {
+    return { patterns: [], signals: [] };
+  }
+
+  const avgRange = averageRange(confirmedCandles, 30) || ((confirmedCandles[confirmedCandles.length - 1]?.close ?? 1) * 0.001);
+  const tolerance = Math.max(avgRange * toleranceMult, currentPip || 0.0001);
+  const pivotHighs = [];
+  const pivotLows = [];
+  for (let i = pivotLen; i < confirmedCandles.length - pivotLen; i += 1) {
+    if (isPivotHighLR(confirmedCandles, i, pivotLen, pivotLen)) pivotHighs.push({ index: i, price: confirmedCandles[i].high });
+    if (isPivotLowLR(confirmedCandles, i, pivotLen, pivotLen)) pivotLows.push({ index: i, price: confirmedCandles[i].low });
+  }
+
+  const patterns = [];
+  const signals = [];
+  const seenPatternKeys = new Set();
+  const pushPattern = (pattern) => {
+    const key = `${pattern.type}|${pattern.startIndex}|${pattern.breakIndex}|${pattern.direction}`;
+    if (seenPatternKeys.has(key)) return;
+    seenPatternKeys.add(key);
+    patterns.push(pattern);
+    if (pattern.entryIndex != null) {
+      signals.push({
+        type: pattern.type,
+        direction: pattern.direction,
+        entryIndex: pattern.entryIndex,
+        breakIndex: pattern.breakIndex,
+        label: pattern.label,
+      });
+    }
+  };
+
+  const highBetween = (from, to) => {
+    let high = Number.NEGATIVE_INFINITY;
+    for (let i = from; i <= to; i += 1) high = Math.max(high, confirmedCandles[i].high);
+    return high;
+  };
+
+  const lowBetween = (from, to) => {
+    let low = Number.POSITIVE_INFINITY;
+    for (let i = from; i <= to; i += 1) low = Math.min(low, confirmedCandles[i].low);
+    return low;
+  };
+
+  const findBreakAbove = (fromIndex, level) => {
+    for (let i = fromIndex; i < confirmedCandles.length; i += 1) {
+      if (confirmedCandles[i].close > level) return i;
+    }
+    return null;
+  };
+
+  const findBreakBelow = (fromIndex, level) => {
+    for (let i = fromIndex; i < confirmedCandles.length; i += 1) {
+      if (confirmedCandles[i].close < level) return i;
+    }
+    return null;
+  };
+
+  const lineValueAt = (a, b, index) => {
+    const dx = b.index - a.index;
+    if (dx === 0) return a.price;
+    return a.price + (((b.price - a.price) / dx) * (index - a.index));
+  };
+
+  const highestPivotLowBetween = (from, to) => {
+    let best = null;
+    for (const pivot of pivotLows) {
+      if (pivot.index <= from || pivot.index >= to) continue;
+      if (!best || pivot.price > best.price) best = pivot;
+    }
+    return best;
+  };
+
+  const lowestPivotHighBetween = (from, to) => {
+    let best = null;
+    for (const pivot of pivotHighs) {
+      if (pivot.index <= from || pivot.index >= to) continue;
+      if (!best || pivot.price < best.price) best = pivot;
+    }
+    return best;
+  };
+
+  for (let i = 1; i < pivotLows.length; i += 1) {
+    const a = pivotLows[i - 1];
+    const b = pivotLows[i];
+    const spacing = b.index - a.index;
+    if (spacing < 6 || spacing > maxPatternAge) continue;
+    if (Math.abs(a.price - b.price) > tolerance) continue;
+    const midHighPivot = lowestPivotHighBetween(a.index, b.index);
+    if (!midHighPivot) continue;
+    const neckline = midHighPivot.price;
+    const valleyDepth = neckline - Math.min(a.price, b.price);
+    if (valleyDepth < tolerance * 1.5) continue;
+    if (Math.abs(a.index - midHighPivot.index) < 2 || Math.abs(b.index - midHighPivot.index) < 2) continue;
+    const breakIndex = findBreakAbove(b.index + 1, neckline);
+    if (breakIndex == null || breakIndex + 1 >= candles.length) continue;
+    pushPattern({
+      type: "DOUBLE_BOTTOM",
+      label: "Double Bottom",
+      direction: "BUY",
+      startIndex: a.index,
+      breakIndex,
+      entryIndex: breakIndex + 1,
+      lines: [
+        { a, b, kind: "base" },
+        { a: { index: midHighPivot.index, price: neckline }, b: { index: breakIndex, price: neckline }, kind: "neck" },
+      ],
+      pivotPoints: [a, midHighPivot, b],
+    });
+  }
+
+  for (let i = 1; i < pivotHighs.length; i += 1) {
+    const a = pivotHighs[i - 1];
+    const b = pivotHighs[i];
+    const spacing = b.index - a.index;
+    if (spacing < 6 || spacing > maxPatternAge) continue;
+    if (Math.abs(a.price - b.price) > tolerance) continue;
+    const midLowPivot = highestPivotLowBetween(a.index, b.index);
+    if (!midLowPivot) continue;
+    const neckline = midLowPivot.price;
+    const peakHeight = Math.max(a.price, b.price) - neckline;
+    if (peakHeight < tolerance * 1.5) continue;
+    if (Math.abs(a.index - midLowPivot.index) < 2 || Math.abs(b.index - midLowPivot.index) < 2) continue;
+    const breakIndex = findBreakBelow(b.index + 1, neckline);
+    if (breakIndex == null || breakIndex + 1 >= candles.length) continue;
+    pushPattern({
+      type: "DOUBLE_TOP",
+      label: "Double Top",
+      direction: "SELL",
+      startIndex: a.index,
+      breakIndex,
+      entryIndex: breakIndex + 1,
+      lines: [
+        { a, b, kind: "base" },
+        { a: { index: midLowPivot.index, price: neckline }, b: { index: breakIndex, price: neckline }, kind: "neck" },
+      ],
+      pivotPoints: [a, midLowPivot, b],
+    });
+  }
+
+  for (let i = 2; i < pivotHighs.length; i += 1) {
+    const ls = pivotHighs[i - 2];
+    const hd = pivotHighs[i - 1];
+    const rs = pivotHighs[i];
+    if (!(ls.index < hd.index && hd.index < rs.index)) continue;
+    if (rs.index - ls.index > maxPatternAge) continue;
+    const shoulderTol = Math.max(tolerance, hd.price * 0.002);
+    if (!(hd.price > ls.price + tolerance && hd.price > rs.price + tolerance)) continue;
+    if (Math.abs(ls.price - rs.price) > shoulderTol) continue;
+    const leftNeck = lowBetween(ls.index, hd.index);
+    const rightNeck = lowBetween(hd.index, rs.index);
+    const neckline = (leftNeck + rightNeck) / 2;
+    const breakIndex = findBreakBelow(rs.index + 1, neckline);
+    if (breakIndex == null || breakIndex + 1 >= candles.length) continue;
+    pushPattern({
+      type: "HEAD_SHOULDERS",
+      label: "Head & Shoulders",
+      direction: "SELL",
+      startIndex: ls.index,
+      breakIndex,
+      entryIndex: breakIndex + 1,
+      lines: [
+        { a: ls, b: hd, kind: "shape" },
+        { a: hd, b: rs, kind: "shape" },
+        { a: { index: ls.index, price: neckline }, b: { index: breakIndex, price: neckline }, kind: "neck" },
+      ],
+      pivotPoints: [ls, hd, rs],
+    });
+  }
+
+  for (let i = 2; i < pivotLows.length; i += 1) {
+    const ls = pivotLows[i - 2];
+    const hd = pivotLows[i - 1];
+    const rs = pivotLows[i];
+    if (!(ls.index < hd.index && hd.index < rs.index)) continue;
+    if (rs.index - ls.index > maxPatternAge) continue;
+    const shoulderTol = Math.max(tolerance, hd.price * 0.002);
+    if (!(hd.price < ls.price - tolerance && hd.price < rs.price - tolerance)) continue;
+    if (Math.abs(ls.price - rs.price) > shoulderTol) continue;
+    const leftNeck = highBetween(ls.index, hd.index);
+    const rightNeck = highBetween(hd.index, rs.index);
+    const neckline = (leftNeck + rightNeck) / 2;
+    const breakIndex = findBreakAbove(rs.index + 1, neckline);
+    if (breakIndex == null || breakIndex + 1 >= candles.length) continue;
+    pushPattern({
+      type: "INV_HEAD_SHOULDERS",
+      label: "Inverse H&S",
+      direction: "BUY",
+      startIndex: ls.index,
+      breakIndex,
+      entryIndex: breakIndex + 1,
+      lines: [
+        { a: ls, b: hd, kind: "shape" },
+        { a: hd, b: rs, kind: "shape" },
+        { a: { index: ls.index, price: neckline }, b: { index: breakIndex, price: neckline }, kind: "neck" },
+      ],
+      pivotPoints: [ls, hd, rs],
+    });
+  }
+
+  const recentHighs = pivotHighs.slice(-3);
+  const recentLows = pivotLows.slice(-3);
+  if (recentHighs.length >= 2 && recentLows.length >= 2) {
+    const h1 = recentHighs[recentHighs.length - 2];
+    const h2 = recentHighs[recentHighs.length - 1];
+    const l1 = recentLows[recentLows.length - 2];
+    const l2 = recentLows[recentLows.length - 1];
+    const startIndex = Math.min(h1.index, l1.index);
+    const lastPivotIndex = Math.max(h2.index, l2.index);
+    if (lastPivotIndex - startIndex <= maxPatternAge && Math.max(h1.index, l1.index) < lastPivotIndex) {
+      const highsFlat = Math.abs(h1.price - h2.price) <= tolerance;
+      const lowsFlat = Math.abs(l1.price - l2.price) <= tolerance;
+      const highsRising = h2.price > h1.price + tolerance * 0.3;
+      const highsFalling = h2.price < h1.price - tolerance * 0.3;
+      const lowsRising = l2.price > l1.price + tolerance * 0.3;
+      const lowsFalling = l2.price < l1.price - tolerance * 0.3;
+      const converging = Math.abs(h2.price - l2.price) < Math.abs(h1.price - l1.price);
+
+      const addBreakPattern = (type, label, direction, breakIndex, topLine, bottomLine) => {
+        if (breakIndex == null || breakIndex + 1 >= candles.length) return;
+        pushPattern({
+          type,
+          label,
+          direction,
+          startIndex,
+          breakIndex,
+          entryIndex: breakIndex + 1,
+          lines: [
+            { a: topLine[0], b: topLine[1], kind: "upper" },
+            { a: bottomLine[0], b: bottomLine[1], kind: "lower" },
+          ],
+          pivotPoints: [h1, h2, l1, l2],
+        });
+      };
+
+      if (highsFlat && lowsRising) {
+        const resistance = (h1.price + h2.price) / 2;
+        addBreakPattern("ASC_TRIANGLE", "Ascending Triangle", "BUY", findBreakAbove(lastPivotIndex + 1, resistance), [h1, h2], [l1, l2]);
+      }
+      if (lowsFlat && highsFalling) {
+        const support = (l1.price + l2.price) / 2;
+        addBreakPattern("DESC_TRIANGLE", "Descending Triangle", "SELL", findBreakBelow(lastPivotIndex + 1, support), [h1, h2], [l1, l2]);
+      }
+      if (highsFalling && lowsRising && converging) {
+        let breakIndex = null;
+        let direction = null;
+        for (let i = lastPivotIndex + 1; i < confirmedCandles.length; i += 1) {
+          const upper = lineValueAt(h1, h2, i);
+          const lower = lineValueAt(l1, l2, i);
+          if (confirmedCandles[i].close > upper) {
+            breakIndex = i;
+            direction = "BUY";
+            break;
+          }
+          if (confirmedCandles[i].close < lower) {
+            breakIndex = i;
+            direction = "SELL";
+            break;
+          }
+        }
+        if (direction) addBreakPattern("SYM_TRIANGLE", "Sym Triangle", direction, breakIndex, [h1, h2], [l1, l2]);
+      }
+      if (highsFalling && lowsFalling && converging) {
+        let breakIndex = null;
+        for (let i = lastPivotIndex + 1; i < confirmedCandles.length; i += 1) {
+          const upper = lineValueAt(h1, h2, i);
+          if (confirmedCandles[i].close > upper) {
+            breakIndex = i;
+            break;
+          }
+        }
+        addBreakPattern("FALL_WEDGE", "Falling Wedge", "BUY", breakIndex, [h1, h2], [l1, l2]);
+      }
+      if (highsRising && lowsRising && converging) {
+        let breakIndex = null;
+        for (let i = lastPivotIndex + 1; i < confirmedCandles.length; i += 1) {
+          const lower = lineValueAt(l1, l2, i);
+          if (confirmedCandles[i].close < lower) {
+            breakIndex = i;
+            break;
+          }
+        }
+        addBreakPattern("RISE_WEDGE", "Rising Wedge", "SELL", breakIndex, [h1, h2], [l1, l2]);
+      }
+    }
+  }
+
+  const impulseLookback = 12;
+  for (let i = impulseLookback + 5; i < confirmedCandles.length - 1; i += 1) {
+    const impulse = confirmedCandles.slice(i - impulseLookback, i - 4);
+    const pullback = confirmedCandles.slice(i - 4, i + 1);
+    const impulseMove = impulse[impulse.length - 1].close - impulse[0].open;
+    const pullbackHighs = pullback.map((c) => c.high);
+    const pullbackLows = pullback.map((c) => c.low);
+    const pullbackTop1 = { index: i - 4, price: pullbackHighs[0] };
+    const pullbackTop2 = { index: i, price: pullbackHighs[pullbackHighs.length - 1] };
+    const pullbackBottom1 = { index: i - 4, price: pullbackLows[0] };
+    const pullbackBottom2 = { index: i, price: pullbackLows[pullbackLows.length - 1] };
+    const pullbackRange = Math.max(...pullbackHighs) - Math.min(...pullbackLows);
+    if (Math.abs(impulseMove) < avgRange * 5 || pullbackRange > Math.abs(impulseMove) * 0.65) continue;
+
+    if (impulseMove > 0) {
+      const descendingPullback = pullbackTop2.price < pullbackTop1.price && pullbackBottom2.price <= pullbackBottom1.price + tolerance;
+      if (descendingPullback && confirmedCandles[i].close > Math.max(...pullbackHighs.slice(0, -1))) {
+        const breakIndex = i;
+        if (breakIndex + 1 < candles.length) {
+          pushPattern({
+            type: "BULL_FLAG",
+            label: "Bull Flag",
+            direction: "BUY",
+            startIndex: i - impulseLookback,
+            breakIndex,
+            entryIndex: breakIndex + 1,
+            lines: [
+              { a: pullbackTop1, b: pullbackTop2, kind: "upper" },
+              { a: pullbackBottom1, b: pullbackBottom2, kind: "lower" },
+            ],
+            pivotPoints: [],
+          });
+        }
+      }
+    } else if (impulseMove < 0) {
+      const ascendingPullback = pullbackBottom2.price > pullbackBottom1.price && pullbackTop2.price >= pullbackTop1.price - tolerance;
+      if (ascendingPullback && confirmedCandles[i].close < Math.min(...pullbackLows.slice(0, -1))) {
+        const breakIndex = i;
+        if (breakIndex + 1 < candles.length) {
+          pushPattern({
+            type: "BEAR_FLAG",
+            label: "Bear Flag",
+            direction: "SELL",
+            startIndex: i - impulseLookback,
+            breakIndex,
+            entryIndex: breakIndex + 1,
+            lines: [
+              { a: pullbackTop1, b: pullbackTop2, kind: "upper" },
+              { a: pullbackBottom1, b: pullbackBottom2, kind: "lower" },
+            ],
+            pivotPoints: [],
+          });
+        }
+      }
+    }
+  }
+
+  const dedupedSignals = [];
+  const seenSignalIndex = new Set();
+  signals
+    .sort((a, b) => a.entryIndex - b.entryIndex)
+    .forEach((signal) => {
+      const key = `${signal.entryIndex}|${signal.direction}`;
+      if (seenSignalIndex.has(key)) return;
+      seenSignalIndex.add(key);
+      dedupedSignals.push(signal);
+    });
+
+  return {
+    patterns: patterns.slice(-10),
+    signals: dedupedSignals.slice(-20),
+  };
+}
+
 function buildBreakoutTargets(candles, config = {}) {
   const len = config.len ?? 99;
   const preventOverlap = config.preventOverlap ?? true;
@@ -3335,6 +3708,7 @@ function renderMiniChart(candles) {
   const hasSRSignalsMTF = activeChartIndicators.has("SR_SIGNALS_MTF");
   const hasTickRejection = activeChartIndicators.has("TICK_REJECTION");
   const hasTrendVolumeAccum = activeChartIndicators.has("TREND_VOLUME_ACCUM");
+  const hasChartPatterns = activeChartIndicators.has("CHART_PATTERNS");
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -4626,6 +5000,77 @@ function renderMiniChart(candles) {
     }
   }
 
+  if (hasChartPatterns) {
+    const cp = buildChartPatternsSignals(candles, {
+      pivotLen: 3,
+      toleranceMult: 0.45,
+      maxPatternAge: 60,
+    });
+
+    cp.patterns.forEach((pattern) => {
+      ctx.save();
+      pattern.lines.forEach((segment) => {
+        const x1 = leftPad + ((segment.a.index - start) * slotW) + (slotW / 2);
+        const x2 = leftPad + ((segment.b.index - start) * slotW) + (slotW / 2);
+        if (x1 < leftPad - slotW || x2 > width - rightPad + slotW) return;
+        const y1 = toY(segment.a.price);
+        const y2 = toY(segment.b.price);
+        ctx.strokeStyle = segment.kind === "neck"
+          ? "rgba(240, 240, 245, 0.85)"
+          : pattern.direction === "BUY"
+            ? "rgba(24, 216, 159, 0.80)"
+            : "rgba(255, 106, 77, 0.80)";
+        ctx.lineWidth = segment.kind === "neck" ? 1 : 1.2;
+        if (segment.kind === "neck") ctx.setLineDash([4, 3]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+      });
+
+      if (pattern.breakIndex >= start && pattern.breakIndex < end) {
+        const labelX = leftPad + ((pattern.breakIndex - start) * slotW) + (slotW / 2);
+        const labelY = pattern.direction === "BUY"
+          ? toY(candles[pattern.breakIndex].low) - 10
+          : toY(candles[pattern.breakIndex].high) + 10;
+        ctx.fillStyle = pattern.direction === "BUY" ? "#18d89f" : "#ff6a4d";
+        ctx.font = "8px Segoe UI, sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = pattern.direction === "BUY" ? "bottom" : "top";
+        ctx.fillText(pattern.label, labelX, labelY);
+      }
+      ctx.restore();
+    });
+
+    cp.signals.forEach((signal) => {
+      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isBuy = signal.direction === "BUY";
+      const anchorY = isBuy ? toY(candles[signal.entryIndex].low) + 12 : toY(candles[signal.entryIndex].high) - 12;
+      const color = isBuy ? "#18d89f" : "#ff6a4d";
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, anchorY - 7);
+        ctx.lineTo(x - 5, anchorY + 3);
+        ctx.lineTo(x + 5, anchorY + 3);
+      } else {
+        ctx.moveTo(x, anchorY + 7);
+        ctx.lineTo(x - 5, anchorY - 3);
+        ctx.lineTo(x + 5, anchorY - 3);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(signal.label, x, isBuy ? anchorY + 6 : anchorY - 6);
+      ctx.restore();
+    });
+  }
+
   // Current price dot and right-side labels
   if (points.length >= 2) {
     const last = points[points.length - 1];
@@ -4893,6 +5338,15 @@ function buildIndicatorSignalAlerts(candles) {
       minRange: Math.max(currentPip || 0.0001, 0.0001),
     });
     rejection.signals.forEach((signal) => addAlert("TICK_REJECTION", signal.entryIndex, signal.type === "lower" ? "BUY" : "SELL", "rejection"));
+  }
+
+  if (activeChartIndicators.has("CHART_PATTERNS")) {
+    const cp = buildChartPatternsSignals(candles, {
+      pivotLen: 3,
+      toleranceMult: 0.45,
+      maxPatternAge: 60,
+    });
+    cp.signals.forEach((signal) => addAlert("CHART_PATTERNS", signal.entryIndex, signal.direction, signal.label));
   }
 
   return alerts.sort((a, b) => a.entryIndex - b.entryIndex);
