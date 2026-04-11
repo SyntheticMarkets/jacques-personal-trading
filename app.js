@@ -133,6 +133,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "BREAKOUT_TARGETS", label: "Breakout Targets" },
   { value: "DYNAMIC_Z_DIVERGENCE", label: "Dynamic Z-Score Divergence" },
   { value: "VOLUME_PROFILE_NODES", label: "Volume Profile Nodes" },
+  { value: "LIQUIDITY_TRENDLINE", label: "Liquidity Trendline" },
   { value: "EMA", label: "EMA 9" },
 ];
 const CHART_INDICATOR_GROUPS = [
@@ -155,6 +156,11 @@ const CHART_INDICATOR_GROUPS = [
     key: "BO",
     label: "Breakouts",
     items: ["BREAKOUT_TARGETS"],
+  },
+  {
+    key: "TL",
+    label: "Trendlines",
+    items: ["LIQUIDITY_TRENDLINE"],
   },
   {
     key: "MOM",
@@ -1643,6 +1649,194 @@ function buildVolumeProfileNodes(candles, config = {}) {
   };
 }
 
+function buildLiquidityTrendlineSignals(candles, config = {}) {
+  const len = config.len ?? 5;
+  const space = config.space ?? 2;
+  const colorUp = config.colorUp ?? "#0044ff";
+  const colorDown = config.colorDown ?? "#ff2b00";
+
+  if (!Array.isArray(candles) || candles.length < Math.max(30, len * 4)) {
+    return { upperChannels: [], lowerChannels: [], signals: [] };
+  }
+
+  const tr = candles.map((candle, index) => {
+    const prevClose = candles[index - 1]?.close ?? candle.close;
+    return Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - prevClose),
+      Math.abs(candle.low - prevClose),
+    );
+  });
+  const atr = rmaSeries(tr, 200);
+  const padAt = (index) => Math.min((atr[index] ?? 0) * 0.1, candles[index].close * 0.001) * space;
+
+  const pivotHighs = [];
+  const pivotLows = [];
+  const upperChannels = [];
+  const lowerChannels = [];
+  const signals = [];
+  let upperBroken = false;
+  let lowerBroken = false;
+  let activeUpper = null;
+  let activeLower = null;
+
+  const buildChannel = (from, to, pad, direction) => {
+    const dx = to.index - from.index;
+    if (dx <= 0) return null;
+    const slope = (to.price - from.price) / dx;
+    return {
+      direction,
+      startIndex: from.index,
+      endIndex: to.index,
+      top1: direction === "UPPER" ? from.price : from.price + pad,
+      top2: direction === "UPPER" ? to.price : to.price + pad,
+      bottom1: direction === "UPPER" ? from.price - pad : from.price,
+      bottom2: direction === "UPPER" ? to.price - pad : to.price,
+      slope,
+      pad,
+      color: direction === "UPPER" ? colorDown : colorUp,
+      liveEndIndex: to.index,
+      liveTop: direction === "UPPER" ? to.price : to.price + pad,
+      liveBottom: direction === "UPPER" ? to.price - pad : to.price,
+    };
+  };
+
+  const lineValueAt = (startValue, slope, bars) => startValue + (slope * bars);
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const pivotIndex = i - len;
+    if (pivotIndex >= len && pivotIndex < candles.length - len) {
+      if (isPivotHighLR(candles, pivotIndex, len, len)) {
+        pivotHighs.unshift({ index: pivotIndex, price: candles[pivotIndex].high });
+        if (pivotHighs.length > 4) pivotHighs.pop();
+        if (pivotHighs.length > 1) {
+          const current = pivotHighs[0];
+          const before = pivotHighs[1];
+          let valid = false;
+          if (current.price < before.price) {
+            if (upperBroken) valid = true;
+            else if (pivotHighs.length > 3) {
+              const pastOld = pivotHighs[3];
+              const pastCur = pivotHighs[2];
+              const now = pivotHighs[1];
+              const late = pivotHighs[0];
+              valid = now.price < pastCur.price && now.price < pastOld.price && late.price < pastCur.price && late.price < pastOld.price;
+            }
+          }
+          if (valid) {
+            const channel = buildChannel(before, current, padAt(i), "UPPER");
+            if (channel) {
+              let remove = false;
+              for (let idx = before.index; idx <= i; idx += 1) {
+                const projectedTop = lineValueAt(channel.top1, channel.slope, idx - before.index);
+                if (candles[idx].low > projectedTop) {
+                  remove = true;
+                  break;
+                }
+              }
+              if (remove) {
+                activeUpper = null;
+                pivotHighs.length = 0;
+                upperBroken = true;
+              } else {
+                activeUpper = channel;
+                upperChannels.push(channel);
+                pivotHighs.length = 0;
+                upperBroken = false;
+              }
+            }
+          }
+        }
+      }
+
+      if (isPivotLowLR(candles, pivotIndex, len, len)) {
+        pivotLows.unshift({ index: pivotIndex, price: candles[pivotIndex].low });
+        if (pivotLows.length > 4) pivotLows.pop();
+        if (pivotLows.length > 1) {
+          const current = pivotLows[0];
+          const before = pivotLows[1];
+          let valid = false;
+          if (current.price > before.price) {
+            if (lowerBroken) valid = true;
+            else if (pivotLows.length > 3) {
+              const pastOld = pivotLows[3];
+              const pastCur = pivotLows[2];
+              const now = pivotLows[1];
+              const late = pivotLows[0];
+              valid = now.price > pastCur.price && now.price > pastOld.price && late.price > pastCur.price && late.price > pastOld.price;
+            }
+          }
+          if (valid) {
+            const channel = buildChannel(before, current, padAt(i), "LOWER");
+            if (channel) {
+              let remove = false;
+              for (let idx = before.index; idx <= i; idx += 1) {
+                const projectedBottom = lineValueAt(channel.bottom1, channel.slope, idx - before.index);
+                if (candles[idx].high < projectedBottom) {
+                  remove = true;
+                  break;
+                }
+              }
+              if (remove) {
+                activeLower = null;
+                pivotLows.length = 0;
+                lowerBroken = true;
+              } else {
+                activeLower = channel;
+                lowerChannels.push(channel);
+                pivotLows.length = 0;
+                lowerBroken = false;
+              }
+            }
+          }
+        }
+      }
+    }
+
+    if (activeUpper) {
+      activeUpper.liveEndIndex = i;
+      activeUpper.liveTop = lineValueAt(activeUpper.top1, activeUpper.slope, i - activeUpper.startIndex);
+      activeUpper.liveBottom = lineValueAt(activeUpper.bottom1, activeUpper.slope, i - activeUpper.startIndex);
+      if (candles[i].low > activeUpper.liveTop) {
+        signals.push({
+          type: "UP",
+          signalIndex: i,
+          entryIndex: i + 1 < candles.length ? i + 1 : null,
+          price: candles[i].low,
+          color: colorUp,
+        });
+        activeUpper = null;
+        upperBroken = true;
+        pivotHighs.length = 0;
+      }
+    }
+
+    if (activeLower) {
+      activeLower.liveEndIndex = i;
+      activeLower.liveTop = lineValueAt(activeLower.top1, activeLower.slope, i - activeLower.startIndex);
+      activeLower.liveBottom = lineValueAt(activeLower.bottom1, activeLower.slope, i - activeLower.startIndex);
+      if (candles[i].high < activeLower.liveBottom) {
+        signals.push({
+          type: "DOWN",
+          signalIndex: i,
+          entryIndex: i + 1 < candles.length ? i + 1 : null,
+          price: candles[i].high,
+          color: colorDown,
+        });
+        activeLower = null;
+        lowerBroken = true;
+        pivotLows.length = 0;
+      }
+    }
+  }
+
+  return {
+    upperChannels,
+    lowerChannels,
+    signals,
+  };
+}
+
 function buildBreakoutTargets(candles, config = {}) {
   const len = config.len ?? 99;
   const preventOverlap = config.preventOverlap ?? true;
@@ -2464,6 +2658,7 @@ function renderMiniChart(candles) {
   const hasBreakoutTargets = activeChartIndicators.has("BREAKOUT_TARGETS");
   const hasDynamicZDivergence = activeChartIndicators.has("DYNAMIC_Z_DIVERGENCE");
   const hasVolumeProfileNodes = activeChartIndicators.has("VOLUME_PROFILE_NODES");
+  const hasLiquidityTrendline = activeChartIndicators.has("LIQUIDITY_TRENDLINE");
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -3379,6 +3574,72 @@ function renderMiniChart(candles) {
       drawVaLine(vp.vahIndex, "#2962ff", "VAH");
       drawVaLine(vp.valIndex, "#2962ff", "VAL");
     }
+  }
+
+  if (hasLiquidityTrendline) {
+    const lt = buildLiquidityTrendlineSignals(candles, {
+      len: 5,
+      space: 2,
+      colorUp: "#0044ff",
+      colorDown: "#ff2b00",
+    });
+
+    const drawChannel = (channel) => {
+      const renderEnd = channel.liveEndIndex ?? channel.endIndex;
+      if (renderEnd < start || channel.startIndex > end - 1) return;
+      const levelAt = (base, bars) => base + (channel.slope * bars);
+      const startX = leftPad + ((Math.max(start, channel.startIndex) - start) * slotW) + (slotW / 2);
+      const endX = leftPad + ((Math.min(end - 1, renderEnd) - start) * slotW) + (slotW / 2);
+      const topStartPrice = levelAt(channel.top1, Math.max(start, channel.startIndex) - channel.startIndex);
+      const topEndPrice = levelAt(channel.top1, Math.min(end - 1, renderEnd) - channel.startIndex);
+      const bottomStartPrice = levelAt(channel.bottom1, Math.max(start, channel.startIndex) - channel.startIndex);
+      const bottomEndPrice = levelAt(channel.bottom1, Math.min(end - 1, renderEnd) - channel.startIndex);
+      ctx.save();
+      ctx.strokeStyle = channel.color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(startX, toY(topStartPrice));
+      ctx.lineTo(endX, toY(topEndPrice));
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(startX, toY(bottomStartPrice));
+      ctx.lineTo(endX, toY(bottomEndPrice));
+      ctx.stroke();
+      ctx.fillStyle = channel.direction === "UPPER" ? "rgba(255,43,0,0.18)" : "rgba(0,68,255,0.18)";
+      ctx.beginPath();
+      ctx.moveTo(startX, toY(topStartPrice));
+      ctx.lineTo(endX, toY(topEndPrice));
+      ctx.lineTo(endX, toY(bottomEndPrice));
+      ctx.lineTo(startX, toY(bottomStartPrice));
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
+
+    lt.upperChannels.slice(-3).forEach(drawChannel);
+    lt.lowerChannels.slice(-3).forEach(drawChannel);
+
+    lt.signals.forEach((signal) => {
+      if (signal.entryIndex == null || signal.entryIndex < start || signal.entryIndex >= end) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isUp = signal.type === "UP";
+      const y = isUp ? toY(candles[signal.entryIndex].low) + 10 : toY(candles[signal.entryIndex].high) - 10;
+      ctx.save();
+      ctx.fillStyle = signal.color;
+      ctx.beginPath();
+      if (isUp) {
+        ctx.moveTo(x, y - 6);
+        ctx.lineTo(x - 5, y + 4);
+        ctx.lineTo(x + 5, y + 4);
+      } else {
+        ctx.moveTo(x, y + 6);
+        ctx.lineTo(x - 5, y - 4);
+        ctx.lineTo(x + 5, y - 4);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    });
   }
 
   // Current price dot and right-side labels
