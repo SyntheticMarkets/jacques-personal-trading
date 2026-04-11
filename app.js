@@ -7,6 +7,8 @@ const REDIRECT_URI = "https://jacques-personal-trading.vercel.app";
 const OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
 
 let tabs;
+let appTabs;
+let appPanels;
 let hlButtons;
 let phoneEl;
 let barrierField;
@@ -99,6 +101,7 @@ let autoSectionEl;
 let toggleAutoBtn;
 let toggleAutoConfigBtn;
 let toggleAutoResultsBtn;
+let currentAppTab = "settings";
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -119,6 +122,7 @@ const TIMEFRAME_OPTIONS = [
   { seconds: 3600, label: "1h" },
 ];
 const DEFAULT_TIMEFRAME_SEC = 60;
+const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
   { value: "ICT_FVG", label: "ICT FVG" },
   { value: "ICT_OB", label: "ICT OB" },
@@ -134,6 +138,9 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "DYNAMIC_Z_DIVERGENCE", label: "Dynamic Z-Score Divergence" },
   { value: "VOLUME_PROFILE_NODES", label: "Volume Profile Nodes" },
   { value: "LIQUIDITY_TRENDLINE", label: "Liquidity Trendline" },
+  { value: "SR_SIGNALS_MTF", label: "Support Resistance Signals MTF" },
+  { value: "STRUCTURE_PULLBACK", label: "Structure Pullback Continuation" },
+  { value: "TICK_REJECTION", label: "Tick Rejection Microstructure" },
   { value: "EMA", label: "EMA 9" },
 ];
 const CHART_INDICATOR_GROUPS = [
@@ -163,9 +170,19 @@ const CHART_INDICATOR_GROUPS = [
     items: ["LIQUIDITY_TRENDLINE"],
   },
   {
+    key: "STRUCT",
+    label: "Structure",
+    items: ["STRUCTURE_PULLBACK", "SR_SIGNALS_MTF"],
+  },
+  {
     key: "MOM",
     label: "Momentum",
     items: ["DYNAMIC_Z_DIVERGENCE"],
+  },
+  {
+    key: "MICRO",
+    label: "Microstructure",
+    items: ["TICK_REJECTION"],
   },
   {
     key: "MA",
@@ -174,6 +191,32 @@ const CHART_INDICATOR_GROUPS = [
   },
 ];
 const activeChartIndicators = new Set();
+
+function synthesizeCandleTicks(candle) {
+  if (!candle || !Number.isFinite(candle.open) || !Number.isFinite(candle.high) || !Number.isFinite(candle.low) || !Number.isFinite(candle.close)) {
+    return [];
+  }
+  const baseTime = Number(candle.time ?? candle.epoch ?? 0);
+  const bullish = candle.close >= candle.open;
+  const path = bullish
+    ? [candle.open, candle.low, candle.high, candle.close]
+    : [candle.open, candle.high, candle.low, candle.close];
+  return path.map((price, index) => ({
+    timestamp: baseTime + index,
+    price: Number(price),
+  }));
+}
+
+function normalizeCandleTicks(candle) {
+  const rawTicks = Array.isArray(candle?.ticks) ? candle.ticks : synthesizeCandleTicks(candle);
+  return rawTicks
+    .map((tick, index) => ({
+      timestamp: Number(tick?.timestamp ?? tick?.epoch ?? candle?.time ?? index),
+      price: Number(tick?.price ?? tick?.quote ?? tick),
+    }))
+    .filter((tick) => Number.isFinite(tick.timestamp) && Number.isFinite(tick.price))
+    .slice(-MAX_CANDLE_TICKS);
+}
 
 class CandleBuilder {
   constructor(timeframe = DEFAULT_TIMEFRAME_SEC) {
@@ -195,6 +238,7 @@ class CandleBuilder {
         high: Number(c.high),
         low: Number(c.low),
         close: Number(c.close),
+        ticks: normalizeCandleTicks(c),
       }))
       .filter((c) => c.time && Number.isFinite(c.open) && Number.isFinite(c.high) && Number.isFinite(c.low) && Number.isFinite(c.close))
       .sort((a, b) => a.time - b.time);
@@ -207,6 +251,10 @@ class CandleBuilder {
   update(tick) {
     const time = Math.floor(tick.epoch / this.timeframe) * this.timeframe;
     const price = tick.quote;
+    const tickPoint = {
+      timestamp: Number(tick.epoch),
+      price: Number(price),
+    };
     let newCandleFormed = false;
 
     if (!this.currentCandle || this.currentCandle.time !== time) {
@@ -217,11 +265,16 @@ class CandleBuilder {
         }
         newCandleFormed = true;
       }
-      this.currentCandle = { time, open: price, high: price, low: price, close: price };
+      this.currentCandle = { time, open: price, high: price, low: price, close: price, ticks: [tickPoint] };
     } else {
       this.currentCandle.high = Math.max(this.currentCandle.high, price);
       this.currentCandle.low = Math.min(this.currentCandle.low, price);
       this.currentCandle.close = price;
+      this.currentCandle.ticks = Array.isArray(this.currentCandle.ticks) ? this.currentCandle.ticks : [];
+      this.currentCandle.ticks.push(tickPoint);
+      if (this.currentCandle.ticks.length > MAX_CANDLE_TICKS) {
+        this.currentCandle.ticks.shift();
+      }
     }
 
     return { candles: this.candles, newCandleFormed };
@@ -1837,6 +1890,450 @@ function buildLiquidityTrendlineSignals(candles, config = {}) {
   };
 }
 
+function buildTickRejectionMicrostructure(candles, config = {}) {
+  const ticksLookback = Math.max(3, config.ticksLookback ?? 5);
+  const minRejectionRatio = config.minRejectionRatio ?? 0.5;
+  const minRange = config.minRange ?? 0.0001;
+
+  if (!Array.isArray(candles) || candles.length < 3) {
+    return { signals: [], rejectionCandles: [] };
+  }
+
+  const rejectionCandles = [];
+  const signals = [];
+
+  candles.forEach((candle, index) => {
+    const totalRange = candle.high - candle.low;
+    if (!(totalRange >= minRange)) return;
+
+    const bodyTop = Math.max(candle.open, candle.close);
+    const bodyBottom = Math.min(candle.open, candle.close);
+    const upperWick = candle.high - bodyTop;
+    const lowerWick = bodyBottom - candle.low;
+    const upperRatio = totalRange === 0 ? 0 : upperWick / totalRange;
+    const lowerRatio = totalRange === 0 ? 0 : lowerWick / totalRange;
+
+    let type = null;
+    if (upperRatio >= minRejectionRatio && upperRatio >= lowerRatio) type = "upper";
+    else if (lowerRatio >= minRejectionRatio) type = "lower";
+    if (!type) return;
+
+    const ticks = normalizeCandleTicks(candle);
+    if (ticks.length < 2) return;
+    const lastTicks = ticks.slice(-Math.min(ticksLookback, ticks.length));
+    const prices = lastTicks.map((tick) => tick.price).filter(Number.isFinite);
+    if (prices.length < 2) return;
+
+    const rejectionCandle = {
+      sourceIndex: index,
+      entryIndex: index + 1 < candles.length ? index + 1 : null,
+      type,
+      open: prices[0],
+      high: Math.max(...prices),
+      low: Math.min(...prices),
+      close: prices[prices.length - 1],
+      upperRatio,
+      lowerRatio,
+      tickCount: lastTicks.length,
+      usesSyntheticTicks: !Array.isArray(candle.ticks),
+    };
+
+    rejectionCandles.push(rejectionCandle);
+    signals.push({
+      type,
+      sourceIndex: index,
+      entryIndex: rejectionCandle.entryIndex,
+      price: type === "lower" ? candles[index].low : candles[index].high,
+      strength: type === "lower" ? lowerRatio : upperRatio,
+      usesSyntheticTicks: rejectionCandle.usesSyntheticTicks,
+    });
+  });
+
+  return {
+    signals,
+    rejectionCandles,
+  };
+}
+
+function buildStructurePullbackContinuation(candles, config = {}) {
+  const pivotLen = Math.max(2, config.pivotLen ?? 4);
+  const pullbackLookback = Math.max(2, config.pullbackLookback ?? 4);
+  const weakBodyRatio = config.weakBodyRatio ?? 0.4;
+  const rejectionWickRatio = config.rejectionWickRatio ?? 0.45;
+  const maxTrendFlips = config.maxTrendFlips ?? 4;
+  const flipLookback = config.flipLookback ?? 30;
+
+  if (!Array.isArray(candles) || candles.length < pivotLen * 4 + 6) {
+    return {
+      signals: [],
+      trendMarks: [],
+      stats: {
+        buy: { wins: 0, total: 0 },
+        sell: { wins: 0, total: 0 },
+      },
+    };
+  }
+
+  const signals = [];
+  const trendMarks = [];
+  const stats = {
+    buy: { wins: 0, total: 0 },
+    sell: { wins: 0, total: 0 },
+  };
+  let prevHighPivot = null;
+  let prevLowPivot = null;
+  let lastHighPivot = null;
+  let lastLowPivot = null;
+  let lastHighType = null;
+  let lastLowType = null;
+  let trend = "range";
+  const trendHistory = [];
+
+  const classifyTrend = () => {
+    if (lastHighType === "HH" && lastLowType === "HL") return "uptrend";
+    if (lastHighType === "LH" && lastLowType === "LL") return "downtrend";
+    return "range";
+  };
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const pivotIndex = i - pivotLen;
+    if (pivotIndex >= pivotLen && pivotIndex < candles.length - pivotLen) {
+      if (isPivotHighLR(candles, pivotIndex, pivotLen, pivotLen)) {
+        if (lastHighPivot) prevHighPivot = lastHighPivot;
+        lastHighPivot = { index: pivotIndex, price: candles[pivotIndex].high };
+        if (prevHighPivot) lastHighType = lastHighPivot.price > prevHighPivot.price ? "HH" : "LH";
+        const nextTrend = classifyTrend();
+        if (nextTrend !== trend) trendHistory.push({ index: pivotIndex, trend: nextTrend });
+        trend = nextTrend;
+        trendMarks.push({ index: pivotIndex, price: lastHighPivot.price, type: lastHighType, trend });
+      }
+
+      if (isPivotLowLR(candles, pivotIndex, pivotLen, pivotLen)) {
+        if (lastLowPivot) prevLowPivot = lastLowPivot;
+        lastLowPivot = { index: pivotIndex, price: candles[pivotIndex].low };
+        if (prevLowPivot) lastLowType = lastLowPivot.price > prevLowPivot.price ? "HL" : "LL";
+        const nextTrend = classifyTrend();
+        if (nextTrend !== trend) trendHistory.push({ index: pivotIndex, trend: nextTrend });
+        trend = nextTrend;
+        trendMarks.push({ index: pivotIndex, price: lastLowPivot.price, type: lastLowType, trend });
+      }
+    }
+
+    if (i < 3) continue;
+    const entryCandle = candles[i];
+    const setupCandle = candles[i - 1];
+    const priorCandle = candles[i - 2];
+
+    const recentFlips = trendHistory.filter((item) => item.index >= i - flipLookback);
+    if (recentFlips.length > maxTrendFlips) continue;
+
+    const setupRange = Math.max(setupCandle.high - setupCandle.low, 0.0000001);
+    const setupBodyRatio = Math.abs(setupCandle.close - setupCandle.open) / setupRange;
+    const lowerWickRatio = (Math.min(setupCandle.open, setupCandle.close) - setupCandle.low) / setupRange;
+    const upperWickRatio = (setupCandle.high - Math.max(setupCandle.open, setupCandle.close)) / setupRange;
+
+    if (trend === "uptrend" && lastHighPivot && lastLowPivot && i - 1 > lastHighPivot.index) {
+      const pullbackStart = Math.max(lastHighPivot.index + 1, i - 1 - pullbackLookback);
+      const pullbackSlice = candles.slice(pullbackStart, i - 1);
+      const recentPullbackLow = pullbackSlice.length
+        ? Math.min(...pullbackSlice.map((candle) => candle.low))
+        : setupCandle.low;
+      const pullbackPhase = setupCandle.close < lastHighPivot.price && setupCandle.low > lastLowPivot.price;
+      if (pullbackPhase) {
+        const failure = setupCandle.low < recentPullbackLow && setupCandle.close > recentPullbackLow;
+        const weakContinuation = priorCandle.close < priorCandle.open
+          && setupCandle.close < setupCandle.open
+          && Math.abs(priorCandle.close - priorCandle.open) / Math.max(priorCandle.high - priorCandle.low, 0.0000001) < weakBodyRatio
+          && entryCandle.close > entryCandle.open
+          && entryCandle.close > setupCandle.high;
+        const rejection = lowerWickRatio >= rejectionWickRatio && entryCandle.close > entryCandle.open;
+
+        if ((failure || rejection || weakContinuation) && entryCandle.close > entryCandle.open) {
+          const resultCandle = i + 1 < candles.length ? candles[i + 1] : null;
+          const isWin = resultCandle ? resultCandle.close > resultCandle.open : null;
+          if (resultCandle) {
+            stats.buy.total += 1;
+            if (isWin) stats.buy.wins += 1;
+          }
+          signals.push({
+            direction: "BUY",
+            entryIndex: i,
+            setupIndex: i - 1,
+            trend,
+            reason: failure ? "failure" : rejection ? "rejection" : "continuation",
+            reference: recentPullbackLow,
+            result: isWin,
+            buyStats: { ...stats.buy },
+            sellStats: { ...stats.sell },
+          });
+        }
+      }
+    }
+
+    if (trend === "downtrend" && lastHighPivot && lastLowPivot && i - 1 > lastLowPivot.index) {
+      const pullbackStart = Math.max(lastLowPivot.index + 1, i - 1 - pullbackLookback);
+      const pullbackSlice = candles.slice(pullbackStart, i - 1);
+      const recentPullbackHigh = pullbackSlice.length
+        ? Math.max(...pullbackSlice.map((candle) => candle.high))
+        : setupCandle.high;
+      const pullbackPhase = setupCandle.close > lastLowPivot.price && setupCandle.high < lastHighPivot.price;
+      if (pullbackPhase) {
+        const failure = setupCandle.high > recentPullbackHigh && setupCandle.close < recentPullbackHigh;
+        const weakContinuation = priorCandle.close > priorCandle.open
+          && setupCandle.close > setupCandle.open
+          && Math.abs(priorCandle.close - priorCandle.open) / Math.max(priorCandle.high - priorCandle.low, 0.0000001) < weakBodyRatio
+          && entryCandle.close < entryCandle.open
+          && entryCandle.close < setupCandle.low;
+        const rejection = upperWickRatio >= rejectionWickRatio && entryCandle.close < entryCandle.open;
+
+        if ((failure || rejection || weakContinuation) && entryCandle.close < entryCandle.open) {
+          const resultCandle = i + 1 < candles.length ? candles[i + 1] : null;
+          const isWin = resultCandle ? resultCandle.close < resultCandle.open : null;
+          if (resultCandle) {
+            stats.sell.total += 1;
+            if (isWin) stats.sell.wins += 1;
+          }
+          signals.push({
+            direction: "SELL",
+            entryIndex: i,
+            setupIndex: i - 1,
+            trend,
+            reason: failure ? "failure" : rejection ? "rejection" : "continuation",
+            reference: recentPullbackHigh,
+            result: isWin,
+            buyStats: { ...stats.buy },
+            sellStats: { ...stats.sell },
+          });
+        }
+      }
+    }
+  }
+
+  const dedupedSignals = [];
+  let lastSignalIndex = -99;
+  signals.forEach((signal) => {
+    if (signal.entryIndex - lastSignalIndex < 2) return;
+    dedupedSignals.push(signal);
+    lastSignalIndex = signal.entryIndex;
+  });
+
+  return {
+    signals: dedupedSignals,
+    trendMarks,
+    stats,
+  };
+}
+
+function buildSupportResistanceSignalsMTF(candles, config = {}) {
+  const length = Math.max(4, config.length ?? 6);
+  const zoneAtrMult = config.zoneAtrMult ?? 0.5;
+  const securityAtrMult = config.securityAtrMult ?? 0;
+  const manipulationMult = config.manipulationMult ?? 1.3;
+  const maxActive = config.maxActive ?? 5;
+  const showBroken = config.showBroken ?? true;
+  const extendActive = config.extendActive ?? true;
+
+  if (!Array.isArray(candles) || candles.length < length * 4) {
+    return {
+      supports: [],
+      resistances: [],
+      manipulations: [],
+      signals: [],
+      stats: {
+        activeSupports: 0,
+        activeResistances: 0,
+        totalSupports: 0,
+        totalResistances: 0,
+        supportSweeps: 0,
+        resistanceSweeps: 0,
+      },
+    };
+  }
+
+  const tr = candles.map((candle, index) => {
+    const prevClose = candles[index - 1]?.close ?? candle.close;
+    return Math.max(
+      candle.high - candle.low,
+      Math.abs(candle.high - prevClose),
+      Math.abs(candle.low - prevClose),
+    );
+  });
+  const atr = rmaSeries(tr, 200);
+  const activity = candles.map((candle, index) => {
+    const prevClose = candles[index - 1]?.close ?? candle.close;
+    return ((candle.high - candle.low) + Math.abs(candle.close - prevClose)) * 1000;
+  });
+  const activityAvg = simpleMovingAverage(activity, 17);
+
+  const levels = [];
+  const manipulations = [];
+  const signals = [];
+  let totalSupports = 0;
+  let totalResistances = 0;
+  let supportSweeps = 0;
+  let resistanceSweeps = 0;
+
+  const addLevel = (price, pivotIndex, isSupport) => {
+    const currentAtr = atr[pivotIndex] ?? 0;
+    const top = isSupport ? price + (currentAtr * zoneAtrMult) : price + (currentAtr * securityAtrMult);
+    const bottom = isSupport ? price - (currentAtr * securityAtrMult) : price - (currentAtr * zoneAtrMult);
+
+    for (let i = levels.length - 1; i >= 0; i -= 1) {
+      const l = levels[i];
+      if (l.isSupport !== isSupport || l.isMitigated || l.isUserHidden) continue;
+      const overlaps = Math.max(bottom, l.bottom) < Math.min(top, l.top);
+      if (overlaps) {
+        l.top = Math.max(l.top, top);
+        l.bottom = Math.min(l.bottom, bottom);
+        l.basePrice = (l.basePrice + price) / 2;
+        return;
+      }
+    }
+
+    levels.unshift({
+      top,
+      bottom,
+      basePrice: price,
+      startIndex: pivotIndex,
+      endIndex: pivotIndex,
+      mitigationIndex: null,
+      isSupport,
+      isMitigated: false,
+      isUserHidden: false,
+      entries: 0,
+      strength: 0,
+      sweeps: 0,
+      tradedVolume: 0,
+      lastSignalIndex: -100,
+    });
+
+    if (isSupport) totalSupports += 1;
+    else totalResistances += 1;
+  };
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const pivotIndex = i - length;
+    if (pivotIndex >= length && pivotIndex < candles.length - length) {
+      if (isPivotHighLR(candles, pivotIndex, length, length)) {
+        addLevel(candles[pivotIndex].high, pivotIndex, false);
+      }
+      if (isPivotLowLR(candles, pivotIndex, length, length)) {
+        addLevel(candles[pivotIndex].low, pivotIndex, true);
+      }
+    }
+
+    if (levels.length > 100) levels.pop();
+    if (i < 1) continue;
+
+    const prev = candles[i - 1];
+    const curr = candles[i];
+    const currentAtr = atr[i - 1] ?? 0;
+    const highActivity = (activity[i - 1] ?? 0) >= 1.618 * (activityAvg[i - 1] ?? Number.POSITIVE_INFINITY);
+
+    levels.forEach((l) => {
+      if (!l.isMitigated) {
+        if (l.isSupport && curr.close < l.bottom) {
+          l.isMitigated = true;
+          l.mitigationIndex = i;
+          if (showBroken) {
+            signals.push({ kind: "break", direction: "SELL", sourceIndex: i - 1, entryIndex: i, price: prev.high });
+          }
+        } else if (!l.isSupport && curr.close > l.top) {
+          l.isMitigated = true;
+          l.mitigationIndex = i;
+          if (showBroken) {
+            signals.push({ kind: "break", direction: "BUY", sourceIndex: i - 1, entryIndex: i, price: prev.low });
+          }
+        }
+      }
+
+      const endIndex = l.isMitigated ? l.mitigationIndex : i;
+      l.endIndex = endIndex;
+
+      if (!l.isMitigated) {
+        if (curr.high >= l.bottom && curr.low <= l.top) {
+          l.tradedVolume += 1;
+          l.strength += 1;
+        }
+
+        if (l.isSupport) {
+          if (prev.low <= l.top && prev.close >= l.bottom) l.entries += 1;
+          if (prev.low < l.bottom && Math.min(prev.close, prev.open) > l.bottom) {
+            l.sweeps += 1;
+            supportSweeps += 1;
+            manipulations.push({
+              type: "support",
+              startIndex: i - 1,
+              endIndex: i + 1,
+              top: l.bottom,
+              bottom: Math.max(prev.low, l.bottom - currentAtr * manipulationMult),
+            });
+          }
+          const lowerWick = Math.min(prev.open, prev.close) - prev.low;
+          if (lowerWick >= 1.618 * currentAtr && highActivity && i - l.lastSignalIndex > 2) {
+            l.lastSignalIndex = i;
+            signals.push({ kind: "rejection", direction: "BUY", sourceIndex: i - 1, entryIndex: i, price: prev.low });
+          } else if (prev.low < l.top && prev.close > l.bottom && prev.close > prev.open && i - l.lastSignalIndex > 2) {
+            l.lastSignalIndex = i;
+            signals.push({ kind: "test", direction: "BUY", sourceIndex: i - 1, entryIndex: i, price: prev.low });
+          }
+        } else {
+          if (prev.high >= l.bottom && prev.close <= l.top) l.entries += 1;
+          if (prev.high > l.top && Math.max(prev.close, prev.open) < l.top) {
+            l.sweeps += 1;
+            resistanceSweeps += 1;
+            manipulations.push({
+              type: "resistance",
+              startIndex: i - 1,
+              endIndex: i + 1,
+              top: Math.min(prev.high, l.top + currentAtr * manipulationMult),
+              bottom: l.top,
+            });
+          }
+          const upperWick = prev.high - Math.max(prev.open, prev.close);
+          if (upperWick >= 1.618 * currentAtr && highActivity && i - l.lastSignalIndex > 2) {
+            l.lastSignalIndex = i;
+            signals.push({ kind: "rejection", direction: "SELL", sourceIndex: i - 1, entryIndex: i, price: prev.high });
+          } else if (prev.high > l.bottom && prev.close < l.top && prev.close < prev.open && i - l.lastSignalIndex > 2) {
+            l.lastSignalIndex = i;
+            signals.push({ kind: "test", direction: "SELL", sourceIndex: i - 1, entryIndex: i, price: prev.high });
+          }
+        }
+      }
+    });
+  }
+
+  const supports = [];
+  const resistances = [];
+  let activeCount = 0;
+  levels.forEach((l) => {
+    if (l.isUserHidden) return;
+    if (!l.isMitigated && activeCount >= maxActive) return;
+    const drawLevel = {
+      ...l,
+      drawEndIndex: l.isMitigated ? l.mitigationIndex : (extendActive ? candles.length - 1 : l.endIndex),
+    };
+    if (!l.isMitigated) activeCount += 1;
+    if (l.isSupport) supports.push(drawLevel);
+    else resistances.push(drawLevel);
+  });
+
+  return {
+    supports: supports.slice(0, maxActive),
+    resistances: resistances.slice(0, maxActive),
+    manipulations: manipulations.slice(-10),
+    signals: signals.filter((signal) => signal.entryIndex != null).slice(-30),
+    stats: {
+      activeSupports: supports.filter((l) => !l.isMitigated).length,
+      activeResistances: resistances.filter((l) => !l.isMitigated).length,
+      totalSupports,
+      totalResistances,
+      supportSweeps,
+      resistanceSweeps,
+    },
+  };
+}
+
 function buildBreakoutTargets(candles, config = {}) {
   const len = config.len ?? 99;
   const preventOverlap = config.preventOverlap ?? true;
@@ -2659,6 +3156,9 @@ function renderMiniChart(candles) {
   const hasDynamicZDivergence = activeChartIndicators.has("DYNAMIC_Z_DIVERGENCE");
   const hasVolumeProfileNodes = activeChartIndicators.has("VOLUME_PROFILE_NODES");
   const hasLiquidityTrendline = activeChartIndicators.has("LIQUIDITY_TRENDLINE");
+  const hasStructurePullback = activeChartIndicators.has("STRUCTURE_PULLBACK");
+  const hasSRSignalsMTF = activeChartIndicators.has("SR_SIGNALS_MTF");
+  const hasTickRejection = activeChartIndicators.has("TICK_REJECTION");
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -3642,6 +4142,258 @@ function renderMiniChart(candles) {
     });
   }
 
+  if (hasStructurePullback) {
+    const spc = buildStructurePullbackContinuation(candles, {
+      pivotLen: 4,
+      pullbackLookback: 4,
+      weakBodyRatio: 0.4,
+      rejectionWickRatio: 0.45,
+      maxTrendFlips: 4,
+      flipLookback: 30,
+    });
+
+    spc.trendMarks.slice(-10).forEach((mark) => {
+      if (mark.index < start || mark.index >= end || !mark.type) return;
+      const x = leftPad + ((mark.index - start) * slotW) + (slotW / 2);
+      const y = toY(mark.price);
+      const color = mark.type === "HH" || mark.type === "HL" ? "#18d89f" : "#ff6a4d";
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = mark.type === "HH" || mark.type === "LH" ? "bottom" : "top";
+      ctx.fillText(mark.type, x, mark.type === "HH" || mark.type === "LH" ? y - 4 : y + 4);
+      ctx.restore();
+    });
+
+    spc.signals.forEach((signal) => {
+      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isBuy = signal.direction === "BUY";
+      const anchorY = isBuy ? toY(candles[signal.entryIndex].low) + 14 : toY(candles[signal.entryIndex].high) - 14;
+      const color = isBuy ? "#18d89f" : "#ff6a4d";
+      const boxW = 16;
+      const boxH = 12;
+      const boxX = x - (boxW / 2);
+      const boxY = isBuy ? anchorY + 8 : anchorY - boxH - 8;
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = "rgba(15, 18, 24, 0.95)";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(x, isBuy ? anchorY + 3 : anchorY - 3);
+      ctx.lineTo(x, isBuy ? boxY : boxY + boxH);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(isBuy ? "PB" : "PS", x, boxY + (boxH / 2) + 0.5);
+
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, anchorY - 3);
+        ctx.lineTo(x - 5, anchorY + 5);
+        ctx.lineTo(x + 5, anchorY + 5);
+      } else {
+        ctx.moveTo(x, anchorY + 3);
+        ctx.lineTo(x - 5, anchorY - 5);
+        ctx.lineTo(x + 5, anchorY - 5);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(
+        signal.reason === "failure" ? "F" : signal.reason === "rejection" ? "R" : "C",
+        x,
+        isBuy ? boxY + boxH + 2 : boxY - 2,
+      );
+      ctx.restore();
+    });
+
+    ctx.save();
+    ctx.fillStyle = "#c4ccd7";
+    ctx.font = "9px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`B ${spc.stats.buy.wins}/${spc.stats.buy.total}`, leftPad + 4, topPad + 4);
+    ctx.fillText(`S ${spc.stats.sell.wins}/${spc.stats.sell.total}`, leftPad + 4, topPad + 16);
+    ctx.restore();
+  }
+
+  if (hasSRSignalsMTF) {
+    const sr = buildSupportResistanceSignalsMTF(candles, {
+      length: 6,
+      zoneAtrMult: 0.5,
+      securityAtrMult: 0,
+      manipulationMult: 1.3,
+      maxActive: 5,
+      showBroken: true,
+      extendActive: true,
+    });
+
+    const drawZone = (zone, lineColor, fillColor) => {
+      const localStart = Math.max(0, zone.startIndex - start);
+      const localEnd = Math.min(points.length - 1, zone.drawEndIndex - start);
+      if (localEnd < 0 || localStart > points.length - 1) return;
+      const x = leftPad + (localStart * slotW);
+      const w = Math.max(slotW, (localEnd - localStart + 1) * slotW);
+      const topY = toY(zone.top);
+      const bottomY = toY(zone.bottom);
+      const lineY = toY(zone.linePrice);
+      ctx.save();
+      ctx.fillStyle = fillColor;
+      ctx.strokeStyle = lineColor;
+      ctx.lineWidth = 1.2;
+      ctx.fillRect(x, topY, w, Math.max(2, bottomY - topY));
+      ctx.beginPath();
+      ctx.moveTo(x, lineY);
+      ctx.lineTo(x + w, lineY);
+      ctx.stroke();
+      ctx.restore();
+    };
+
+    sr.resistances.slice(-4).forEach((zone) => drawZone(zone, "rgba(242, 54, 69, 0.70)", "rgba(242, 54, 69, 0.18)"));
+    sr.supports.slice(-4).forEach((zone) => drawZone(zone, "rgba(8, 153, 129, 0.70)", "rgba(8, 153, 129, 0.18)"));
+
+    sr.manipulations.forEach((zone) => {
+      const localStart = Math.max(0, zone.startIndex - start);
+      const localEnd = Math.min(points.length - 1, zone.endIndex - start);
+      if (localEnd < 0 || localStart > points.length - 1) return;
+      const x = leftPad + (localStart * slotW);
+      const w = Math.max(slotW, (localEnd - localStart + 1) * slotW);
+      const topY = toY(zone.top);
+      const bottomY = toY(zone.bottom);
+      ctx.save();
+      ctx.fillStyle = zone.type === "support" ? "rgba(41, 98, 255, 0.22)" : "rgba(255, 152, 0, 0.22)";
+      ctx.fillRect(x, topY, w, Math.max(2, bottomY - topY));
+      ctx.restore();
+    });
+
+    sr.signals.forEach((signal) => {
+      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isBuy = signal.direction === "BUY";
+      const anchorY = isBuy ? toY(candles[signal.entryIndex].low) + 12 : toY(candles[signal.entryIndex].high) - 12;
+      const color = isBuy ? "#089981" : "#f23645";
+      const label = signal.kind === "break" ? "B" : signal.kind === "test" ? "T" : signal.kind === "retest" ? "R" : "P";
+
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, anchorY - 7);
+        ctx.lineTo(x - 5, anchorY + 3);
+        ctx.lineTo(x + 5, anchorY + 3);
+      } else {
+        ctx.moveTo(x, anchorY + 7);
+        ctx.lineTo(x - 5, anchorY - 3);
+        ctx.lineTo(x + 5, anchorY - 3);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(label, x, isBuy ? anchorY + 6 : anchorY - 6);
+      ctx.restore();
+    });
+
+    ctx.save();
+    ctx.fillStyle = "#c4ccd7";
+    ctx.font = "9px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`Sup ${sr.stats.activeSupports}/${sr.stats.totalSupports}`, leftPad + 4, topPad + 4);
+    ctx.fillText(`Res ${sr.stats.activeResistances}/${sr.stats.totalResistances}`, leftPad + 4, topPad + 16);
+    ctx.fillText(`Sw ${sr.stats.supportSweeps + sr.stats.resistanceSweeps}`, leftPad + 4, topPad + 28);
+    ctx.restore();
+  }
+
+  if (hasTickRejection) {
+    const rejection = buildTickRejectionMicrostructure(candles, {
+      ticksLookback: 5,
+      minRejectionRatio: 0.5,
+      minRange: Math.max(currentPip || 0.0001, 0.0001),
+    });
+
+    rejection.rejectionCandles.forEach((micro) => {
+      if (micro.sourceIndex < start || micro.sourceIndex >= end) return;
+      const visibleIndex = micro.sourceIndex - start;
+      const centerX = leftPad + (visibleIndex * slotW) + (slotW / 2);
+      const bodyWidth = Math.max(4, Math.min(candleW - 1, Math.floor(slotW * 0.38)));
+      const wickX = centerX;
+      const openY = toY(micro.open);
+      const closeY = toY(micro.close);
+      const highY = toY(micro.high);
+      const lowY = toY(micro.low);
+      const topY = Math.min(openY, closeY);
+      const bodyH = Math.max(2, Math.abs(closeY - openY));
+      const isBull = micro.type === "lower";
+      const stroke = isBull ? "#18d89f" : "#ff5b6b";
+      const fill = isBull ? "rgba(24, 216, 159, 0.20)" : "rgba(255, 91, 107, 0.20)";
+
+      ctx.save();
+      ctx.strokeStyle = stroke;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(wickX, highY);
+      ctx.lineTo(wickX, lowY);
+      ctx.stroke();
+
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = stroke;
+      ctx.fillRect(centerX - (bodyWidth / 2), topY, bodyWidth, bodyH);
+      ctx.strokeRect(centerX - (bodyWidth / 2), topY, bodyWidth, bodyH);
+
+      ctx.fillStyle = stroke;
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBull ? "top" : "bottom";
+      ctx.fillText(isBull ? "R↑" : "R↓", centerX, isBull ? lowY + 6 : highY - 6);
+      ctx.restore();
+    });
+
+    rejection.signals.forEach((signal) => {
+      if (signal.entryIndex == null || signal.entryIndex < start || signal.entryIndex >= end) return;
+      const visibleIndex = signal.entryIndex - start;
+      const centerX = leftPad + (visibleIndex * slotW) + (slotW / 2);
+      const isBull = signal.type === "lower";
+      const anchorY = isBull ? toY(candles[signal.entryIndex].low) + 11 : toY(candles[signal.entryIndex].high) - 11;
+      const color = isBull ? "#18d89f" : "#ff5b6b";
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(centerX, isBull ? anchorY - 12 : anchorY + 12);
+      ctx.lineTo(centerX, isBull ? anchorY - 2 : anchorY + 2);
+      ctx.stroke();
+      ctx.beginPath();
+      if (isBull) {
+        ctx.moveTo(centerX, anchorY - 12);
+        ctx.lineTo(centerX - 5, anchorY - 4);
+        ctx.lineTo(centerX + 5, anchorY - 4);
+      } else {
+        ctx.moveTo(centerX, anchorY + 12);
+        ctx.lineTo(centerX - 5, anchorY + 4);
+        ctx.lineTo(centerX + 5, anchorY + 4);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
   // Current price dot and right-side labels
   if (points.length >= 2) {
     const last = points[points.length - 1];
@@ -4028,6 +4780,32 @@ function setActiveTab(tabName) {
   if (hlButtons) hlButtons.style.display = isHL ? "grid" : "none";
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
+}
+
+function setActiveAppTab(tabName) {
+  currentAppTab = tabName;
+  appTabs?.forEach((tab) => {
+    const isActive = tab.dataset.appTab === tabName;
+    tab.classList.toggle("active", isActive);
+    tab.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+  appPanels?.forEach((panel) => {
+    const isActive = panel.dataset.appPanel === tabName;
+    panel.classList.toggle("active", isActive);
+    panel.hidden = !isActive;
+  });
+  if (tabName === "chart") {
+    requestAnimationFrame(() => {
+      renderMiniChart(getBuiltCandles());
+    });
+  }
+}
+
+function scheduleChartResize() {
+  if (currentAppTab !== "chart") return;
+  requestAnimationFrame(() => {
+    renderMiniChart(getBuiltCandles());
+  });
 }
 
 function parseOAuthTokens() {
@@ -4698,6 +5476,8 @@ function ensureOpen() {
 
 function init() {
   tabs = document.querySelectorAll(".tab");
+  appTabs = document.querySelectorAll(".app-tab");
+  appPanels = document.querySelectorAll(".app-panel");
   hlButtons = document.getElementById("hlButtons");
   phoneEl = document.querySelector(".phone");
   barrierField = document.getElementById("barrierField");
@@ -4832,6 +5612,10 @@ function init() {
     tab.addEventListener("click", () => setActiveTab(tab.dataset.tab));
   });
 
+  appTabs.forEach((tab) => {
+    tab.addEventListener("click", () => setActiveAppTab(tab.dataset.appTab));
+  });
+
   if (toggleTradeBtn && tradeBody) {
     toggleTradeBtn.addEventListener("click", () => {
       const isCollapsed = tradeBody.classList.toggle("collapsed");
@@ -4845,6 +5629,7 @@ function init() {
       const isCollapsed = tradeListEl.classList.toggle("collapsed");
       toggleProposalsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleProposalsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+      scheduleChartResize();
     });
   }
 
@@ -4861,6 +5646,7 @@ function init() {
       const isCollapsed = signalBodyEl.classList.toggle("collapsed");
       toggleSignalBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+      scheduleChartResize();
     });
   }
 
@@ -4894,6 +5680,7 @@ function init() {
       const isCollapsed = chartBodyEl.classList.toggle("collapsed");
       toggleChartBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleChartBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
+      scheduleChartResize();
     });
   }
 
@@ -5111,6 +5898,7 @@ function init() {
   stakeInput?.addEventListener("input", () => scheduleProposalRefresh(true));
 
   setActiveTab("higher_lower");
+  setActiveAppTab("settings");
   connectWS();
   loadActiveSymbols();
   setExpiryMinutes(1);

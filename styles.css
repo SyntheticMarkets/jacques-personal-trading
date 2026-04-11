@@ -101,6 +101,35 @@ button.small {
   margin: 6px 0 12px;
 }
 
+.app-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 8px 0 12px;
+}
+
+.app-tab {
+  background: #0e131a;
+  border: 1px solid #1e2735;
+  border-radius: 12px;
+  padding: 8px 6px;
+  font-size: 11px;
+}
+
+.app-tab.active {
+  background: #1c2432;
+  border-color: #2d3b52;
+  color: #fff;
+}
+
+.app-panel[hidden] {
+  display: none !important;
+}
+
+.app-panel.active {
+  display: block;
+}
+
 .trade-tabs .tab {
   flex: 1;
   background: #0e131a;
@@ -211,6 +240,7 @@ button.small {
 .signal-grid.collapsed {
   max-height: 0;
   opacity: 0;
+  display: none;
 }
 
 .hl-buttons {
@@ -229,6 +259,7 @@ button.small {
   padding: 10px 0;
   background: #0f141c;
   border: 1px solid #202a3a;
+  font-size: 12px;
 }
 
 .pill.active {
@@ -254,7 +285,7 @@ button.small {
 .field-label {
   font-size: 11px;
   color: var(--muted);
-  margin-bottom: 2px;
+  margin-bottom: 3px;
 }
 
 .field-input {
@@ -264,7 +295,7 @@ button.small {
   color: var(--text);
   border-radius: 8px;
   padding: 8px 10px;
-  font-size: 13px;
+  font-size: 12px;
 }
 
 .account-panel {
@@ -335,17 +366,18 @@ button.small {
   max-height: 0;
   padding-right: 0;
   overflow: hidden;
+  display: none;
 }
 
 .trade-btn {
   width: 100%;
   text-align: left;
   border-radius: 12px;
-  padding: 10px;
+  padding: 12px;
   border: 1px solid #243143;
   background: #0f141c;
   display: grid;
-  gap: 4px;
+  gap: 6px;
 }
 
 .trade-btn.higher {
@@ -359,12 +391,12 @@ button.small {
 }
 
 .trade-title {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 600;
 }
 
 .trade-meta {
-  font-size: 12px;
+  font-size: 13px;
   color: var(--muted);
 }
 
@@ -380,7 +412,7 @@ button.small {
   background: #10151e;
   border: 1px solid #1d2635;
   border-radius: 10px;
-  padding: 8px 10px;
+  padding: 10px 12px;
 }
 
 .signal-chart-head {
@@ -587,6 +619,7 @@ button.small {
   padding: 0;
   border: 0;
   overflow: hidden;
+  display: none;
 }
 
 #miniChart {

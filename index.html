@@ -24,6 +24,14 @@
         <button id="logoutBtn" class="ghost small account-manage">Logout</button>
       </div>
 
+      <nav class="app-tabs" role="tablist" aria-label="App screens">
+        <button class="app-tab active" data-app-tab="settings" role="tab" aria-selected="true">Settings</button>
+        <button class="app-tab" data-app-tab="chart" role="tab" aria-selected="false">Chart</button>
+        <button class="app-tab" data-app-tab="results" role="tab" aria-selected="false">Results</button>
+        <button class="app-tab" data-app-tab="auto" role="tab" aria-selected="false">Auto</button>
+      </nav>
+
+      <section class="app-panel active" data-app-panel="settings">
       <nav class="trade-tabs" role="tablist">
         <button class="tab active" data-tab="rise_fall" role="tab" aria-selected="true">Rise/Fall</button>
         <button class="tab" data-tab="higher_lower" role="tab" aria-selected="false">Higher/Lower</button>
@@ -64,7 +72,9 @@
           </div>
         </div>
       </section>
+      </section>
 
+      <section class="app-panel" data-app-panel="chart" hidden>
       <section class="card trade-section">
         <header class="card-head">
           <h2>Signal</h2>
@@ -161,7 +171,9 @@
         </div>
         <div id="tradeList" class="trade-list"></div>
       </section>
+      </section>
 
+      <section class="app-panel" data-app-panel="results" hidden>
       <section class="card trade-section">
         <header class="card-head">
           <h2>Trade results</h2>
@@ -169,7 +181,9 @@
         </header>
         <div id="tradeResults" class="trade-list"></div>
       </section>
+      </section>
 
+      <section class="app-panel" data-app-panel="auto" hidden>
       <section class="card trade-section">
         <header class="card-head">
           <h2>Auto trade</h2>
@@ -199,6 +213,7 @@
             <div id="autoResults" class="trade-list auto-results-list"></div>
           </div>
         </div>
+      </section>
       </section>
 
     </main>
