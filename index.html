@@ -28,6 +28,7 @@
         <button class="app-tab active" data-app-tab="settings" role="tab" aria-selected="true">Settings</button>
         <button class="app-tab" data-app-tab="chart" role="tab" aria-selected="false">Chart</button>
         <button class="app-tab" data-app-tab="results" role="tab" aria-selected="false">Results</button>
+        <button class="app-tab" data-app-tab="chart_2" role="tab" aria-selected="false">Chart 2</button>
         <button class="app-tab" data-app-tab="auto" role="tab" aria-selected="false">Auto</button>
       </nav>
 
@@ -77,7 +78,7 @@
       <section class="app-panel" data-app-panel="chart" hidden>
       <section class="card trade-section">
         <header class="card-head">
-          <h2>Signal</h2>
+          <h2 id="signalSectionTitle">Signal</h2>
           <button id="toggleSignal" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
         <div id="signalBody" class="signal-grid">
@@ -160,7 +161,7 @@
         </div>
       </section>
 
-      <section class="card trade-section">
+      <section class="card trade-section chart2-hide">
         <header class="card-head">
           <h2>Trade proposals</h2>
           <button id="toggleProposals" class="ghost small" aria-expanded="true">Collapse</button>

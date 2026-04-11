@@ -80,6 +80,7 @@ let sigLevelEl;
 let sigBlueEl;
 let sigWhiteEl;
 let signalBodyEl;
+let signalSectionTitleEl;
 let toggleSignalBtn;
 let chartBodyEl;
 let toggleChartBtn;
@@ -102,6 +103,7 @@ let toggleAutoBtn;
 let toggleAutoConfigBtn;
 let toggleAutoResultsBtn;
 let currentAppTab = "settings";
+let chart2HideEls;
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -283,7 +285,9 @@ class CandleBuilder {
 
 const candleBuilder = new CandleBuilder(DEFAULT_TIMEFRAME_SEC);
 const MIN_SIGNAL_CANDLES = 20;
-const MAX_CANDLES = 2000;
+const MAX_CANDLES = 5000;
+const MAX_TICK_HISTORY_BATCH = 5000;
+const MAX_TICK_HISTORY_BATCHES = 6;
 const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
@@ -1962,8 +1966,9 @@ function buildStructurePullbackContinuation(candles, config = {}) {
   const rejectionWickRatio = config.rejectionWickRatio ?? 0.45;
   const maxTrendFlips = config.maxTrendFlips ?? 4;
   const flipLookback = config.flipLookback ?? 30;
+  const confirmedCandles = candles.slice(0, -1);
 
-  if (!Array.isArray(candles) || candles.length < pivotLen * 4 + 6) {
+  if (!Array.isArray(candles) || confirmedCandles.length < pivotLen * 4 + 6) {
     return {
       signals: [],
       trendMarks: [],
@@ -1995,12 +2000,12 @@ function buildStructurePullbackContinuation(candles, config = {}) {
     return "range";
   };
 
-  for (let i = 0; i < candles.length; i += 1) {
+  for (let i = 0; i < confirmedCandles.length; i += 1) {
     const pivotIndex = i - pivotLen;
-    if (pivotIndex >= pivotLen && pivotIndex < candles.length - pivotLen) {
-      if (isPivotHighLR(candles, pivotIndex, pivotLen, pivotLen)) {
+    if (pivotIndex >= pivotLen && pivotIndex < confirmedCandles.length - pivotLen) {
+      if (isPivotHighLR(confirmedCandles, pivotIndex, pivotLen, pivotLen)) {
         if (lastHighPivot) prevHighPivot = lastHighPivot;
-        lastHighPivot = { index: pivotIndex, price: candles[pivotIndex].high };
+        lastHighPivot = { index: pivotIndex, price: confirmedCandles[pivotIndex].high };
         if (prevHighPivot) lastHighType = lastHighPivot.price > prevHighPivot.price ? "HH" : "LH";
         const nextTrend = classifyTrend();
         if (nextTrend !== trend) trendHistory.push({ index: pivotIndex, trend: nextTrend });
@@ -2008,9 +2013,9 @@ function buildStructurePullbackContinuation(candles, config = {}) {
         trendMarks.push({ index: pivotIndex, price: lastHighPivot.price, type: lastHighType, trend });
       }
 
-      if (isPivotLowLR(candles, pivotIndex, pivotLen, pivotLen)) {
+      if (isPivotLowLR(confirmedCandles, pivotIndex, pivotLen, pivotLen)) {
         if (lastLowPivot) prevLowPivot = lastLowPivot;
-        lastLowPivot = { index: pivotIndex, price: candles[pivotIndex].low };
+        lastLowPivot = { index: pivotIndex, price: confirmedCandles[pivotIndex].low };
         if (prevLowPivot) lastLowType = lastLowPivot.price > prevLowPivot.price ? "HL" : "LL";
         const nextTrend = classifyTrend();
         if (nextTrend !== trend) trendHistory.push({ index: pivotIndex, trend: nextTrend });
@@ -2020,9 +2025,9 @@ function buildStructurePullbackContinuation(candles, config = {}) {
     }
 
     if (i < 3) continue;
-    const entryCandle = candles[i];
-    const setupCandle = candles[i - 1];
-    const priorCandle = candles[i - 2];
+    const entryCandle = confirmedCandles[i];
+    const setupCandle = confirmedCandles[i - 1];
+    const priorCandle = confirmedCandles[i - 2];
 
     const recentFlips = trendHistory.filter((item) => item.index >= i - flipLookback);
     if (recentFlips.length > maxTrendFlips) continue;
@@ -2034,7 +2039,7 @@ function buildStructurePullbackContinuation(candles, config = {}) {
 
     if (trend === "uptrend" && lastHighPivot && lastLowPivot && i - 1 > lastHighPivot.index) {
       const pullbackStart = Math.max(lastHighPivot.index + 1, i - 1 - pullbackLookback);
-      const pullbackSlice = candles.slice(pullbackStart, i - 1);
+      const pullbackSlice = confirmedCandles.slice(pullbackStart, i - 1);
       const recentPullbackLow = pullbackSlice.length
         ? Math.min(...pullbackSlice.map((candle) => candle.low))
         : setupCandle.low;
@@ -2049,7 +2054,7 @@ function buildStructurePullbackContinuation(candles, config = {}) {
         const rejection = lowerWickRatio >= rejectionWickRatio && entryCandle.close > entryCandle.open;
 
         if ((failure || rejection || weakContinuation) && entryCandle.close > entryCandle.open) {
-          const resultCandle = i + 1 < candles.length ? candles[i + 1] : null;
+          const resultCandle = i + 1 < confirmedCandles.length ? confirmedCandles[i + 1] : null;
           const isWin = resultCandle ? resultCandle.close > resultCandle.open : null;
           if (resultCandle) {
             stats.buy.total += 1;
@@ -2072,7 +2077,7 @@ function buildStructurePullbackContinuation(candles, config = {}) {
 
     if (trend === "downtrend" && lastHighPivot && lastLowPivot && i - 1 > lastLowPivot.index) {
       const pullbackStart = Math.max(lastLowPivot.index + 1, i - 1 - pullbackLookback);
-      const pullbackSlice = candles.slice(pullbackStart, i - 1);
+      const pullbackSlice = confirmedCandles.slice(pullbackStart, i - 1);
       const recentPullbackHigh = pullbackSlice.length
         ? Math.max(...pullbackSlice.map((candle) => candle.high))
         : setupCandle.high;
@@ -2087,7 +2092,7 @@ function buildStructurePullbackContinuation(candles, config = {}) {
         const rejection = upperWickRatio >= rejectionWickRatio && entryCandle.close < entryCandle.open;
 
         if ((failure || rejection || weakContinuation) && entryCandle.close < entryCandle.open) {
-          const resultCandle = i + 1 < candles.length ? candles[i + 1] : null;
+          const resultCandle = i + 1 < confirmedCandles.length ? confirmedCandles[i + 1] : null;
           const isWin = resultCandle ? resultCandle.close < resultCandle.open : null;
           if (resultCandle) {
             stats.sell.total += 1;
@@ -4784,25 +4789,44 @@ function setActiveTab(tabName) {
 
 function setActiveAppTab(tabName) {
   currentAppTab = tabName;
+  const panelTabName = tabName === "chart_2" ? "chart" : tabName;
+  const chart2Mode = tabName === "chart_2";
+  if (phoneEl) {
+    phoneEl.classList.toggle("chart2-mode", chart2Mode);
+  }
   appTabs?.forEach((tab) => {
     const isActive = tab.dataset.appTab === tabName;
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-selected", isActive ? "true" : "false");
   });
   appPanels?.forEach((panel) => {
-    const isActive = panel.dataset.appPanel === tabName;
+    const isActive = panel.dataset.appPanel === panelTabName;
     panel.classList.toggle("active", isActive);
     panel.hidden = !isActive;
   });
-  if (tabName === "chart") {
+  if (panelTabName === "chart") {
     requestAnimationFrame(() => {
       renderMiniChart(getBuiltCandles());
     });
   }
+  const hideForChart2 = tabName === "chart_2";
+  chart2HideEls?.forEach((el) => {
+    el.classList.toggle("chart2-only", hideForChart2);
+  });
+  if (signalBodyEl) {
+    signalBodyEl.classList.toggle("hidden", chart2Mode);
+    signalBodyEl.hidden = chart2Mode;
+  }
+  if (toggleSignalBtn) {
+    toggleSignalBtn.classList.toggle("hidden", chart2Mode);
+  }
+  if (signalSectionTitleEl) {
+    signalSectionTitleEl.textContent = chart2Mode ? "Chart" : "Signal";
+  }
 }
 
 function scheduleChartResize() {
-  if (currentAppTab !== "chart") return;
+  if (currentAppTab !== "chart" && currentAppTab !== "chart_2") return;
   requestAnimationFrame(() => {
     renderMiniChart(getBuiltCandles());
   });
@@ -5118,18 +5142,39 @@ async function loadCandleHistory(symbol) {
 }
 
 async function loadAggregatedTickHistory(symbol) {
-  const now = Math.floor(Date.now() / 1000);
-  const lookbackWindowSec = candleBuilder.timeframe * MAX_CANDLES;
-  const res = await wsRequest({
-    ticks_history: symbol,
-    start: now - lookbackWindowSec,
-    end: "latest",
-    style: "ticks",
-    count: 5000,
-  });
+  let end = "latest";
+  let prices = [];
+  let times = [];
 
-  const history = res.history || {};
-  return rebuildCandlesFromHistory(history.prices || [], history.times || []);
+  for (let batch = 0; batch < MAX_TICK_HISTORY_BATCHES; batch += 1) {
+    const res = await wsRequest({
+      ticks_history: symbol,
+      end,
+      style: "ticks",
+      count: MAX_TICK_HISTORY_BATCH,
+    });
+
+    const history = res.history || {};
+    const batchPrices = Array.isArray(history.prices) ? history.prices : [];
+    const batchTimes = Array.isArray(history.times) ? history.times : [];
+    if (!batchPrices.length || !batchTimes.length) break;
+
+    prices = [...batchPrices, ...prices];
+    times = [...batchTimes, ...times];
+
+    const built = rebuildCandlesFromHistory(prices, times);
+    if (built.length >= MAX_CANDLES) {
+      return built.slice(-MAX_CANDLES);
+    }
+
+    const earliestBatchTime = Number(batchTimes[0]);
+    if (!Number.isFinite(earliestBatchTime)) break;
+    end = earliestBatchTime - 1;
+
+    if (batchPrices.length < MAX_TICK_HISTORY_BATCH) break;
+  }
+
+  return rebuildCandlesFromHistory(prices, times).slice(-MAX_CANDLES);
 }
 
 function parseDurationToSeconds(value) {
@@ -5513,6 +5558,7 @@ function init() {
   sigBlueEl = document.getElementById("sigBlue");
   sigWhiteEl = document.getElementById("sigWhite");
   signalBodyEl = document.getElementById("signalBody");
+  signalSectionTitleEl = document.getElementById("signalSectionTitle");
   toggleSignalBtn = document.getElementById("toggleSignal");
   chartBodyEl = document.getElementById("chartBody");
   toggleChartBtn = document.getElementById("toggleChart");
@@ -5534,6 +5580,7 @@ function init() {
   toggleAutoBtn = document.getElementById("toggleAuto");
   toggleAutoConfigBtn = document.getElementById("toggleAutoConfig");
   toggleAutoResultsBtn = document.getElementById("toggleAutoResults");
+  chart2HideEls = document.querySelectorAll(".chart2-hide");
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
 
   if (!marketSelect || !symbolSelect) {
