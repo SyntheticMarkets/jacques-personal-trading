@@ -126,6 +126,7 @@
             </select>
           </div>
           <div class="chart-controls">
+            <button id="resetChart" class="ghost small chart-reset-btn" type="button" aria-label="Reset chart to current candle">↺</button>
             <button id="zoomOut" class="ghost small" type="button">-</button>
             <button id="zoomIn" class="ghost small" type="button">+</button>
             <button id="toggleChart" class="ghost small" aria-expanded="true">Collapse</button>
@@ -139,17 +140,13 @@
           <div class="chart-footer">
             <div class="chart-footer-group">
               <span class="chart-footer-label">Timeframe</span>
-              <span id="chartTfLabel" class="chart-tf-label signal-tf-label">1m</span>
+              <button id="chartTfLabel" class="chart-tf-label signal-tf-label chart-tf-trigger" type="button" aria-label="Change chart timeframe">1m</button>
             </div>
             <div class="chart-footer-group chart-footer-group-right">
-              <select id="indicatorSelect" class="field-input chart-indicator-select" aria-label="Chart indicator">
-                <option value="NONE">None</option>
-                <option value="EMA">EMA</option>
-                <option value="SMA">SMA</option>
-                <option value="RSI">RSI</option>
-              </select>
+              <select id="indicatorSelect" class="field-input chart-indicator-select" aria-label="Add chart indicator"></select>
             </div>
           </div>
+          <div id="chartIndicatorList" class="chart-indicator-list"></div>
         </div>
       </section>
 

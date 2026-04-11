@@ -403,6 +403,7 @@ button.small {
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  justify-content: center;
   min-height: 20px;
   padding: 0 8px;
   border: 1px solid #253043;
@@ -411,9 +412,12 @@ button.small {
   font-size: 11px;
 }
 
+.chart-tf-trigger {
+  cursor: pointer;
+}
+
 .chart-footer {
-  display: grid;
-  grid-template-columns: 1fr auto;
+  display: flex;
   align-items: center;
   gap: 8px;
   margin-top: 8px;
@@ -428,7 +432,7 @@ button.small {
 }
 
 .chart-footer-group-right {
-  justify-self: end;
+  margin-left: auto;
 }
 
 .chart-footer-label {
@@ -437,19 +441,52 @@ button.small {
 }
 
 .chart-indicator-select {
-  width: 86px !important;
-  min-width: 86px;
-  max-width: 86px;
-  flex: 0 0 86px;
-  padding: 3px 22px 3px 8px;
-  font-size: 10px;
+  width: auto !important;
+  min-width: 118px;
+  padding: 4px 26px 4px 10px;
+  font-size: 11px;
   line-height: 1.2;
+}
+
+.chart-indicator-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.chart-indicator-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid #253043;
+  border-radius: 999px;
+  background: #0f141c;
+  color: var(--text);
+  font-size: 11px;
+}
+
+.chart-indicator-remove {
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  padding: 0;
+  min-width: auto;
+  font-size: 11px;
+  line-height: 1;
 }
 
 .chart-controls {
   display: inline-flex;
   gap: 6px;
   align-items: center;
+}
+
+.chart-reset-btn {
+  padding: 0 10px;
+  font-size: 14px;
+  line-height: 1;
 }
 
 .chart-mode-select {
