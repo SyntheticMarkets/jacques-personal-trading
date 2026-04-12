@@ -134,6 +134,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "ICT_FIB", label: "ICT Fib" },
   { value: "ICT_KILLZONES", label: "ICT Killzones" },
   { value: "ICT_BPR", label: "ICT BPR" },
+  { value: "LIQ_SWEEP_OB", label: "Liquidity Sweep OB" },
   { value: "SMC_SETUP_08", label: "SMC Setup 08" },
   { value: "SMC_PRO_COMBO", label: "SMC Pro Combo" },
   { value: "ADX_VOL_WAVES", label: "ADX Volatility Waves" },
@@ -152,7 +153,7 @@ const CHART_INDICATOR_GROUPS = [
   {
     key: "ICT",
     label: "ICT",
-    items: ["ICT_FVG", "ICT_OB", "ICT_STRUCTURE", "ICT_LIQUIDITY", "ICT_FIB", "ICT_KILLZONES", "ICT_BPR"],
+    items: ["ICT_FVG", "ICT_OB", "ICT_STRUCTURE", "ICT_LIQUIDITY", "ICT_FIB", "ICT_KILLZONES", "ICT_BPR", "LIQ_SWEEP_OB"],
   },
   {
     key: "SMC",
@@ -2881,6 +2882,197 @@ function buildChartPatternsSignals(candles, config = {}) {
   };
 }
 
+function buildLiquiditySweepOrderBlockSystem(candles, config = {}) {
+  const pivotLen = Math.max(2, config.pivotLen ?? 3);
+  const sweepLookahead = Math.max(4, config.sweepLookahead ?? 10);
+  const pullbackLookahead = Math.max(4, config.pullbackLookahead ?? 12);
+  const confirmedCandles = candles.slice(0, -1);
+
+  if (!Array.isArray(candles) || confirmedCandles.length < 40) {
+    return { pools: [], setups: [] };
+  }
+
+  const avgRange = averageRange(confirmedCandles, 20) || ((confirmedCandles[confirmedCandles.length - 1]?.close ?? 1) * 0.001);
+  const tolerance = Math.max(avgRange * 0.25, currentPip || 0.0001);
+  const structure = buildICTStructureAnalysis(confirmedCandles, pivotLen);
+  const orderBlocks = buildICTOrderBlocks(confirmedCandles, structure.events, 12);
+  const pools = [];
+  const setups = [];
+  const seenSetupKeys = new Set();
+
+  const pushPool = (pool) => {
+    const key = `${pool.kind}|${pool.side}|${pool.startIndex}|${pool.endIndex ?? pool.startIndex}`;
+    if (pools.some((item) => `${item.kind}|${item.side}|${item.startIndex}|${item.endIndex ?? item.startIndex}` === key)) return;
+    pools.push(pool);
+  };
+
+  structure.pivotHighs.forEach((pivot, index) => {
+    pushPool({
+      kind: "swingHigh",
+      side: "high",
+      level: pivot.price,
+      startIndex: pivot.index,
+      endIndex: pivot.index,
+      strength: 1,
+    });
+    if (index > 0) {
+      const prev = structure.pivotHighs[index - 1];
+      if (Math.abs(prev.price - pivot.price) <= tolerance) {
+        pushPool({
+          kind: "equalHigh",
+          side: "high",
+          level: (prev.price + pivot.price) / 2,
+          startIndex: prev.index,
+          endIndex: pivot.index,
+          strength: 2,
+        });
+      }
+    }
+  });
+
+  structure.pivotLows.forEach((pivot, index) => {
+    pushPool({
+      kind: "swingLow",
+      side: "low",
+      level: pivot.price,
+      startIndex: pivot.index,
+      endIndex: pivot.index,
+      strength: 1,
+    });
+    if (index > 0) {
+      const prev = structure.pivotLows[index - 1];
+      if (Math.abs(prev.price - pivot.price) <= tolerance) {
+        pushPool({
+          kind: "equalLow",
+          side: "low",
+          level: (prev.price + pivot.price) / 2,
+          startIndex: prev.index,
+          endIndex: pivot.index,
+          strength: 2,
+        });
+      }
+    }
+  });
+
+  for (let i = 1; i < structure.pivotHighs.length; i += 1) {
+    const a = structure.pivotHighs[i - 1];
+    const b = structure.pivotHighs[i];
+    if (b.index - a.index < 6 || b.price >= a.price) continue;
+    pushPool({
+      kind: "trendlineHigh",
+      side: "high",
+      startIndex: a.index,
+      endIndex: b.index,
+      level: b.price,
+      a,
+      b,
+      strength: 2,
+    });
+  }
+
+  for (let i = 1; i < structure.pivotLows.length; i += 1) {
+    const a = structure.pivotLows[i - 1];
+    const b = structure.pivotLows[i];
+    if (b.index - a.index < 6 || b.price <= a.price) continue;
+    pushPool({
+      kind: "trendlineLow",
+      side: "low",
+      startIndex: a.index,
+      endIndex: b.index,
+      level: b.price,
+      a,
+      b,
+      strength: 2,
+    });
+  }
+
+  const lineValueAt = (a, b, index) => {
+    const dx = b.index - a.index;
+    if (dx === 0) return a.price;
+    return a.price + (((b.price - a.price) / dx) * (index - a.index));
+  };
+
+  const detectSweep = (pool, index) => {
+    const candle = confirmedCandles[index];
+    const level = pool.a && pool.b ? lineValueAt(pool.a, pool.b, index) : pool.level;
+    if (!Number.isFinite(level)) return null;
+    if (pool.side === "high") {
+      const swept = candle.high > level + (tolerance * 0.1) && candle.close < level;
+      if (!swept) return null;
+      return { direction: "SELL", level, pool };
+    }
+    const swept = candle.low < level - (tolerance * 0.1) && candle.close > level;
+    if (!swept) return null;
+    return { direction: "BUY", level, pool };
+  };
+
+  const nearestOrderBlock = (direction, breakIndex) => {
+    const source = direction === "BUY" ? orderBlocks.bullish : orderBlocks.bearish;
+    let best = null;
+    source.forEach((zone) => {
+      if (zone.index > breakIndex) return;
+      if (!best || zone.index > best.index) best = zone;
+    });
+    return best;
+  };
+
+  for (let i = pivotLen + 3; i < confirmedCandles.length - 1; i += 1) {
+    const candidatePools = pools
+      .filter((pool) => pool.startIndex < i && i - pool.startIndex <= 60)
+      .sort((a, b) => b.strength - a.strength);
+
+    let sweep = null;
+    for (const pool of candidatePools) {
+      sweep = detectSweep(pool, i);
+      if (sweep) break;
+    }
+    if (!sweep) continue;
+
+    const structureEvent = structure.events.find((event) => (
+      event.breakIndex > i &&
+      event.breakIndex <= i + sweepLookahead &&
+      event.direction === (sweep.direction === "BUY" ? "UP" : "DOWN")
+    ));
+    if (!structureEvent) continue;
+
+    const ob = nearestOrderBlock(sweep.direction, structureEvent.breakIndex);
+    if (!ob) continue;
+
+    for (let j = structureEvent.breakIndex + 1; j < Math.min(confirmedCandles.length, structureEvent.breakIndex + pullbackLookahead); j += 1) {
+      const pullback = confirmedCandles[j];
+      const touched = pullback.high >= ob.bottom && pullback.low <= ob.top;
+      if (!touched) continue;
+
+      const rejection = sweep.direction === "BUY"
+        ? pullback.close > pullback.open && pullback.close >= ob.bottom
+        : pullback.close < pullback.open && pullback.close <= ob.top;
+      if (!rejection) continue;
+
+      const entryIndex = j + 1 < candles.length ? j + 1 : null;
+      if (entryIndex == null) continue;
+      const key = `${sweep.direction}|${entryIndex}|${sweep.pool.kind}`;
+      if (seenSetupKeys.has(key)) break;
+      seenSetupKeys.add(key);
+      setups.push({
+        direction: sweep.direction,
+        sweepIndex: i,
+        sweepLevel: sweep.level,
+        liquidityKind: sweep.pool.kind,
+        structureEvent,
+        orderBlock: ob,
+        pullbackIndex: j,
+        entryIndex,
+      });
+      break;
+    }
+  }
+
+  return {
+    pools: pools.slice(-12),
+    setups: setups.slice(-10),
+  };
+}
+
 function buildBreakoutTargets(candles, config = {}) {
   const len = config.len ?? 99;
   const preventOverlap = config.preventOverlap ?? true;
@@ -3697,6 +3889,7 @@ function renderMiniChart(candles) {
   const hasICTFib = activeChartIndicators.has("ICT_FIB");
   const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY");
   const hasAnyICT = hasICTKillzones || hasICTFVG || hasICTBPR || hasICTOB || hasICTStructure || hasICTFib || hasICTLiquidity;
+  const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB");
   const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08");
   const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO");
   const hasADXVolWaves = activeChartIndicators.has("ADX_VOL_WAVES");
@@ -3720,6 +3913,96 @@ function renderMiniChart(candles) {
       ctx.save();
       ctx.fillStyle = segment.color;
       ctx.fillRect(x, topPad, w, plotH);
+      ctx.restore();
+    });
+  }
+
+  if (hasLiquiditySweepOB) {
+    const lq = buildLiquiditySweepOrderBlockSystem(candles, {
+      pivotLen: 3,
+      sweepLookahead: 10,
+      pullbackLookahead: 12,
+    });
+
+    lq.pools.forEach((pool) => {
+      const x1 = leftPad + ((Math.max(start, pool.startIndex) - start) * slotW) + (slotW / 2);
+      const x2 = leftPad + ((Math.min(end - 1, (pool.endIndex ?? pool.startIndex) + 10) - start) * slotW) + (slotW / 2);
+      const level = pool.a && pool.b
+        ? pool.b.price
+        : pool.level;
+      const y = toY(level);
+      if (!Number.isFinite(y)) return;
+      ctx.save();
+      ctx.strokeStyle = pool.side === "high" ? "rgba(242, 54, 69, 0.50)" : "rgba(8, 153, 129, 0.50)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash(pool.kind.startsWith("trendline") ? [5, 3] : [3, 3]);
+      if (pool.a && pool.b) {
+        const xa = leftPad + ((Math.max(start, pool.a.index) - start) * slotW) + (slotW / 2);
+        const xb = leftPad + ((Math.min(end - 1, pool.b.index) - start) * slotW) + (slotW / 2);
+        ctx.beginPath();
+        ctx.moveTo(xa, toY(pool.a.price));
+        ctx.lineTo(xb, toY(pool.b.price));
+        ctx.stroke();
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+        ctx.stroke();
+      }
+      ctx.setLineDash([]);
+      ctx.restore();
+    });
+
+    lq.setups.forEach((setup) => {
+      const isBuy = setup.direction === "BUY";
+      const sweepCandle = candles[setup.sweepIndex];
+      const sweepX = leftPad + ((setup.sweepIndex - start) * slotW) + (slotW / 2);
+      const sweepY = isBuy ? toY(sweepCandle.low) + 8 : toY(sweepCandle.high) - 8;
+      const breakX1 = leftPad + ((setup.structureEvent.pivotIndex - start) * slotW) + (slotW / 2);
+      const breakX2 = leftPad + ((setup.structureEvent.breakIndex - start) * slotW) + (slotW / 2);
+      const breakY = toY(setup.structureEvent.pivotPrice);
+      const obStart = Math.max(start, setup.orderBlock.index);
+      const obEnd = Math.min(end - 1, setup.pullbackIndex);
+      const obX = leftPad + ((obStart - start) * slotW);
+      const obW = Math.max(slotW, ((obEnd - obStart) + 1) * slotW);
+      const obTopY = toY(setup.orderBlock.top);
+      const obBottomY = toY(setup.orderBlock.bottom);
+      const entryX = leftPad + ((setup.entryIndex - start) * slotW) + (slotW / 2);
+      const entryY = isBuy ? toY(candles[setup.entryIndex].low) + 12 : toY(candles[setup.entryIndex].high) - 12;
+      const color = isBuy ? "#18d89f" : "#ff6a4d";
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = isBuy ? "rgba(24, 216, 159, 0.14)" : "rgba(255, 106, 77, 0.14)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(breakX1, breakY);
+      ctx.lineTo(breakX2, breakY);
+      ctx.stroke();
+      ctx.fillRect(obX, obTopY, obW, Math.max(2, obBottomY - obTopY));
+      ctx.strokeRect(obX, obTopY, obW, Math.max(2, obBottomY - obTopY));
+
+      ctx.beginPath();
+      ctx.arc(sweepX, sweepY, 4, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillStyle = color;
+      ctx.fillText(setup.liquidityKind, sweepX, isBuy ? sweepY + 8 : sweepY - 8);
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(entryX, entryY - 7);
+        ctx.lineTo(entryX - 5, entryY + 3);
+        ctx.lineTo(entryX + 5, entryY + 3);
+      } else {
+        ctx.moveTo(entryX, entryY + 7);
+        ctx.lineTo(entryX - 5, entryY - 3);
+        ctx.lineTo(entryX + 5, entryY - 3);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillText(isBuy ? "LQ BUY" : "LQ SELL", entryX, isBuy ? entryY + 6 : entryY - 6);
       ctx.restore();
     });
   }
@@ -5347,6 +5630,15 @@ function buildIndicatorSignalAlerts(candles) {
       maxPatternAge: 60,
     });
     cp.signals.forEach((signal) => addAlert("CHART_PATTERNS", signal.entryIndex, signal.direction, signal.label));
+  }
+
+  if (activeChartIndicators.has("LIQ_SWEEP_OB")) {
+    const lq = buildLiquiditySweepOrderBlockSystem(candles, {
+      pivotLen: 3,
+      sweepLookahead: 10,
+      pullbackLookahead: 12,
+    });
+    lq.setups.forEach((setup) => addAlert("LIQ_SWEEP_OB", setup.entryIndex, setup.direction, setup.liquidityKind));
   }
 
   return alerts.sort((a, b) => a.entryIndex - b.entryIndex);
