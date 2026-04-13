@@ -729,6 +729,7 @@ button.small {
   border-radius: 10px;
   padding: 6px;
   position: relative;
+  overflow: hidden;
 }
 
 .chart-body.collapsed {
@@ -745,6 +746,51 @@ button.small {
   display: block;
   touch-action: none;
   cursor: grab;
+}
+
+@media (min-width: 980px) {
+  body {
+    display: block;
+    min-height: 100vh;
+    padding: 16px;
+  }
+
+  .phone {
+    width: calc(100vw - 32px);
+    min-height: calc(100vh - 32px);
+    margin: 0 auto;
+    border-radius: 24px;
+  }
+
+  .phone.chart2-mode {
+    width: calc(100vw - 32px);
+    min-height: calc(100vh - 32px);
+    height: calc(100vh - 32px);
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .trade-section {
+    width: 100%;
+    flex: 1 1 auto;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-body {
+    display: flex;
+    flex-direction: column;
+    flex: 1 1 auto;
+    min-height: 0;
+    gap: 8px;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] #miniChart {
+    flex: 1 1 auto;
+    min-height: 0;
+    height: auto;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-footer,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
+    flex: 0 0 auto;
+  }
 }
 
 .chart-tf-picker {

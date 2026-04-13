@@ -302,11 +302,14 @@ const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
 const MAX_AUTO_TRADES_PER_SESSION = 5;
 const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK"];
+const MAX_FUTURE_BARS = 80;
 let chartPoints = 24;
 let chartOffset = 0;
 let chartDragX = null;
 let chartDragY = null;
+let chartDragMode = null;
 let chartVerticalOffset = 0;
+let chartVerticalScale = 1;
 let chartGestureMoved = false;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
@@ -3832,11 +3835,7 @@ function renderMiniChart(candles) {
     return;
   }
 
-  const maxOffset = Math.max(0, candles.length - chartPoints);
-  chartOffset = Math.max(0, Math.min(chartOffset, maxOffset));
-  const end = candles.length - chartOffset;
-  const start = Math.max(0, end - chartPoints);
-  const points = candles.slice(start, end);
+  const { points, start, end, visibleSlotCount } = getVisibleChartWindow(candles);
   if (!points.length) {
     updateVisibleCandleCountUI(null, null);
     return;
@@ -3871,14 +3870,22 @@ function renderMiniChart(candles) {
 
   const range = rawMax - rawMin;
   if (range === 0) return;
-  const min = rawMin + chartVerticalOffset;
-  const max = rawMax + chartVerticalOffset;
+  const rangePadding = Math.max(range * 0.08, Math.abs(rawMax) * 0.0002, 0.0000001);
+  const baseSpan = range + (rangePadding * 2);
+  chartVerticalScale = clamp(chartVerticalScale, 0.5, 8);
+  const scaledSpan = baseSpan / chartVerticalScale;
+  const baseCenter = (rawMax + rawMin) / 2;
+  const maxVerticalShift = Math.max(baseSpan * 0.75, rangePadding * 2);
+  chartVerticalOffset = Math.max(-maxVerticalShift, Math.min(chartVerticalOffset, maxVerticalShift));
+  const center = baseCenter + chartVerticalOffset;
+  const min = center - (scaledSpan / 2);
+  const max = center + (scaledSpan / 2);
   // Candlesticks
   const plotW = width - leftPad - rightPad;
   const plotH = height - topPad - bottomPad;
   const candleGap = 2;
-  const candleW = Math.max(2, Math.floor(plotW / points.length) - candleGap);
-  const slotW = plotW / points.length;
+  const slotW = plotW / Math.max(1, visibleSlotCount);
+  const candleW = Math.max(2, Math.floor(slotW) - candleGap);
   const toY = (price) => height - bottomPad - ((price - min) / (max - min)) * plotH;
 
   const hasICTKillzones = activeChartIndicators.has("ICT_KILLZONES");
@@ -5379,7 +5386,8 @@ function renderMiniChart(candles) {
 
     const highY = height - bottomPad - ((prev.high - min) / (max - min)) * (height - topPad - bottomPad);
     const lowY = height - bottomPad - ((prev.low - min) / (max - min)) * (height - topPad - bottomPad);
-    const labelX = width - rightPad + 8;
+    const axisLeft = width - rightPad + 6;
+    const labelX = axisLeft + 8;
     ctx.fillStyle = "#9aa7b8";
     ctx.font = "10px Inter, Segoe UI, sans-serif";
     ctx.textAlign = "left";
@@ -5389,17 +5397,24 @@ function renderMiniChart(candles) {
       last.close < prev.low ? prev.low - last.close : 0;
     const priceLabel = `${formatPrice(last.close, currentPip)}`;
     const diffLabel = diff > 0 ? `Δ ${formatPrice(diff, currentPip)}` : "Δ 0";
+    const priceW = Math.max(54, ctx.measureText(priceLabel).width + 16);
+    const priceH = 18;
+    const priceBoxX = axisLeft;
+    const priceBoxY = clamp(lastY - priceH / 2, topPad, height - bottomPad - priceH);
+
+    ctx.save();
+    ctx.fillStyle = dotColor;
+    ctx.beginPath();
+    ctx.roundRect(priceBoxX, priceBoxY, priceW, priceH, 6);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(priceLabel, priceBoxX + 8, priceBoxY + priceH / 2);
+    ctx.restore();
 
     ctx.fillStyle = dotColor;
-    const priceY = lastY - 10;
-    const diffY = lastY + 10;
-    if (Math.abs(priceY - highY) < 10 || Math.abs(priceY - lowY) < 10) {
-      ctx.fillText(priceLabel, labelX, lastY - 20);
-    } else {
-      ctx.fillText(priceLabel, labelX, priceY);
-    }
+    const diffY = clamp(priceBoxY + priceH + 10, topPad + 8, height - bottomPad - 8);
     if (Math.abs(diffY - highY) < 10 || Math.abs(diffY - lowY) < 10) {
-      ctx.fillText(diffLabel, labelX, lastY + 20);
+      ctx.fillText(diffLabel, labelX, clamp(lastY + 24, topPad + 8, height - bottomPad - 8));
     } else {
       ctx.fillText(diffLabel, labelX, diffY);
     }
@@ -5421,18 +5436,42 @@ function getBuiltCandles() {
     : candleBuilder.candles;
 }
 
+function getChartOffsetBounds(candles) {
+  const built = Array.isArray(candles) ? candles : getBuiltCandles();
+  return {
+    min: -MAX_FUTURE_BARS,
+    max: Math.max(0, built.length - chartPoints),
+  };
+}
+
+function getVisibleChartWindow(candles) {
+  const built = Array.isArray(candles) ? candles : getBuiltCandles();
+  const { min, max } = getChartOffsetBounds(built);
+  chartOffset = clamp(chartOffset, min, max);
+
+  const futureBars = Math.max(0, -chartOffset);
+  const historicalOffset = Math.max(0, chartOffset);
+  const visibleBars = Math.max(1, chartPoints - futureBars);
+  const end = built.length - historicalOffset;
+  const start = Math.max(0, end - visibleBars);
+  const points = built.slice(start, end);
+  const visibleSlotCount = Math.max(chartPoints, points.length + futureBars, 1);
+
+  return { points, start, end, futureBars, visibleSlotCount };
+}
+
 function panChartByPixels(deltaX) {
   const built = getBuiltCandles();
-  if (!miniChartCanvas || built.length <= chartPoints) {
+  if (!miniChartCanvas || !built.length) {
     renderMiniChart(built);
     return;
   }
   const plotWidth = Math.max(1, miniChartCanvas.clientWidth - 78);
-  const pixelsPerCandle = plotWidth / Math.max(1, Math.min(chartPoints, built.length));
+  const pixelsPerCandle = plotWidth / Math.max(1, chartPoints);
   const candleShift = Math.round(deltaX / Math.max(1, pixelsPerCandle));
   if (!candleShift) return;
-  const maxOffset = Math.max(0, built.length - chartPoints);
-  chartOffset = Math.max(0, Math.min(chartOffset + candleShift, maxOffset));
+  const { min, max } = getChartOffsetBounds(built);
+  chartOffset = clamp(chartOffset + candleShift, min, max);
   renderMiniChart(built);
 }
 
@@ -5442,10 +5481,7 @@ function panChartVertically(deltaY) {
     renderMiniChart(built);
     return;
   }
-  const maxOffset = Math.max(0, built.length - chartPoints);
-  const end = built.length - Math.max(0, Math.min(chartOffset, maxOffset));
-  const start = Math.max(0, end - chartPoints);
-  const points = built.slice(start, end);
+  const { points } = getVisibleChartWindow(built);
   if (!points.length) return;
   const lows = points.map((c) => c.low);
   const highs = points.map((c) => c.high);
@@ -5455,11 +5491,25 @@ function panChartVertically(deltaY) {
   renderMiniChart(built);
 }
 
+function scaleChartVertically(deltaY) {
+  const built = getBuiltCandles();
+  if (!miniChartCanvas || !built.length) {
+    renderMiniChart(built);
+    return;
+  }
+  const sensitivity = 0.012;
+  const nextScale = chartVerticalScale * Math.exp((-deltaY) * sensitivity);
+  chartVerticalScale = clamp(nextScale, 0.5, 8);
+  renderMiniChart(built);
+}
+
 function resetChartView() {
   chartOffset = 0;
   chartDragX = null;
   chartDragY = null;
+  chartDragMode = null;
   chartVerticalOffset = 0;
+  chartVerticalScale = 1;
   renderMiniChart(getBuiltCandles());
 }
 
@@ -6911,35 +6961,47 @@ function init() {
     if (event.shiftKey) {
       const step = Math.max(1, Math.floor(chartPoints / 6));
       const direction = Math.sign(event.deltaY || event.deltaX);
-      const maxOffset = Math.max(0, built.length - chartPoints);
-      chartOffset = Math.max(0, Math.min(chartOffset + (direction * step), maxOffset));
+      const { min, max } = getChartOffsetBounds(built);
+      chartOffset = clamp(chartOffset + (direction * step), min, max);
     } else {
       const delta = Math.sign(event.deltaY);
       if (delta > 0) chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
       else chartPoints = Math.max(20, chartPoints - 10);
-      const maxOffset = Math.max(0, built.length - chartPoints);
-      chartOffset = Math.min(chartOffset, maxOffset);
+      const { min, max } = getChartOffsetBounds(built);
+      chartOffset = clamp(chartOffset, min, max);
     }
     renderMiniChart(built);
   }, { passive: false });
 
   miniChartCanvas?.addEventListener("pointerdown", (event) => {
+    const rect = miniChartCanvas.getBoundingClientRect();
+    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
     chartDragX = event.clientX;
     chartDragY = event.clientY;
+    chartDragMode = event.clientX - rect.left >= axisThreshold ? "scale" : "pan";
     chartGestureMoved = false;
     miniChartCanvas.setPointerCapture?.(event.pointerId);
   });
 
   miniChartCanvas?.addEventListener("pointermove", (event) => {
-    if (chartDragX == null || chartDragY == null) return;
+    const rect = miniChartCanvas.getBoundingClientRect();
+    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+    if (chartDragX == null || chartDragY == null) {
+      miniChartCanvas.style.cursor = event.clientX - rect.left >= axisThreshold ? "ns-resize" : "grab";
+      return;
+    }
     const deltaX = event.clientX - chartDragX;
     const deltaY = event.clientY - chartDragY;
     if (Math.abs(deltaX) < 4 && Math.abs(deltaY) < 4) return;
     chartDragX = event.clientX;
     chartDragY = event.clientY;
     chartGestureMoved = true;
-    panChartByPixels(deltaX);
-    panChartVertically(deltaY);
+    if (chartDragMode === "scale") {
+      scaleChartVertically(deltaY);
+    } else {
+      panChartByPixels(deltaX);
+      panChartVertically(deltaY);
+    }
   });
 
   miniChartCanvas?.addEventListener("pointerup", (event) => {
@@ -6963,19 +7025,23 @@ function init() {
     }
     chartDragX = null;
     chartDragY = null;
+    chartDragMode = null;
     chartGestureMoved = false;
   });
 
   miniChartCanvas?.addEventListener("pointercancel", () => {
     chartDragX = null;
     chartDragY = null;
+    chartDragMode = null;
     chartGestureMoved = false;
   });
 
   miniChartCanvas?.addEventListener("pointerleave", () => {
     chartDragX = null;
     chartDragY = null;
+    chartDragMode = null;
     chartGestureMoved = false;
+    miniChartCanvas.style.cursor = "grab";
   });
 
   chartTfSelectEl?.addEventListener("change", () => {
@@ -7007,16 +7073,16 @@ function init() {
   zoomInBtn?.addEventListener("click", () => {
     chartPoints = Math.max(10, chartPoints - 10);
     const built = getBuiltCandles();
-    const maxOffset = Math.max(0, built.length - chartPoints);
-    chartOffset = Math.min(chartOffset, maxOffset);
+    const { min, max } = getChartOffsetBounds(built);
+    chartOffset = clamp(chartOffset, min, max);
     renderMiniChart(built);
   });
 
   zoomOutBtn?.addEventListener("click", () => {
     chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
     const built = getBuiltCandles();
-    const maxOffset = Math.max(0, built.length - chartPoints);
-    chartOffset = Math.min(chartOffset, maxOffset);
+    const { min, max } = getChartOffsetBounds(built);
+    chartOffset = clamp(chartOffset, min, max);
     renderMiniChart(built);
   });
 
