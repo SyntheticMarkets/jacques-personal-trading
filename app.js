@@ -11,7 +11,14 @@ let appTabs;
 let appPanels;
 let hlButtons;
 let phoneEl;
+let desktopSidebarEl;
+let desktopSidebarExtraEl;
+let toggleSidebarBtn;
+let toggleSignalSidebarBtn;
+let desktopTradeTypeCardEl;
+let desktopTradeTypeSelectEl;
 let barrierField;
+let sidebarBarrierFieldEl;
 let quickRow;
 let marketSelect;
 let symbolSelect;
@@ -30,6 +37,13 @@ let btn1m;
 let btn2m;
 let directionButtons;
 let tradeListEl;
+let proposalsBodyEl;
+let sidebarTradeTypeSelectEl;
+let riseFallExpiryFieldEl;
+let riseFallExpirySelectEl;
+let sidebarStakeInputEl;
+let sidebarBarrierInputEl;
+let tradeProfitSummaryEl;
 let tradeResultsEl;
 let toggleProposalsBtn;
 let toggleResultsBtn;
@@ -57,7 +71,8 @@ let rateLimitUntil = 0;
 let pingTimer = null;
 const PING_INTERVAL_MS = 30000;
 const RATE_LIMIT_COOLDOWN_MS = 15000;
-const MIN_REFRESH_MS = 1500;
+const MIN_REFRESH_MS = 5000;
+let proposalLoadingDirection = null;
 let storedAccounts = [];
 let activeToken = null;
 let activeLoginId = null;
@@ -73,6 +88,7 @@ let sigDivEl;
 let sigSweepEl;
 let sigConfEl;
 let sigSignalEl;
+let sigSetupEl;
 let sigTimeEl;
 let sigRejectEl;
 let sigEntryEl;
@@ -90,6 +106,13 @@ let chartTfSelectEl;
 let indicatorSelectEl;
 let chartIndicatorListEl;
 let trendModeSelectEl;
+let drawingToolSelectEl;
+let toggleCrosshairBtn;
+let drawingActionBarEl;
+let drawingMoveBtnEl;
+let drawingCopyBtnEl;
+let drawingLockBtnEl;
+let drawingDeleteBtnEl;
 let signalToastLayerEl;
 let miniChartCanvas;
 let zoomInBtn;
@@ -105,6 +128,16 @@ let toggleAutoConfigBtn;
 let toggleAutoResultsBtn;
 let currentAppTab = "settings";
 let chart2HideEls;
+let tradeModeTabsEl;
+let proposalsCardEl;
+let chartPrimaryCardEl;
+let originalTradeTabsParent = null;
+let originalTradeTabsNextSibling = null;
+let originalProposalsParent = null;
+let originalProposalsNextSibling = null;
+let originalDesktopTradeTypeParent = null;
+let originalDesktopTradeTypeNextSibling = null;
+let quickDirectionQuotes = { CALL: null, PUT: null };
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -301,7 +334,9 @@ const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
 const MAX_AUTO_TRADES_PER_SESSION = 5;
-const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK"];
+const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK", "SMC", "HEIKEN", "RENKO", "MACD", "STOCH"];
+const DRAWING_TOOL_OPTIONS = ["SELECT", "TRENDLINE", "HLINE", "HRAY", "RECT", "FIB"];
+const DRAWING_STORAGE_KEY = "deriv_chart_drawings_v1";
 const MAX_FUTURE_BARS = 80;
 let chartPoints = 24;
 let chartOffset = 0;
@@ -311,6 +346,16 @@ let chartDragMode = null;
 let chartVerticalOffset = 0;
 let chartVerticalScale = 1;
 let chartGestureMoved = false;
+let chartCrosshairEnabled = false;
+let chartCrosshairState = null;
+let chartViewportState = null;
+let chartDrawingTool = "SELECT";
+let chartDrawingStore = {};
+let chartDrawingDraft = null;
+let chartDrawingHitCandidateId = null;
+let chartSelectedDrawingId = null;
+let chartDrawingMoveMode = false;
+let chartDrawingMoveOrigin = null;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
@@ -324,6 +369,7 @@ let lastSignalState = {
   sweep: "--",
   confidence: "--",
   signal: "--",
+  setup: "--",
   time: null,
   allowEntry: false,
   tradeDirection: null,
@@ -339,6 +385,433 @@ let lastSweepState = {
 
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
+}
+
+function loadChartDrawingStore() {
+  try {
+    const raw = localStorage.getItem(DRAWING_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveChartDrawingStore() {
+  try {
+    localStorage.setItem(DRAWING_STORAGE_KEY, JSON.stringify(chartDrawingStore));
+  } catch {
+    // Ignore quota/storage failures.
+  }
+}
+
+function getDrawingSymbolKey() {
+  return currentSymbol || "__default__";
+}
+
+function getChartDrawings() {
+  const key = getDrawingSymbolKey();
+  if (!Array.isArray(chartDrawingStore[key])) chartDrawingStore[key] = [];
+  return chartDrawingStore[key];
+}
+
+function getSelectedChartDrawing() {
+  if (!chartSelectedDrawingId) return null;
+  return getChartDrawings().find((drawing) => drawing.id === chartSelectedDrawingId) || null;
+}
+
+function clearChartDrawingSelection() {
+  chartSelectedDrawingId = null;
+  chartDrawingMoveMode = false;
+  chartDrawingMoveOrigin = null;
+}
+
+function syncDrawingActionBarUI() {
+  if (!drawingActionBarEl) return;
+  const drawing = getSelectedChartDrawing();
+  if (!drawing || !chartViewportState) {
+    drawingActionBarEl.classList.add("hidden");
+    return;
+  }
+
+  const viewport = chartViewportState;
+  const x1 = getChartXForTime(drawing.start?.time, viewport);
+  const y1 = viewport.toY(drawing.start?.price);
+  const x2 = drawing.end ? getChartXForTime(drawing.end.time, viewport) : x1;
+  const y2 = drawing.end ? viewport.toY(drawing.end.price) : y1;
+  const anchorX = clamp((Math.min(x1, x2) + Math.max(x1, x2)) / 2, viewport.leftPad + 20, viewport.width - viewport.rightPad - 20);
+  const anchorY = clamp(Math.min(y1, y2) - 40, viewport.topPad + 4, viewport.height - viewport.bottomPad - 36);
+
+  drawingActionBarEl.style.left = `${anchorX}px`;
+  drawingActionBarEl.style.top = `${anchorY}px`;
+  drawingActionBarEl.style.transform = "translateX(-50%)";
+  drawingActionBarEl.classList.remove("hidden");
+  drawingMoveBtnEl?.classList.toggle("active", chartDrawingMoveMode);
+  drawingLockBtnEl?.classList.toggle("active", !!drawing.locked);
+  drawingLockBtnEl && (drawingLockBtnEl.textContent = drawing.locked ? "Unlock" : "Lock");
+}
+
+function syncDrawingToolUI() {
+  if (!drawingToolSelectEl) return;
+  drawingToolSelectEl.value = DRAWING_TOOL_OPTIONS.includes(chartDrawingTool) ? chartDrawingTool : "SELECT";
+}
+
+function setDrawingTool(tool) {
+  chartDrawingTool = DRAWING_TOOL_OPTIONS.includes(tool) ? tool : "SELECT";
+  chartDrawingDraft = null;
+  chartDrawingHitCandidateId = null;
+  if (chartDrawingTool !== "SELECT") {
+    clearChartDrawingSelection();
+  }
+  syncDrawingToolUI();
+  if (miniChartCanvas) {
+    miniChartCanvas.style.cursor = chartDrawingTool === "SELECT"
+      ? (chartCrosshairEnabled ? "crosshair" : "grab")
+      : "crosshair";
+  }
+  renderMiniChart(getBuiltCandles());
+}
+
+function getChartTimeframeSeconds() {
+  return Number(candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC || 60);
+}
+
+function snapChartTime(timeSec) {
+  const tf = Math.max(1, getChartTimeframeSeconds());
+  return Math.round(Number(timeSec || 0) / tf) * tf;
+}
+
+function getChartPriceForY(y, viewport = chartViewportState) {
+  if (!viewport) return null;
+  const localY = clamp(y, viewport.topPad, viewport.height - viewport.bottomPad);
+  return viewport.max - ((localY - viewport.topPad) / Math.max(1, viewport.plotH)) * (viewport.max - viewport.min);
+}
+
+function getChartTimeForX(x, viewport = chartViewportState) {
+  if (!viewport?.points?.length) return null;
+  const firstTime = viewport.points[0]?.time;
+  if (!Number.isFinite(firstTime)) return null;
+  const tf = getChartTimeframeSeconds();
+  const localX = clamp(x, viewport.leftPad, viewport.width - viewport.rightPad);
+  const slotFloat = (localX - viewport.leftPad) / Math.max(1, viewport.slotW);
+  return snapChartTime(firstTime + (slotFloat * tf));
+}
+
+function getChartXForTime(timeSec, viewport = chartViewportState) {
+  if (!viewport?.points?.length || !Number.isFinite(timeSec)) return null;
+  const firstTime = viewport.points[0]?.time;
+  if (!Number.isFinite(firstTime)) return null;
+  const tf = getChartTimeframeSeconds();
+  const slotIndex = (timeSec - firstTime) / Math.max(1, tf);
+  return viewport.leftPad + (slotIndex * viewport.slotW) + (viewport.slotW / 2);
+}
+
+function pointToSegmentDistance(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+  if (dx === 0 && dy === 0) return Math.hypot(px - x1, py - y1);
+  const t = clamp((((px - x1) * dx) + ((py - y1) * dy)) / ((dx * dx) + (dy * dy)), 0, 1);
+  const projX = x1 + (t * dx);
+  const projY = y1 + (t * dy);
+  return Math.hypot(px - projX, py - projY);
+}
+
+function createDrawingPointFromPointer(event) {
+  if (!miniChartCanvas || !chartViewportState) return null;
+  const rect = miniChartCanvas.getBoundingClientRect();
+  const x = event.clientX - rect.left;
+  const y = event.clientY - rect.top;
+  const viewport = chartViewportState;
+  if (x < viewport.leftPad || x > viewport.width - viewport.rightPad || y < viewport.topPad || y > viewport.height - viewport.bottomPad) {
+    return null;
+  }
+  const time = getChartTimeForX(x, viewport);
+  const price = getChartPriceForY(y, viewport);
+  if (!Number.isFinite(time) || !Number.isFinite(price)) return null;
+  return { time, price, x, y };
+}
+
+function addChartDrawing(drawing) {
+  const drawings = getChartDrawings();
+  drawings.push(drawing);
+  saveChartDrawingStore();
+}
+
+function updateChartDrawing(updatedDrawing) {
+  if (!updatedDrawing?.id) return false;
+  const drawings = getChartDrawings();
+  const index = drawings.findIndex((drawing) => drawing.id === updatedDrawing.id);
+  if (index === -1) return false;
+  drawings[index] = updatedDrawing;
+  saveChartDrawingStore();
+  return true;
+}
+
+function deleteChartDrawingById(id) {
+  if (!id) return false;
+  const drawings = getChartDrawings();
+  const next = drawings.filter((drawing) => drawing.id !== id);
+  if (next.length === drawings.length) return false;
+  chartDrawingStore[getDrawingSymbolKey()] = next;
+  if (chartSelectedDrawingId === id) clearChartDrawingSelection();
+  saveChartDrawingStore();
+  renderMiniChart(getBuiltCandles());
+  return true;
+}
+
+function buildDrawingFromDraft(draft) {
+  if (!draft?.start || !draft.tool) return null;
+  const id = `draw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const base = {
+    id,
+    tool: draft.tool,
+    symbol: currentSymbol,
+    createdAt: Date.now(),
+    locked: false,
+    start: {
+      time: snapChartTime(draft.start.time),
+      price: draft.start.price,
+    },
+  };
+
+  if (draft.tool === "HLINE") {
+    return base;
+  }
+
+  if (!draft.end) return null;
+  const end = {
+    time: snapChartTime(draft.end.time),
+    price: draft.tool === "HRAY" ? draft.start.price : draft.end.price,
+  };
+
+  if ((draft.tool === "TRENDLINE" || draft.tool === "HRAY" || draft.tool === "RECT" || draft.tool === "FIB")
+    && Math.abs(end.time - base.start.time) < getChartTimeframeSeconds()
+    && Math.abs(end.price - base.start.price) < ((chartViewportState?.max || 1) - (chartViewportState?.min || 0)) * 0.01) {
+    return null;
+  }
+
+  return { ...base, end };
+}
+
+function cloneChartDrawing(drawing) {
+  if (!drawing) return null;
+  const viewport = chartViewportState;
+  const priceSpan = viewport ? (viewport.max - viewport.min) : 1;
+  const priceShift = Math.max(priceSpan * 0.03, (Math.abs(drawing.start?.price || 1) * 0.0005), 0.0001);
+  const timeShift = getChartTimeframeSeconds() * 2;
+  return {
+    ...drawing,
+    id: `draw_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+    createdAt: Date.now(),
+    locked: false,
+    start: {
+      time: snapChartTime((drawing.start?.time || 0) + timeShift),
+      price: (drawing.start?.price || 0) + priceShift,
+    },
+    end: drawing.end ? {
+      time: snapChartTime((drawing.end.time || 0) + timeShift),
+      price: (drawing.end.price || 0) + priceShift,
+    } : undefined,
+  };
+}
+
+function renderChartDrawings(ctx, viewport = chartViewportState) {
+  if (!ctx || !viewport?.points?.length) return;
+  const drawings = getChartDrawings();
+  const drawLine = (x1, y1, x2, y2, color, dashed = false, widthPx = 1.5) => {
+    ctx.save();
+    ctx.strokeStyle = color;
+    ctx.lineWidth = widthPx;
+    if (dashed) ctx.setLineDash([6, 4]);
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.restore();
+  };
+
+  const renderSingle = (drawing, isDraft = false) => {
+    const isSelected = !isDraft && drawing.id === chartSelectedDrawingId;
+    const color = isDraft
+      ? "rgba(255, 210, 122, 0.95)"
+      : isSelected
+        ? "rgba(255, 210, 122, 0.98)"
+        : drawing.locked
+          ? "rgba(188, 196, 210, 0.92)"
+          : "rgba(145, 190, 255, 0.95)";
+    const fill = isDraft
+      ? "rgba(255, 210, 122, 0.12)"
+      : isSelected
+        ? "rgba(255, 210, 122, 0.12)"
+        : "rgba(145, 190, 255, 0.10)";
+    const x1 = getChartXForTime(drawing.start?.time, viewport);
+    const y1 = viewport.toY(drawing.start?.price);
+    const x2 = drawing.end ? getChartXForTime(drawing.end.time, viewport) : null;
+    const y2 = drawing.end ? viewport.toY(drawing.end.price) : null;
+    if (!Number.isFinite(x1) || !Number.isFinite(y1)) return;
+
+    switch (drawing.tool) {
+      case "HLINE":
+        drawLine(viewport.leftPad, y1, viewport.width - viewport.rightPad, y1, color, false, 1.6);
+        break;
+      case "HRAY":
+        if (!Number.isFinite(x2)) return;
+        drawLine(Math.min(x1, x2), y1, viewport.width - viewport.rightPad, y1, color, false, 1.6);
+        break;
+      case "TRENDLINE":
+        if (!Number.isFinite(x2) || !Number.isFinite(y2)) return;
+        drawLine(x1, y1, x2, y2, color, false, 1.6);
+        break;
+      case "RECT":
+        if (!Number.isFinite(x2) || !Number.isFinite(y2)) return;
+        ctx.save();
+        ctx.fillStyle = fill;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1.4;
+        ctx.fillRect(Math.min(x1, x2), Math.min(y1, y2), Math.max(2, Math.abs(x2 - x1)), Math.max(2, Math.abs(y2 - y1)));
+        ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.max(2, Math.abs(x2 - x1)), Math.max(2, Math.abs(y2 - y1)));
+        ctx.restore();
+        break;
+      case "FIB": {
+        if (!Number.isFinite(x2) || !Number.isFinite(y2)) return;
+        const leftX = Math.min(x1, x2);
+        const rightX = Math.max(x1, x2);
+        const startPrice = drawing.start.price;
+        const endPrice = drawing.end.price;
+        const levels = [0, 0.382, 0.5, 0.618, 1];
+        ctx.save();
+        ctx.font = "9px Inter, Segoe UI, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        levels.forEach((ratio) => {
+          const price = startPrice + ((endPrice - startPrice) * ratio);
+          const y = viewport.toY(price);
+          drawLine(leftX, y, rightX, y, color, ratio !== 0 && ratio !== 1, ratio === 0.5 ? 1.6 : 1.1);
+          ctx.fillStyle = color;
+          ctx.fillText(`${Math.round(ratio * 100)}%`, Math.min(viewport.width - viewport.rightPad - 28, rightX + 4), y - 2);
+        });
+        ctx.restore();
+        break;
+      }
+      default:
+        break;
+    }
+
+    if (isSelected) {
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.arc(x1, y1, 3.2, 0, Math.PI * 2);
+      ctx.fill();
+      if (Number.isFinite(x2) && Number.isFinite(y2) && drawing.tool !== "HLINE") {
+        ctx.beginPath();
+        ctx.arc(x2, y2, 3.2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      if (drawing.locked) {
+        ctx.font = "10px Inter, Segoe UI, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText("LOCK", x1 + 6, y1 - 4);
+      }
+      ctx.restore();
+    }
+  };
+
+  drawings.forEach((drawing) => renderSingle(drawing, false));
+  if (chartDrawingDraft) renderSingle(chartDrawingDraft, true);
+  syncDrawingActionBarUI();
+}
+
+function hitTestChartDrawing(point, viewport = chartViewportState) {
+  if (!point || !viewport?.points?.length) return null;
+  const drawings = getChartDrawings();
+  const threshold = 8;
+  for (let i = drawings.length - 1; i >= 0; i -= 1) {
+    const drawing = drawings[i];
+    const x1 = getChartXForTime(drawing.start?.time, viewport);
+    const y1 = viewport.toY(drawing.start?.price);
+    const x2 = drawing.end ? getChartXForTime(drawing.end.time, viewport) : null;
+    const y2 = drawing.end ? viewport.toY(drawing.end.price) : null;
+    if (!Number.isFinite(x1) || !Number.isFinite(y1)) continue;
+
+  if (drawing.tool === "HLINE") {
+      if (Math.abs(point.y - y1) <= threshold) return drawing.id;
+      continue;
+    }
+
+    if (drawing.tool === "HRAY" && Number.isFinite(x2)) {
+      const startX = Math.min(x1, x2);
+      const dist = pointToSegmentDistance(point.x, point.y, startX, y1, viewport.width - viewport.rightPad, y1);
+      if (dist <= threshold) return drawing.id;
+      continue;
+    }
+
+    if (drawing.tool === "TRENDLINE" && Number.isFinite(x2) && Number.isFinite(y2)) {
+      if (pointToSegmentDistance(point.x, point.y, x1, y1, x2, y2) <= threshold) return drawing.id;
+      continue;
+    }
+
+    if ((drawing.tool === "RECT" || drawing.tool === "FIB") && Number.isFinite(x2) && Number.isFinite(y2)) {
+      const left = Math.min(x1, x2) - threshold;
+      const right = Math.max(x1, x2) + threshold;
+      const top = Math.min(y1, y2) - threshold;
+      const bottom = Math.max(y1, y2) + threshold;
+      if (point.x >= left && point.x <= right && point.y >= top && point.y <= bottom) return drawing.id;
+    }
+  }
+  return null;
+}
+
+function ensureDrawingActionBar() {
+  if (drawingActionBarEl || !chartBodyEl) return;
+  drawingActionBarEl = document.createElement("div");
+  drawingActionBarEl.className = "drawing-action-bar hidden";
+  drawingActionBarEl.innerHTML = `
+    <button id="drawingMoveBtn" class="ghost small drawing-action-btn" type="button">Move</button>
+    <button id="drawingCopyBtn" class="ghost small drawing-action-btn" type="button">Copy</button>
+    <button id="drawingLockBtn" class="ghost small drawing-action-btn" type="button">Lock</button>
+    <button id="drawingDeleteBtn" class="ghost small drawing-action-btn" type="button">Delete</button>
+  `;
+  chartBodyEl.appendChild(drawingActionBarEl);
+  drawingMoveBtnEl = document.getElementById("drawingMoveBtn");
+  drawingCopyBtnEl = document.getElementById("drawingCopyBtn");
+  drawingLockBtnEl = document.getElementById("drawingLockBtn");
+  drawingDeleteBtnEl = document.getElementById("drawingDeleteBtn");
+
+  drawingMoveBtnEl?.addEventListener("click", () => {
+    const drawing = getSelectedChartDrawing();
+    if (!drawing || drawing.locked) return;
+    chartDrawingMoveMode = !chartDrawingMoveMode;
+    chartDrawingMoveOrigin = null;
+    syncDrawingActionBarUI();
+  });
+
+  drawingCopyBtnEl?.addEventListener("click", () => {
+    const drawing = getSelectedChartDrawing();
+    const clone = cloneChartDrawing(drawing);
+    if (!clone) return;
+    addChartDrawing(clone);
+    chartSelectedDrawingId = clone.id;
+    chartDrawingMoveMode = false;
+    renderMiniChart(getBuiltCandles());
+  });
+
+  drawingLockBtnEl?.addEventListener("click", () => {
+    const drawing = getSelectedChartDrawing();
+    if (!drawing) return;
+    updateChartDrawing({ ...drawing, locked: !drawing.locked });
+    chartDrawingMoveMode = false;
+    renderMiniChart(getBuiltCandles());
+  });
+
+  drawingDeleteBtnEl?.addEventListener("click", () => {
+    const drawing = getSelectedChartDrawing();
+    if (!drawing) return;
+    deleteChartDrawingById(drawing.id);
+  });
 }
 
 function calculateOBV(candles) {
@@ -453,7 +926,7 @@ function detectObvTrend(candles) {
 
 function detectStructureTrend(candles) {
   if (candles.length < 5) {
-    return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED" };
+    return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED", modeLabel: "SMC" };
   }
   const recent = candles.slice(-5);
   let higherHighs = 0;
@@ -473,6 +946,7 @@ function detectStructureTrend(candles) {
       trend: "UP",
       trendStrength: clamp((higherHighs + higherLows) / 8, 0, 1),
       structureBias: "HH_HL",
+      modeLabel: "SMC",
     };
   }
   if (lowerHighs >= 2 && lowerLows >= 2) {
@@ -480,10 +954,124 @@ function detectStructureTrend(candles) {
       trend: "DOWN",
       trendStrength: clamp((lowerHighs + lowerLows) / 8, 0, 1),
       structureBias: "LL_LH",
+      modeLabel: "SMC",
     };
   }
 
-  return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED" };
+  return { trend: "SIDEWAYS", trendStrength: 0, structureBias: "MIXED", modeLabel: "SMC" };
+}
+
+function buildHeikenAshiCandles(candles) {
+  if (!candles.length) return [];
+  const ha = [];
+  let prevOpen = (candles[0].open + candles[0].close) / 2;
+  let prevClose = (candles[0].open + candles[0].high + candles[0].low + candles[0].close) / 4;
+  candles.forEach((candle, index) => {
+    const haClose = (candle.open + candle.high + candle.low + candle.close) / 4;
+    const haOpen = index === 0 ? prevOpen : (prevOpen + prevClose) / 2;
+    const haHigh = Math.max(candle.high, haOpen, haClose);
+    const haLow = Math.min(candle.low, haOpen, haClose);
+    ha.push({ ...candle, open: haOpen, high: haHigh, low: haLow, close: haClose });
+    prevOpen = haOpen;
+    prevClose = haClose;
+  });
+  return ha;
+}
+
+function detectHeikenAshiTrend(candles) {
+  const haCandles = buildHeikenAshiCandles(candles);
+  if (haCandles.length < 5) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "HEIKEN" };
+  }
+  const recent = haCandles.slice(-5);
+  let bull = 0;
+  let bear = 0;
+  recent.forEach((candle) => {
+    if (candle.close > candle.open) bull += 1;
+    else if (candle.close < candle.open) bear += 1;
+  });
+  const trend = bull >= 4 ? "UP" : bear >= 4 ? "DOWN" : "SIDEWAYS";
+  return {
+    trend,
+    trendStrength: clamp(Math.abs(bull - bear) / recent.length, 0, 1),
+    modeLabel: "HEIKEN",
+  };
+}
+
+function detectRenkoTrend(candles) {
+  if (candles.length < 10) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "RENKO" };
+  }
+  const closes = candles.map((candle) => candle.close);
+  const brickSize = Math.max(averageRange(candles, 14) * 0.8, currentPip || 0.0001);
+  if (!brickSize) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "RENKO" };
+  }
+  const bricks = [];
+  let anchor = closes[0];
+  for (let i = 1; i < closes.length; i += 1) {
+    let diff = closes[i] - anchor;
+    while (Math.abs(diff) >= brickSize) {
+      const direction = diff > 0 ? 1 : -1;
+      anchor += brickSize * direction;
+      bricks.push(direction);
+      diff = closes[i] - anchor;
+    }
+  }
+  const recent = bricks.slice(-6);
+  if (!recent.length) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "RENKO" };
+  }
+  const score = recent.reduce((sum, brick) => sum + brick, 0);
+  return {
+    trend: score >= 3 ? "UP" : score <= -3 ? "DOWN" : "SIDEWAYS",
+    trendStrength: clamp(Math.abs(score) / recent.length, 0, 1),
+    modeLabel: "RENKO",
+  };
+}
+
+function detectMacdTrend(candles) {
+  if (candles.length < 35) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "MACD" };
+  }
+  const closes = candles.map((c) => c.close);
+  const macdLine = macdLineSeries(closes, 12, 26);
+  const signalLine = emaSeries(macdLine.map((v) => Number(v ?? 0)), 9);
+  const macd = macdLine[macdLine.length - 1];
+  const signal = signalLine[signalLine.length - 1];
+  if (!Number.isFinite(macd) || !Number.isFinite(signal)) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "MACD" };
+  }
+  const diff = macd - signal;
+  return {
+    trend: diff > 0 ? "UP" : diff < 0 ? "DOWN" : "SIDEWAYS",
+    trendStrength: clamp(Math.abs(diff) / Math.max(Math.abs(macd), Math.abs(signal), 0.0001), 0, 1),
+    modeLabel: "MACD",
+  };
+}
+
+function detectStochTrend(candles, period = 14) {
+  if (candles.length < period + 3) {
+    return { trend: "SIDEWAYS", trendStrength: 0, modeLabel: "STOCH" };
+  }
+  const recent = candles.slice(-(period + 3));
+  const stochValues = [];
+  for (let i = period - 1; i < recent.length; i += 1) {
+    const window = recent.slice(i - period + 1, i + 1);
+    const highest = Math.max(...window.map((c) => c.high));
+    const lowest = Math.min(...window.map((c) => c.low));
+    const close = recent[i].close;
+    const value = highest === lowest ? 50 : ((close - lowest) / (highest - lowest)) * 100;
+    stochValues.push(value);
+  }
+  const current = stochValues[stochValues.length - 1];
+  const previous = stochValues[stochValues.length - 2];
+  const trend = current > previous && current >= 55 ? "UP" : current < previous && current <= 45 ? "DOWN" : "SIDEWAYS";
+  return {
+    trend,
+    trendStrength: clamp(Math.abs(current - previous) / 20, 0, 1),
+    modeLabel: "STOCH",
+  };
 }
 
 function assessCandleContinuation(candles) {
@@ -610,10 +1198,110 @@ function detectStackTrend(candles) {
 }
 
 function detectTrend(candles, mode = currentTrendMode) {
+  if (mode === "SMC") return detectStructureTrend(candles);
+  if (mode === "HEIKEN") return detectHeikenAshiTrend(candles);
+  if (mode === "RENKO") return detectRenkoTrend(candles);
+  if (mode === "MACD") return detectMacdTrend(candles);
+  if (mode === "STOCH") return detectStochTrend(candles);
   if (mode === "AVG") return detectAverageTrend(candles);
   if (mode === "OBV") return detectObvTrend(candles);
   if (mode === "STACK") return detectStackTrend(candles);
   return detectEmaTrend(candles);
+}
+
+function findSwingPoints(candles, pivotLen = 2) {
+  const highs = [];
+  const lows = [];
+  for (let i = pivotLen; i < candles.length - pivotLen; i += 1) {
+    const high = candles[i].high;
+    const low = candles[i].low;
+    let isHigh = true;
+    let isLow = true;
+    for (let j = i - pivotLen; j <= i + pivotLen; j += 1) {
+      if (j === i) continue;
+      if (candles[j].high >= high) isHigh = false;
+      if (candles[j].low <= low) isLow = false;
+      if (!isHigh && !isLow) break;
+    }
+    if (isHigh) highs.push({ index: i, price: high });
+    if (isLow) lows.push({ index: i, price: low });
+  }
+  return { highs, lows };
+}
+
+function findRecentOpposingOrderBlock(candles, direction, lookback = 10) {
+  const start = Math.max(0, candles.length - 2 - lookback);
+  for (let i = candles.length - 2; i >= start; i -= 1) {
+    const candle = candles[i];
+    const bearish = candle.close < candle.open;
+    const bullish = candle.close > candle.open;
+    if (direction === "UP" && bearish) {
+      return { index: i, top: candle.open, bottom: candle.low, ref: candle.close };
+    }
+    if (direction === "DOWN" && bullish) {
+      return { index: i, top: candle.high, bottom: candle.open, ref: candle.close };
+    }
+  }
+  return null;
+}
+
+function detectSmcSetupState(candles, trendState) {
+  if (candles.length < 12) return "--";
+  const { highs, lows } = findSwingPoints(candles, 2);
+  const current = candles[candles.length - 1];
+  const avgRange = averageRange(candles, 14) || Math.max(Math.abs(current.close) * 0.001, currentPip || 0.0001);
+  const threshold = avgRange * 0.35;
+  const lastHigh = highs[highs.length - 1] || null;
+  const prevHigh = highs[highs.length - 2] || null;
+  const lastLow = lows[lows.length - 1] || null;
+  const prevLow = lows[lows.length - 2] || null;
+
+  if (trendState.trend === "UP") {
+    const bosLevel = lastHigh?.price ?? prevHigh?.price ?? null;
+    const bullishOb = findRecentOpposingOrderBlock(candles, "UP");
+    if (bosLevel != null && current.close > bosLevel + threshold) {
+      if (bullishOb && current.low <= bullishOb.top + threshold && current.low >= bullishOb.bottom - threshold) {
+        return "Bullish BOS, retracing to bullish OB";
+      }
+      return "Bullish BOS confirmed, impulse active";
+    }
+    if (bosLevel != null && Math.abs(current.low - bosLevel) <= threshold) {
+      return "Bullish retrace into BOS level";
+    }
+    if (bullishOb && current.low <= bullishOb.top + threshold && current.low >= bullishOb.bottom - threshold) {
+      return "Bullish retrace into last bearish OB";
+    }
+    if (prevLow && lastLow && lastLow.price > prevLow.price) {
+      return "Holding HL, waiting for bullish BOS";
+    }
+    return "Bullish structure building";
+  }
+
+  if (trendState.trend === "DOWN") {
+    const bosLevel = lastLow?.price ?? prevLow?.price ?? null;
+    const bearishOb = findRecentOpposingOrderBlock(candles, "DOWN");
+    if (bosLevel != null && current.close < bosLevel - threshold) {
+      if (bearishOb && current.high >= bearishOb.bottom - threshold && current.high <= bearishOb.top + threshold) {
+        return "Bearish BOS, retracing to bearish OB";
+      }
+      return "Bearish BOS confirmed, impulse active";
+    }
+    if (bosLevel != null && Math.abs(current.high - bosLevel) <= threshold) {
+      return "Bearish retrace into BOS level";
+    }
+    if (bearishOb && current.high >= bearishOb.bottom - threshold && current.high <= bearishOb.top + threshold) {
+      return "Bearish retrace into last bullish OB";
+    }
+    if (prevHigh && lastHigh && lastHigh.price < prevHigh.price) {
+      return "Holding LH, waiting for bearish BOS";
+    }
+    return "Bearish structure building";
+  }
+
+  if (lastHigh && lastLow) {
+    return "Range structure, waiting for sweep or BOS";
+  }
+  return "Waiting for structure";
 }
 
 function detectDivergence(candles, obv, lookback = 5) {
@@ -3613,24 +4301,30 @@ function getSignalState(candles) {
     tradeDirection = "PUT";
   }
 
+  const setup = currentTrendMode === "SMC"
+    ? detectSmcSetupState(candles, trendState)
+    : trendState.modeLabel ? `${trendState.modeLabel} active` : "--";
+
   return {
     trend: trendState.trend,
     divergence: divergence || "--",
     sweep: sweepState.sweepType ? `${sweepState.sweepLabel} ${sweepState.rejectionLabel}` : "--",
     confidence,
     signal,
+    setup,
     time: Date.now(),
     allowEntry,
     tradeDirection,
   };
 }
 
-function updateSignalUI({ trend, divergence, sweep, confidence, signal, time }) {
+function updateSignalUI({ trend, divergence, sweep, confidence, signal, setup, time }) {
   if (sigTrendEl) sigTrendEl.textContent = trend || "--";
   if (sigDivEl) sigDivEl.textContent = divergence || "--";
   if (sigSweepEl) sigSweepEl.textContent = sweep || "--";
   if (sigConfEl) sigConfEl.textContent = Number.isFinite(confidence) ? `${confidence}%` : "--";
   if (sigSignalEl) sigSignalEl.textContent = signal || "--";
+  if (sigSetupEl) sigSetupEl.textContent = setup || "--";
   if (sigTimeEl) sigTimeEl.textContent = time ? new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" }) : "--";
 }
 
@@ -3709,6 +4403,7 @@ function updateSignalFromCandles(candles, { live = false } = {}) {
       sweep: "--",
       confidence: "--",
       signal: "--",
+      setup: "--",
       allowEntry: false,
       tradeDirection: null,
     };
@@ -3735,8 +4430,8 @@ function updateSignalFromCandles(candles, { live = false } = {}) {
 function setDirection(direction, { refresh = true } = {}) {
   currentDirection = direction === "PUT" ? "PUT" : "CALL";
   directionButtons.forEach((btn) => {
-    const isLower = btn.textContent.trim().toLowerCase() === "lower";
-    btn.classList.toggle("active", currentDirection === "PUT" ? isLower : !isLower);
+    const btnDirection = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
+    btn.classList.toggle("active", currentDirection === btnDirection);
   });
   renderTradeList();
   if (refresh) scheduleProposalRefresh(true);
@@ -3887,6 +4582,24 @@ function renderMiniChart(candles) {
   const slotW = plotW / Math.max(1, visibleSlotCount);
   const candleW = Math.max(2, Math.floor(slotW) - candleGap);
   const toY = (price) => height - bottomPad - ((price - min) / (max - min)) * plotH;
+  chartViewportState = {
+    width,
+    height,
+    leftPad,
+    rightPad,
+    topPad,
+    bottomPad,
+    plotW,
+    plotH,
+    slotW,
+    start,
+    end,
+    points,
+    visibleSlotCount,
+    min,
+    max,
+    toY,
+  };
 
   const hasICTKillzones = activeChartIndicators.has("ICT_KILLZONES");
   const hasICTFVG = activeChartIndicators.has("ICT_FVG");
@@ -5361,6 +6074,8 @@ function renderMiniChart(candles) {
     });
   }
 
+  renderChartDrawings(ctx, chartViewportState);
+
   // Current price dot and right-side labels
   if (points.length >= 2) {
     const last = points[points.length - 1];
@@ -5420,6 +6135,57 @@ function renderMiniChart(candles) {
     }
   }
 
+  if (chartCrosshairEnabled && chartCrosshairState?.active && chartViewportState) {
+    const crossX = clamp(chartCrosshairState.x, leftPad, width - rightPad);
+    const crossY = clamp(chartCrosshairState.y, topPad, height - bottomPad);
+    const crossPrice = max - ((crossY - topPad) / Math.max(1, plotH)) * (max - min);
+
+    ctx.save();
+    ctx.strokeStyle = "rgba(168, 180, 201, 0.42)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([4, 4]);
+    ctx.beginPath();
+    ctx.moveTo(leftPad, crossY);
+    ctx.lineTo(width - rightPad, crossY);
+    ctx.moveTo(crossX, topPad);
+    ctx.lineTo(crossX, height - bottomPad);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    const axisLeft = width - rightPad + 6;
+    const crossPriceLabel = formatPrice(crossPrice, currentPip);
+    ctx.font = "10px Inter, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "middle";
+    const boxW = Math.max(56, ctx.measureText(crossPriceLabel).width + 16);
+    const boxH = 18;
+    const boxY = clamp(crossY - boxH / 2, topPad, height - bottomPad - boxH);
+    ctx.fillStyle = "#2d333d";
+    ctx.beginPath();
+    ctx.roundRect(axisLeft, boxY, boxW, boxH, 6);
+    ctx.fill();
+    ctx.fillStyle = "#ffffff";
+    ctx.fillText(crossPriceLabel, axisLeft + 8, boxY + boxH / 2);
+
+    if (Number.isInteger(chartCrosshairState.candleIndex)) {
+      const candle = candles[chartCrosshairState.candleIndex];
+      if (candle?.time) {
+        const crossTimeLabel = new Date(candle.time * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+        const timeW = Math.max(44, ctx.measureText(crossTimeLabel).width + 16);
+        const timeX = clamp(crossX - (timeW / 2), leftPad, width - rightPad - timeW);
+        const timeY = height - bottomPad + 6;
+        ctx.fillStyle = "#2d333d";
+        ctx.beginPath();
+        ctx.roundRect(timeX, timeY, timeW, 18, 6);
+        ctx.fill();
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.fillText(crossTimeLabel, timeX + timeW / 2, timeY + 9);
+      }
+    }
+    ctx.restore();
+  }
+
   const current = points[points.length - 1];
   const candleSize = current ? Math.abs(current.close - current.open) : 0;
   const sizeLabel = `Body ${formatPrice(candleSize, currentPip)}`;
@@ -5458,6 +6224,88 @@ function getVisibleChartWindow(candles) {
   const visibleSlotCount = Math.max(chartPoints, points.length + futureBars, 1);
 
   return { points, start, end, futureBars, visibleSlotCount };
+}
+
+function updateCrosshairToggleUI() {
+  if (!toggleCrosshairBtn) return;
+  toggleCrosshairBtn.classList.toggle("active", chartCrosshairEnabled);
+  toggleCrosshairBtn.setAttribute("aria-pressed", chartCrosshairEnabled ? "true" : "false");
+}
+
+function ensureCrosshairVisible() {
+  const built = getBuiltCandles();
+  const viewport = chartViewportState;
+  if (!built.length) return;
+  if (!viewport) {
+    renderMiniChart(built);
+  }
+  const nextViewport = chartViewportState;
+  if (!nextViewport || chartCrosshairState?.active) return;
+  const centerX = nextViewport.leftPad + (nextViewport.plotW * 0.5);
+  const centerY = nextViewport.topPad + (nextViewport.plotH * 0.5);
+  const slotIndex = Math.max(0, Math.min(nextViewport.points.length - 1, Math.floor((centerX - nextViewport.leftPad) / Math.max(1, nextViewport.slotW))));
+  chartCrosshairState = {
+    active: true,
+    x: centerX,
+    y: centerY,
+    candleIndex: nextViewport.points.length ? nextViewport.start + slotIndex : null,
+  };
+}
+
+function setCrosshairEnabled(enabled) {
+  chartCrosshairEnabled = !!enabled;
+  if (!chartCrosshairEnabled) chartCrosshairState = null;
+  else ensureCrosshairVisible();
+  updateCrosshairToggleUI();
+  renderMiniChart(getBuiltCandles());
+}
+
+function updateChartCrosshairFromPointer(event) {
+  if (!miniChartCanvas || !chartViewportState) return;
+  const rect = miniChartCanvas.getBoundingClientRect();
+  const { leftPad, rightPad, topPad, bottomPad, slotW, start, points, width, height } = chartViewportState;
+  const localX = clamp(event.clientX - rect.left, leftPad, width - rightPad);
+  const localY = clamp(event.clientY - rect.top, topPad, height - bottomPad);
+  const slotIndex = Math.max(0, Math.floor((localX - leftPad) / Math.max(1, slotW)));
+  const candleIndex = slotIndex < points.length ? start + slotIndex : null;
+  chartCrosshairState = {
+    active: true,
+    x: localX,
+    y: localY,
+    candleIndex,
+  };
+  renderMiniChart(getBuiltCandles());
+}
+
+function moveSelectedDrawingToPoint(point) {
+  const drawing = getSelectedChartDrawing();
+  if (!drawing || drawing.locked || !point) return false;
+  if (!chartDrawingMoveOrigin) {
+    chartDrawingMoveOrigin = {
+      pointerTime: point.time,
+      pointerPrice: point.price,
+      drawing,
+    };
+  }
+  const origin = chartDrawingMoveOrigin;
+  const timeDelta = snapChartTime(point.time - origin.pointerTime);
+  const priceDelta = point.price - origin.pointerPrice;
+  const next = {
+    ...origin.drawing,
+    start: {
+      ...origin.drawing.start,
+      time: snapChartTime(origin.drawing.start.time + timeDelta),
+      price: origin.drawing.start.price + priceDelta,
+    },
+  };
+  if (origin.drawing.end) {
+    next.end = {
+      ...origin.drawing.end,
+      time: snapChartTime(origin.drawing.end.time + timeDelta),
+      price: origin.drawing.end.price + priceDelta,
+    };
+  }
+  return updateChartDrawing(next);
 }
 
 function panChartByPixels(deltaX) {
@@ -5834,6 +6682,11 @@ function populateTrendModeOptions() {
     AVG: "AVG Trend",
     OBV: "OBV Trend",
     STACK: "Stack Trend",
+    SMC: "SMC Structure",
+    HEIKEN: "Heiken Ashi",
+    RENKO: "Renko Trend",
+    MACD: "MACD Trend",
+    STOCH: "Stoch Trend",
   };
   trendModeSelectEl.innerHTML = TREND_MODE_OPTIONS
     .map((mode) => `<option value="${mode}">${labels[mode] || mode}</option>`)
@@ -5859,7 +6712,7 @@ async function setChartTimeframe(seconds) {
   candleBuilder.reset();
   updateTimeframeUI();
   hideTimeframePicker();
-  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
+  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", setup: "--", time: null });
   renderMiniChart([]);
 
   if (currentSymbol) {
@@ -5976,6 +6829,106 @@ function formatOffset(value, pip) {
   return `${sign}${formatPrice(abs, pip)}`;
 }
 
+function getActiveTradeMode() {
+  const activeTab = Array.from(tabs || []).find((tab) => tab.classList.contains("active"));
+  return activeTab?.dataset.tab === "rise_fall" ? "rise_fall" : "higher_lower";
+}
+
+function getDirectionLabel(direction) {
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  if (direction === "PUT") return isRiseFall ? "Fall" : "Lower";
+  return isRiseFall ? "Rise" : "Higher";
+}
+
+function getQuoteForDirection(direction) {
+  return direction === "PUT" ? quickDirectionQuotes.PUT : quickDirectionQuotes.CALL;
+}
+
+function parseRiseFallExpiryChoice(value) {
+  if (!value || value === "candle_end") {
+    return { mode: "candle_end", duration: null, unit: null, label: "Candle end" };
+  }
+  const match = String(value).match(/^(\d+)([tsmhd])$/i);
+  if (!match) {
+    return { mode: "candle_end", duration: null, unit: null, label: "Candle end" };
+  }
+  const duration = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  const labelMap = {
+    t: `${duration} tick${duration === 1 ? "" : "s"}`,
+    s: `${duration} second${duration === 1 ? "" : "s"}`,
+    m: `${duration} minute${duration === 1 ? "" : "s"}`,
+    h: `${duration} hour${duration === 1 ? "" : "s"}`,
+    d: `${duration} day${duration === 1 ? "" : "s"}`,
+  };
+  return { mode: "fixed", duration, unit, label: labelMap[unit] || value };
+}
+
+function syncTradeTypeControls(tabName) {
+  if (desktopTradeTypeSelectEl && desktopTradeTypeSelectEl.value !== tabName) {
+    desktopTradeTypeSelectEl.value = tabName;
+  }
+  if (sidebarTradeTypeSelectEl && sidebarTradeTypeSelectEl.value !== tabName) {
+    sidebarTradeTypeSelectEl.value = tabName;
+  }
+}
+
+function syncStakeControls(sourceEl = null) {
+  const rawValue = String(sourceEl?.value ?? stakeInput?.value ?? sidebarStakeInputEl?.value ?? "1");
+  if (stakeInput && stakeInput !== sourceEl && stakeInput.value !== rawValue) {
+    stakeInput.value = rawValue;
+  }
+  if (sidebarStakeInputEl && sidebarStakeInputEl !== sourceEl && sidebarStakeInputEl.value !== rawValue) {
+    sidebarStakeInputEl.value = rawValue;
+  }
+}
+
+function syncBarrierControls(sourceEl = null) {
+  const rawValue = String(sourceEl?.value ?? barrierInput?.value ?? sidebarBarrierInputEl?.value ?? "0.5");
+  if (barrierInput && barrierInput !== sourceEl && barrierInput.value !== rawValue) {
+    barrierInput.value = rawValue;
+  }
+  if (sidebarBarrierInputEl && sidebarBarrierInputEl !== sourceEl && sidebarBarrierInputEl.value !== rawValue) {
+    sidebarBarrierInputEl.value = rawValue;
+  }
+}
+
+function updateProposalDirectionButtons() {
+  if (!directionButtons?.length) return;
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  directionButtons.forEach((btn) => {
+    const btnDirection = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
+    const quote = getQuoteForDirection(btnDirection);
+    const isLoading = !isRiseFall && proposalLoadingDirection === btnDirection && calcInFlight;
+    const pctText = isLoading ? "Loading..." : Number.isFinite(quote?.profitPct) ? `${quote.profitPct.toFixed(1)}%` : "--";
+    btn.classList.toggle("active", currentDirection === btnDirection);
+    btn.classList.toggle("loading", isLoading);
+    btn.innerHTML = `
+      <span class="proposal-pill-label">${getDirectionLabel(btnDirection)}</span>
+      <span class="proposal-pill-pct">${pctText}</span>
+    `;
+  });
+}
+
+function updateTradeProfitSummary() {
+  if (!tradeProfitSummaryEl) return;
+  if (getActiveTradeMode() !== "rise_fall") {
+    tradeProfitSummaryEl.textContent = "";
+    tradeProfitSummaryEl.classList.add("hidden");
+    return;
+  }
+  tradeProfitSummaryEl.classList.remove("hidden");
+  const stake = Number(stakeInput?.value || sidebarStakeInputEl?.value || "0");
+  const quote = getQuoteForDirection(currentDirection);
+  const profit = Number.isFinite(quote?.payout) && stake ? quote.payout - stake : null;
+  const payout = Number.isFinite(quote?.payout) ? quote.payout : null;
+  if (profit == null) {
+    tradeProfitSummaryEl.textContent = "Profit: --";
+    return;
+  }
+  tradeProfitSummaryEl.textContent = `Profit: ${profit.toFixed(2)} on ${stake.toFixed(2)} stake${payout != null ? ` • Payout ${payout.toFixed(2)}` : ""}`;
+}
+
 function setActiveTab(tabName) {
   tabs.forEach((t) => {
     const isActive = t.dataset.tab === tabName;
@@ -5984,12 +6937,78 @@ function setActiveTab(tabName) {
   });
 
   const isHL = tabName === "higher_lower";
-  if (hlButtons) hlButtons.style.display = isHL ? "grid" : "none";
+  const isRiseFall = !isHL;
+  if (hlButtons) hlButtons.style.display = "grid";
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
+  if (sidebarBarrierFieldEl) sidebarBarrierFieldEl.style.display = isHL ? "block" : "none";
+  if (riseFallExpiryFieldEl) riseFallExpiryFieldEl.style.display = isRiseFall ? "block" : "none";
+  proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
+  proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
+  syncTradeTypeControls(tabName);
+  updateProposalDirectionButtons();
+  updateTradeProfitSummary();
+  renderTradeList();
+}
+
+function isDesktopLayout() {
+  return window.matchMedia("(min-width: 980px)").matches;
+}
+
+function restoreMovedPanels() {
+  if (tradeModeTabsEl && originalTradeTabsParent) {
+    originalTradeTabsParent.insertBefore(tradeModeTabsEl, originalTradeTabsNextSibling);
+  }
+  if (proposalsCardEl && originalProposalsParent) {
+    originalProposalsParent.insertBefore(proposalsCardEl, originalProposalsNextSibling);
+  }
+  if (desktopTradeTypeCardEl && originalDesktopTradeTypeParent) {
+    originalDesktopTradeTypeParent.insertBefore(desktopTradeTypeCardEl, originalDesktopTradeTypeNextSibling);
+  }
+}
+
+function syncDesktopSidebarContent() {
+  if (!desktopSidebarExtraEl) return;
+  desktopSidebarExtraEl.innerHTML = "";
+  restoreMovedPanels();
+
+  if (!isDesktopLayout()) {
+    phoneEl?.classList.remove("desktop-chart-layout");
+    return;
+  }
+
+  const isSettings = currentAppTab === "settings";
+  const isChart = currentAppTab === "chart";
+  const isChart2 = currentAppTab === "chart_2";
+
+  phoneEl?.classList.toggle("desktop-chart-layout", isChart || isChart2);
+  if (desktopTradeTypeCardEl) {
+    desktopTradeTypeCardEl.classList.add("hidden");
+  }
+
+  if (isChart && proposalsCardEl) {
+    desktopSidebarExtraEl.appendChild(proposalsCardEl);
+  }
+}
+
+function updateSidebarToggleUI() {
+  if (toggleSidebarBtn && phoneEl) {
+    const collapsed = phoneEl.classList.contains("sidebar-collapsed");
+    toggleSidebarBtn.textContent = collapsed ? "Show Menu" : "Hide Menu";
+    toggleSidebarBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+  }
+  if (toggleSignalSidebarBtn && phoneEl) {
+    const collapsed = phoneEl.classList.contains("signal-sidebar-collapsed");
+    toggleSignalSidebarBtn.textContent = collapsed ? "Show Signals" : "Hide Signals";
+    toggleSignalSidebarBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
+  }
 }
 
 function setActiveAppTab(tabName) {
+  const requestedTabName = tabName;
+  if (isDesktopLayout() && tabName === "chart_2") {
+    tabName = "chart";
+  }
   currentAppTab = tabName;
   const panelTabName = tabName === "chart_2" ? "chart" : tabName;
   const chart2Mode = tabName === "chart_2";
@@ -5997,7 +7016,7 @@ function setActiveAppTab(tabName) {
     phoneEl.classList.toggle("chart2-mode", chart2Mode);
   }
   appTabs?.forEach((tab) => {
-    const isActive = tab.dataset.appTab === tabName;
+    const isActive = tab.dataset.appTab === requestedTabName;
     tab.classList.toggle("active", isActive);
     tab.setAttribute("aria-selected", isActive ? "true" : "false");
   });
@@ -6025,6 +7044,20 @@ function setActiveAppTab(tabName) {
   if (signalSectionTitleEl) {
     signalSectionTitleEl.textContent = chart2Mode ? "Chart" : "Signal";
   }
+  if (isDesktopLayout() && currentAppTab === "chart") {
+    signalBodyEl?.classList.remove("collapsed");
+    chartBodyEl?.classList.remove("collapsed");
+    if (toggleSignalBtn) {
+      toggleSignalBtn.textContent = "Collapse";
+      toggleSignalBtn.setAttribute("aria-expanded", "true");
+    }
+    if (toggleChartBtn) {
+      toggleChartBtn.textContent = "Collapse";
+      toggleChartBtn.setAttribute("aria-expanded", "true");
+    }
+  }
+  syncDesktopSidebarContent();
+  updateSidebarToggleUI();
 }
 
 function scheduleChartResize() {
@@ -6286,7 +7319,7 @@ function onSymbolChange() {
   chartOffset = 0;
   shownIndicatorSignalKeys.clear();
   signalToastLayerEl?.classList.add("hidden");
-  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", time: null });
+  updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", setup: "--", time: null });
   loadTickHistory(symbol).catch(() => {});
   loadContractsFor(symbol).catch(() => {});
 }
@@ -6447,18 +7480,21 @@ function rollExpiries() {
   return changed;
 }
 
-async function getProposal({ symbol, contractType, barrier, stake, durationSec }) {
-  const res = await wsRequest({
+async function getProposal({ symbol, contractType, barrier, stake, durationSec, durationUnit = "s" }) {
+  const payload = {
     proposal: 1,
     amount: stake,
     basis: "stake",
     contract_type: contractType,
-    barrier,
     duration: Math.max(1, Math.floor(durationSec)),
-    duration_unit: "s",
+    duration_unit: durationUnit,
     symbol,
     currency: "USD",
-  });
+  };
+  if (barrier != null && barrier !== "") {
+    payload.barrier = barrier;
+  }
+  const res = await wsRequest(payload);
   return res.proposal;
 }
 
@@ -6469,6 +7505,9 @@ function scheduleProposalRefresh(force = false) {
   const now = Date.now();
   if (!force && now - lastCalcAt < MIN_REFRESH_MS) return;
   lastCalcAt = now;
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  proposalLoadingDirection = isRiseFall ? null : currentDirection;
+  renderTradeList();
   refreshProposals().catch((err) => {
     setStatus(err.message, true);
   });
@@ -6479,66 +7518,129 @@ async function refreshProposals() {
   if (!currentSymbol || !lastSpot) return;
 
   calcInFlight = true;
+  const loadingDirectionAtStart = proposalLoadingDirection;
   try {
     const spot = lastSpot;
     const results = [];
     let ok = 0;
     lastProposalError = null;
-    for (const expiry of proposalExpiries) {
-      const stake = Number(stakeInput?.value || "0");
-      const nowSec = Math.floor(Date.now() / 1000);
-      const durationSec = Math.max(minDurationSec, expiry - nowSec);
-      if (durationSec <= 0) {
-        results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
-        continue;
-      }
-      const offsetVal = Number(barrierInput?.value || "0");
-      if (!stake || !offsetVal) {
-        results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
-        continue;
-      }
-      const signedOffset = currentDirection === "CALL" ? offsetVal : -offsetVal;
-      const barrier = formatOffset(signedOffset, currentPip);
-      try {
-        const proposal = await getProposal({
-          symbol: currentSymbol,
-          contractType: currentDirection,
-          barrier,
-          stake,
-          durationSec,
-        });
-        const payout = proposal.payout;
-        const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
-        const profitPct = ((payout - stake) / stake) * 100;
-        results.push({
-          expiry,
-          barrier: spot + signedOffset,
-          payout,
-          profitPct,
-          offset: signedOffset,
-          proposalId: proposal.id,
-          askPrice,
-        });
-        ok += 1;
-      } catch (err) {
-        lastProposalError = err?.message || "Proposal error";
-        if (lastProposalError.toLowerCase().includes("rate limit")) {
-          rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+    const tradeMode = getActiveTradeMode();
+    const isRiseFall = tradeMode === "rise_fall";
+    const stake = Number(stakeInput?.value || "0");
+    const primaryExpiry = proposalExpiries[0];
+    quickDirectionQuotes = { CALL: null, PUT: null };
+
+    if (isRiseFall) {
+      proposals = [];
+      if (primaryExpiry && stake) {
+        const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
+        const nowSec = Math.floor(Date.now() / 1000);
+        const durationSec = expiryChoice.mode === "candle_end"
+          ? Math.max(minDurationSec, primaryExpiry - nowSec)
+          : Math.max(1, expiryChoice.duration);
+        const durationUnit = expiryChoice.mode === "candle_end" ? "s" : expiryChoice.unit;
+        for (const direction of ["CALL", "PUT"]) {
+          try {
+            const proposal = await getProposal({
+              symbol: currentSymbol,
+              contractType: direction,
+              barrier: null,
+              stake,
+              durationSec,
+              durationUnit,
+            });
+            const payout = proposal.payout;
+            quickDirectionQuotes[direction] = {
+              payout,
+              profitPct: stake ? ((payout - stake) / stake) * 100 : null,
+              proposalId: proposal.id,
+              askPrice: proposal.ask_price ?? proposal.buy_price ?? stake,
+              barrier: null,
+              offset: null,
+              expiry: primaryExpiry,
+              expiryLabel: expiryChoice.label,
+            };
+            ok += 1;
+          } catch (err) {
+            lastProposalError = err?.message || "Proposal error";
+            if (lastProposalError.toLowerCase().includes("rate limit")) {
+              rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+            }
+            quickDirectionQuotes[direction] = null;
+          }
         }
-        results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
       }
+    } else {
+      const offsetVal = Number(barrierInput?.value || "0");
+      for (const expiry of proposalExpiries) {
+        const nowSec = Math.floor(Date.now() / 1000);
+        const durationSec = Math.max(minDurationSec, expiry - nowSec);
+        if (durationSec <= 0) {
+          results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
+          continue;
+        }
+        if (!stake || !offsetVal) {
+          results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
+          continue;
+        }
+        const signedOffset = currentDirection === "CALL" ? offsetVal : -offsetVal;
+        const barrier = formatOffset(signedOffset, currentPip);
+        try {
+          const proposal = await getProposal({
+            symbol: currentSymbol,
+            contractType: currentDirection,
+            barrier,
+            stake,
+            durationSec,
+          });
+          const payout = proposal.payout;
+          const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
+          const profitPct = ((payout - stake) / stake) * 100;
+          results.push({
+            expiry,
+            barrier: spot + signedOffset,
+            payout,
+            profitPct,
+            offset: signedOffset,
+            proposalId: proposal.id,
+            askPrice,
+          });
+          ok += 1;
+        } catch (err) {
+          lastProposalError = err?.message || "Proposal error";
+          if (lastProposalError.toLowerCase().includes("rate limit")) {
+            rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+          }
+          results.push({ expiry, barrier: null, payout: null, profitPct: null, offset: null });
+        }
+      }
+      proposals = results;
+      const firstProposal = results[0];
+      quickDirectionQuotes[currentDirection] = firstProposal && Number.isFinite(firstProposal.payout) ? {
+        payout: firstProposal.payout,
+        profitPct: firstProposal.profitPct,
+        proposalId: firstProposal.proposalId,
+        askPrice: firstProposal.askPrice,
+        barrier: firstProposal.barrier,
+        offset: firstProposal.offset,
+        expiry: firstProposal.expiry,
+      } : null;
     }
-    proposals = results;
+    proposalLoadingDirection = null;
     renderTradeList();
     if (proposalExpiries.length) {
+      const totalExpected = isRiseFall ? 2 : proposalExpiries.length;
       if (ok === 0 && lastProposalError) {
-        setStatus(`Proposals: 0/${proposalExpiries.length} (${lastProposalError})`, true);
+        setStatus(`Proposals: 0/${totalExpected} (${lastProposalError})`, true);
       } else {
-        setStatus(`Proposals: ${ok}/${proposalExpiries.length}`);
+        setStatus(`Proposals: ${ok}/${totalExpected}`);
       }
     }
   } finally {
     calcInFlight = false;
+    if (proposalLoadingDirection === loadingDirectionAtStart) {
+      proposalLoadingDirection = null;
+    }
   }
 }
 
@@ -6622,13 +7724,27 @@ function formatCountdown(expiry) {
 
 function renderTradeList() {
   if (!tradeListEl) return;
+  updateProposalDirectionButtons();
+  updateTradeProfitSummary();
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+
+  if (isDesktopLayout() && currentAppTab === "chart" && isRiseFall) {
+    tradeListEl.innerHTML = "";
+    return;
+  }
+
+  if (!isRiseFall && calcInFlight && proposalLoadingDirection === currentDirection && !proposals.length) {
+    tradeListEl.innerHTML = `<div class="trade-meta">Loading ${getDirectionLabel(currentDirection)} proposals...</div>`;
+    return;
+  }
+
   if (!proposalExpiries.length) {
     tradeListEl.innerHTML = "<div class=\"trade-meta\">No proposals yet</div>";
     return;
   }
 
   const stake = Number(stakeInput?.value || "0");
-  const directionLabel = currentDirection === "CALL" ? "Higher" : "Lower";
+  const directionLabel = getDirectionLabel(currentDirection);
   const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
@@ -6729,8 +7845,15 @@ function init() {
   appPanels = document.querySelectorAll(".app-panel");
   hlButtons = document.getElementById("hlButtons");
   phoneEl = document.querySelector(".phone");
+  desktopSidebarEl = document.getElementById("desktopSidebar");
+  desktopSidebarExtraEl = document.getElementById("desktopSidebarExtra");
+  toggleSidebarBtn = document.getElementById("toggleSidebar");
+  toggleSignalSidebarBtn = document.getElementById("toggleSignalSidebar");
+  desktopTradeTypeCardEl = document.getElementById("desktopTradeTypeCard");
+  desktopTradeTypeSelectEl = document.getElementById("desktopTradeTypeSelect");
   ensureSignalToastLayer();
   barrierField = document.getElementById("barrierField");
+  sidebarBarrierFieldEl = document.getElementById("sidebarBarrierField");
   quickRow = document.getElementById("quickRow");
   tradeBody = document.getElementById("tradeBody");
   toggleTradeBtn = document.getElementById("toggleTrade");
@@ -6747,6 +7870,13 @@ function init() {
   stakeInput = document.getElementById("stakeInput");
   btn1m = document.getElementById("btn1m");
   btn2m = document.getElementById("btn2m");
+  proposalsBodyEl = document.getElementById("proposalsBody");
+  sidebarTradeTypeSelectEl = document.getElementById("sidebarTradeTypeSelect");
+  riseFallExpiryFieldEl = document.getElementById("riseFallExpiryField");
+  riseFallExpirySelectEl = document.getElementById("riseFallExpirySelect");
+  sidebarStakeInputEl = document.getElementById("sidebarStakeInput");
+  sidebarBarrierInputEl = document.getElementById("sidebarBarrierInput");
+  tradeProfitSummaryEl = document.getElementById("tradeProfitSummary");
   tradeListEl = document.getElementById("tradeList");
   tradeResultsEl = document.getElementById("tradeResults");
   toggleProposalsBtn = document.getElementById("toggleProposals");
@@ -6756,6 +7886,7 @@ function init() {
   sigSweepEl = document.getElementById("sigSweep");
   sigConfEl = document.getElementById("sigConf");
   sigSignalEl = document.getElementById("sigSignal");
+  sigSetupEl = document.getElementById("sigSetup");
   sigTimeEl = document.getElementById("sigTime");
   sigRejectEl = document.getElementById("sigReject");
   sigEntryEl = document.getElementById("sigEntry");
@@ -6773,7 +7904,10 @@ function init() {
   indicatorSelectEl = document.getElementById("indicatorSelect");
   chartIndicatorListEl = document.getElementById("chartIndicatorList");
   trendModeSelectEl = document.getElementById("trendModeSelect");
+  drawingToolSelectEl = document.getElementById("drawingToolSelect");
+  toggleCrosshairBtn = document.getElementById("toggleCrosshair");
   miniChartCanvas = document.getElementById("miniChart");
+  ensureDrawingActionBar();
   zoomInBtn = document.getElementById("zoomIn");
   zoomOutBtn = document.getElementById("zoomOut");
   resetChartBtn = document.getElementById("resetChart");
@@ -6786,7 +7920,17 @@ function init() {
   toggleAutoConfigBtn = document.getElementById("toggleAutoConfig");
   toggleAutoResultsBtn = document.getElementById("toggleAutoResults");
   chart2HideEls = document.querySelectorAll(".chart2-hide");
+  tradeModeTabsEl = document.getElementById("tradeModeTabs");
+  proposalsCardEl = document.getElementById("proposalsCard");
+  chartPrimaryCardEl = document.querySelector('.app-panel[data-app-panel="chart"] > .trade-section');
   directionButtons = hlButtons?.querySelectorAll(".pill") || [];
+
+  originalTradeTabsParent = tradeModeTabsEl?.parentElement || null;
+  originalTradeTabsNextSibling = tradeModeTabsEl?.nextElementSibling || null;
+  originalProposalsParent = proposalsCardEl?.parentElement || null;
+  originalProposalsNextSibling = proposalsCardEl?.nextElementSibling || null;
+  originalDesktopTradeTypeParent = desktopTradeTypeCardEl?.parentElement || null;
+  originalDesktopTradeTypeNextSibling = desktopTradeTypeCardEl?.nextElementSibling || null;
 
   if (!marketSelect || !symbolSelect) {
     setStatus("UI error: market/symbol selects missing", true);
@@ -6797,8 +7941,15 @@ function init() {
   symbolSelect.addEventListener("change", onSymbolChange);
   populateTimeframeOptions();
   populateTrendModeOptions();
+  chartDrawingStore = loadChartDrawingStore();
+  syncDrawingToolUI();
   populateIndicatorOptions();
   renderChartIndicatorList();
+  syncStakeControls();
+  syncBarrierControls();
+  updateCrosshairToggleUI();
+  syncDesktopSidebarContent();
+  updateSidebarToggleUI();
   tradeListEl?.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -6861,7 +8012,10 @@ function init() {
   });
 
   tabs.forEach((tab) => {
-    tab.addEventListener("click", () => setActiveTab(tab.dataset.tab));
+    tab.addEventListener("click", () => {
+      setActiveTab(tab.dataset.tab);
+      scheduleProposalRefresh(true);
+    });
   });
 
   appTabs.forEach((tab) => {
@@ -6876,9 +8030,9 @@ function init() {
     });
   }
 
-  if (toggleProposalsBtn && tradeListEl) {
+  if (toggleProposalsBtn && proposalsBodyEl) {
     toggleProposalsBtn.addEventListener("click", () => {
-      const isCollapsed = tradeListEl.classList.toggle("collapsed");
+      const isCollapsed = proposalsBodyEl.classList.toggle("collapsed");
       toggleProposalsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleProposalsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
       scheduleChartResize();
@@ -6895,6 +8049,7 @@ function init() {
 
   if (toggleSignalBtn && signalBodyEl) {
     toggleSignalBtn.addEventListener("click", () => {
+      if (isDesktopLayout() && currentAppTab === "chart") return;
       const isCollapsed = signalBodyEl.classList.toggle("collapsed");
       toggleSignalBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleSignalBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
@@ -6929,6 +8084,7 @@ function init() {
 
   if (toggleChartBtn && chartBodyEl) {
     toggleChartBtn.addEventListener("click", () => {
+      if (isDesktopLayout()) return;
       const isCollapsed = chartBodyEl.classList.toggle("collapsed");
       toggleChartBtn.textContent = isCollapsed ? "Expand" : "Collapse";
       toggleChartBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
@@ -6944,7 +8100,37 @@ function init() {
   });
 
   window.addEventListener("resize", () => {
+    if (!isDesktopLayout()) {
+      phoneEl?.classList.remove("sidebar-collapsed", "signal-sidebar-collapsed", "desktop-chart-layout");
+    } else if (currentAppTab === "chart") {
+      signalBodyEl?.classList.remove("collapsed");
+      chartBodyEl?.classList.remove("collapsed");
+      if (toggleSignalBtn) {
+        toggleSignalBtn.textContent = "Collapse";
+        toggleSignalBtn.setAttribute("aria-expanded", "true");
+      }
+      if (toggleChartBtn) {
+        toggleChartBtn.textContent = "Collapse";
+        toggleChartBtn.setAttribute("aria-expanded", "true");
+      }
+    }
+    syncDesktopSidebarContent();
+    updateSidebarToggleUI();
     renderMiniChart(getBuiltCandles());
+  });
+
+  toggleSidebarBtn?.addEventListener("click", () => {
+    if (!isDesktopLayout()) return;
+    phoneEl?.classList.toggle("sidebar-collapsed");
+    updateSidebarToggleUI();
+    scheduleChartResize();
+  });
+
+  toggleSignalSidebarBtn?.addEventListener("click", () => {
+    if (!isDesktopLayout()) return;
+    phoneEl?.classList.toggle("signal-sidebar-collapsed");
+    updateSidebarToggleUI();
+    scheduleChartResize();
   });
 
   document.addEventListener("pointerdown", (event) => {
@@ -6976,9 +8162,52 @@ function init() {
   miniChartCanvas?.addEventListener("pointerdown", (event) => {
     const rect = miniChartCanvas.getBoundingClientRect();
     const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+    const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
+    const inAxis = localX >= axisThreshold;
     chartDragX = event.clientX;
     chartDragY = event.clientY;
-    chartDragMode = event.clientX - rect.left >= axisThreshold ? "scale" : "pan";
+    chartDrawingHitCandidateId = null;
+    const hitDrawingId = !inAxis ? hitTestChartDrawing({ x: localX, y: localY }) : null;
+    if (hitDrawingId && chartDrawingTool === "SELECT") {
+      chartSelectedDrawingId = hitDrawingId;
+      const selected = getSelectedChartDrawing();
+      if (chartDrawingMoveMode && selected && !selected.locked) {
+        chartDragMode = "drawing-move";
+        chartDrawingMoveOrigin = null;
+        chartGestureMoved = false;
+        miniChartCanvas.setPointerCapture?.(event.pointerId);
+      } else {
+        chartDragMode = "select";
+        chartGestureMoved = false;
+      }
+      renderMiniChart(getBuiltCandles());
+      return;
+    }
+    if (!hitDrawingId && chartDrawingTool === "SELECT") {
+      clearChartDrawingSelection();
+      renderMiniChart(getBuiltCandles());
+    }
+    if (chartDrawingTool !== "SELECT" && !inAxis) {
+      const point = createDrawingPointFromPointer(event);
+      if (!point) return;
+      chartDragMode = "drawing";
+      chartDrawingDraft = {
+        tool: chartDrawingTool,
+        start: point,
+        end: point,
+      };
+      chartGestureMoved = false;
+      miniChartCanvas.setPointerCapture?.(event.pointerId);
+      renderMiniChart(getBuiltCandles());
+      return;
+    }
+    if (chartCrosshairEnabled && event.pointerType !== "mouse") {
+      chartDragMode = "crosshair";
+      updateChartCrosshairFromPointer(event);
+    } else {
+      chartDragMode = inAxis ? "scale" : "pan";
+    }
     chartGestureMoved = false;
     miniChartCanvas.setPointerCapture?.(event.pointerId);
   });
@@ -6987,7 +8216,18 @@ function init() {
     const rect = miniChartCanvas.getBoundingClientRect();
     const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
     if (chartDragX == null || chartDragY == null) {
-      miniChartCanvas.style.cursor = event.clientX - rect.left >= axisThreshold ? "ns-resize" : "grab";
+      const inAxis = event.clientX - rect.left >= axisThreshold;
+      if (!inAxis && chartDrawingTool === "SELECT") {
+        const hitId = hitTestChartDrawing({ x: event.clientX - rect.left, y: event.clientY - rect.top });
+        miniChartCanvas.style.cursor = hitId ? "pointer" : (chartCrosshairEnabled ? "crosshair" : "grab");
+      } else if (chartDrawingTool !== "SELECT") {
+        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : "crosshair";
+      } else {
+        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : (chartCrosshairEnabled ? "crosshair" : "grab");
+      }
+      if (chartCrosshairEnabled && event.pointerType === "mouse") {
+        updateChartCrosshairFromPointer(event);
+      }
       return;
     }
     const deltaX = event.clientX - chartDragX;
@@ -6996,7 +8236,22 @@ function init() {
     chartDragX = event.clientX;
     chartDragY = event.clientY;
     chartGestureMoved = true;
-    if (chartDragMode === "scale") {
+    chartDrawingHitCandidateId = null;
+    if (chartDragMode === "drawing") {
+      const point = createDrawingPointFromPointer(event);
+      if (point && chartDrawingDraft) {
+        chartDrawingDraft.end = point;
+        renderMiniChart(getBuiltCandles());
+      }
+    } else if (chartDragMode === "drawing-move") {
+      const point = createDrawingPointFromPointer(event);
+      if (point) {
+        moveSelectedDrawingToPoint(point);
+        renderMiniChart(getBuiltCandles());
+      }
+    } else if (chartDragMode === "crosshair") {
+      updateChartCrosshairFromPointer(event);
+    } else if (chartDragMode === "scale") {
       scaleChartVertically(deltaY);
     } else {
       panChartByPixels(deltaX);
@@ -7005,6 +8260,33 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointerup", (event) => {
+    if (chartDragMode === "drawing") {
+      const drawing = buildDrawingFromDraft(chartDrawingDraft);
+      chartDrawingDraft = null;
+      chartDragX = null;
+      chartDragY = null;
+      chartDragMode = null;
+      chartGestureMoved = false;
+      if (drawing) {
+        addChartDrawing(drawing);
+        chartSelectedDrawingId = drawing.id;
+        chartDrawingMoveMode = false;
+        chartDrawingMoveOrigin = null;
+        setDrawingTool("SELECT");
+        return;
+      }
+      renderMiniChart(getBuiltCandles());
+      return;
+    }
+    if (chartDragMode === "drawing-move") {
+      chartDragX = null;
+      chartDragY = null;
+      chartDragMode = null;
+      chartGestureMoved = false;
+      chartDrawingMoveOrigin = null;
+      renderMiniChart(getBuiltCandles());
+      return;
+    }
     if (!chartGestureMoved) {
       const now = Date.now();
       if (event.pointerType === "mouse") {
@@ -7027,6 +8309,11 @@ function init() {
     chartDragY = null;
     chartDragMode = null;
     chartGestureMoved = false;
+    chartDrawingHitCandidateId = null;
+    chartDrawingMoveOrigin = null;
+    if (chartCrosshairEnabled && event.pointerType !== "mouse") {
+      ensureCrosshairVisible();
+    }
   });
 
   miniChartCanvas?.addEventListener("pointercancel", () => {
@@ -7034,13 +8321,25 @@ function init() {
     chartDragY = null;
     chartDragMode = null;
     chartGestureMoved = false;
+    chartDrawingHitCandidateId = null;
+    chartDrawingDraft = null;
+    chartDrawingMoveOrigin = null;
+    if (chartCrosshairEnabled) ensureCrosshairVisible();
   });
 
-  miniChartCanvas?.addEventListener("pointerleave", () => {
+  miniChartCanvas?.addEventListener("pointerleave", (event) => {
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
     chartGestureMoved = false;
+    chartDrawingHitCandidateId = null;
+    chartDrawingMoveOrigin = null;
+    if (chartCrosshairEnabled && event.pointerType === "mouse") {
+      chartCrosshairState = null;
+      renderMiniChart(getBuiltCandles());
+    } else if (chartCrosshairEnabled) {
+      ensureCrosshairVisible();
+    }
     miniChartCanvas.style.cursor = "grab";
   });
 
@@ -7070,6 +8369,10 @@ function init() {
     updateSignalFromCandles(getBuiltCandles());
   });
 
+  drawingToolSelectEl?.addEventListener("change", () => {
+    setDrawingTool(drawingToolSelectEl.value);
+  });
+
   zoomInBtn?.addEventListener("click", () => {
     chartPoints = Math.max(10, chartPoints - 10);
     const built = getBuiltCandles();
@@ -7088,6 +8391,10 @@ function init() {
 
   resetChartBtn?.addEventListener("click", () => {
     resetChartView();
+  });
+
+  toggleCrosshairBtn?.addEventListener("click", () => {
+    setCrosshairEnabled(!chartCrosshairEnabled);
   });
 
   autoToggleEl?.addEventListener("change", () => {
@@ -7155,15 +8462,43 @@ function init() {
 
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
-      const direction = btn.textContent.trim().toLowerCase() === "lower" ? "PUT" : "CALL";
+      const direction = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
       setDirection(direction);
     });
   });
 
   btn1m?.addEventListener("click", () => setExpiryMinutes(1));
   btn2m?.addEventListener("click", () => setExpiryMinutes(2));
-  barrierInput?.addEventListener("input", () => scheduleProposalRefresh(true));
-  stakeInput?.addEventListener("input", () => scheduleProposalRefresh(true));
+  barrierInput?.addEventListener("input", () => {
+    syncBarrierControls(barrierInput);
+    scheduleProposalRefresh(true);
+  });
+  stakeInput?.addEventListener("input", () => {
+    syncStakeControls(stakeInput);
+    scheduleProposalRefresh(true);
+    renderTradeList();
+  });
+  sidebarStakeInputEl?.addEventListener("input", () => {
+    syncStakeControls(sidebarStakeInputEl);
+    scheduleProposalRefresh(true);
+    renderTradeList();
+  });
+  sidebarBarrierInputEl?.addEventListener("input", () => {
+    syncBarrierControls(sidebarBarrierInputEl);
+    scheduleProposalRefresh(true);
+  });
+  desktopTradeTypeSelectEl?.addEventListener("change", () => {
+    setActiveTab(desktopTradeTypeSelectEl.value);
+    scheduleProposalRefresh(true);
+  });
+  sidebarTradeTypeSelectEl?.addEventListener("change", () => {
+    setActiveTab(sidebarTradeTypeSelectEl.value);
+    scheduleProposalRefresh(true);
+  });
+  riseFallExpirySelectEl?.addEventListener("change", () => {
+    if (getActiveTradeMode() !== "rise_fall") return;
+    scheduleProposalRefresh(true);
+  });
 
   setActiveTab("higher_lower");
   setActiveAppTab("settings");
@@ -7185,7 +8520,7 @@ function init() {
   // Default collapsed state for sections
   tradeBody?.classList.add("collapsed");
   toggleTradeBtn && (toggleTradeBtn.textContent = "Expand", toggleTradeBtn.setAttribute("aria-expanded", "false"));
-  tradeListEl?.classList.add("collapsed");
+  proposalsBodyEl?.classList.add("collapsed");
   toggleProposalsBtn && (toggleProposalsBtn.textContent = "Expand", toggleProposalsBtn.setAttribute("aria-expanded", "false"));
   tradeResultsEl?.classList.add("collapsed");
   toggleResultsBtn && (toggleResultsBtn.textContent = "Expand", toggleResultsBtn.setAttribute("aria-expanded", "false"));

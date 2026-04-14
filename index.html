@@ -12,7 +12,11 @@
         <div id="accountSummary" class="account-summary">
           <span class="acct-label">Log in</span>
         </div>
-        <div class="status" id="status">Connecting...</div>
+        <div class="topbar-actions">
+          <button id="toggleSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Sidebar</button>
+          <button id="toggleSignalSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Signals</button>
+          <div class="status" id="status">Connecting...</div>
+        </div>
       </header>
 
       <div id="accountPanel" class="account-panel hidden">
@@ -24,16 +28,29 @@
         <button id="logoutBtn" class="ghost small account-manage">Logout</button>
       </div>
 
-      <nav class="app-tabs" role="tablist" aria-label="App screens">
-        <button class="app-tab active" data-app-tab="settings" role="tab" aria-selected="true">Settings</button>
-        <button class="app-tab" data-app-tab="chart" role="tab" aria-selected="false">Chart</button>
-        <button class="app-tab" data-app-tab="results" role="tab" aria-selected="false">Results</button>
-        <button class="app-tab" data-app-tab="chart_2" role="tab" aria-selected="false">Chart 2</button>
-        <button class="app-tab" data-app-tab="auto" role="tab" aria-selected="false">Auto</button>
-      </nav>
+      <aside id="desktopSidebar" class="desktop-sidebar">
+        <nav class="app-tabs" role="tablist" aria-label="App screens">
+          <button class="app-tab active" data-app-tab="settings" role="tab" aria-selected="true">Settings</button>
+          <button class="app-tab" data-app-tab="chart" role="tab" aria-selected="false">Chart</button>
+          <button class="app-tab" data-app-tab="results" role="tab" aria-selected="false">Results</button>
+          <button class="app-tab" data-app-tab="chart_2" role="tab" aria-selected="false">Chart 2</button>
+          <button class="app-tab" data-app-tab="auto" role="tab" aria-selected="false">Auto</button>
+        </nav>
+        <div id="desktopSidebarExtra" class="desktop-sidebar-extra"></div>
+      </aside>
+
+      <section id="desktopTradeTypeCard" class="card desktop-trade-type-card hidden">
+        <div class="field">
+          <div class="field-label">Select your trade type</div>
+          <select id="desktopTradeTypeSelect" class="field-input" aria-label="Select your trade type">
+            <option value="rise_fall">Rise/Fall</option>
+            <option value="higher_lower">Higher/Lower</option>
+          </select>
+        </div>
+      </section>
 
       <section class="app-panel active" data-app-panel="settings">
-      <nav class="trade-tabs" role="tablist">
+      <nav id="tradeModeTabs" class="trade-tabs" role="tablist">
         <button class="tab active" data-tab="rise_fall" role="tab" aria-selected="true">Rise/Fall</button>
         <button class="tab" data-tab="higher_lower" role="tab" aria-selected="false">Higher/Lower</button>
       </nav>
@@ -103,6 +120,10 @@
             <div id="sigSignal" class="field-value">--</div>
           </div>
           <div class="signal-item">
+            <div class="field-label">Setup</div>
+            <div id="sigSetup" class="field-value">--</div>
+          </div>
+          <div class="signal-item">
             <div class="field-label">Rejection</div>
             <div id="sigReject" class="field-value">--</div>
           </div>
@@ -135,9 +156,18 @@
               <option value="OBV">OBV Trend</option>
               <option value="STACK">Stack Trend</option>
             </select>
+            <select id="drawingToolSelect" class="field-input chart-mode-select chart-drawing-select" aria-label="Drawing tool">
+              <option value="SELECT">Select Tool</option>
+              <option value="TRENDLINE">Trendline</option>
+              <option value="HLINE">Horizontal Line</option>
+              <option value="HRAY">Horizontal Ray</option>
+              <option value="RECT">Rectangle</option>
+              <option value="FIB">Fib Range</option>
+            </select>
           </div>
           <div class="chart-controls">
             <button id="resetChart" class="ghost small chart-reset-btn" type="button" aria-label="Reset chart to current candle">↺</button>
+            <button id="toggleCrosshair" class="ghost small" type="button" aria-label="Toggle crosshair" aria-pressed="false">⌖</button>
             <button id="zoomOut" class="ghost small" type="button">-</button>
             <button id="zoomIn" class="ghost small" type="button">+</button>
             <button id="toggleChart" class="ghost small" aria-expanded="true">Collapse</button>
@@ -161,16 +191,49 @@
         </div>
       </section>
 
-      <section class="card trade-section chart2-hide">
+      <section id="proposalsCard" class="card trade-section chart2-hide">
         <header class="card-head">
           <h2>Trade proposals</h2>
           <button id="toggleProposals" class="ghost small" aria-expanded="true">Collapse</button>
         </header>
-        <div id="hlButtons" class="hl-buttons proposal-direction" role="group" aria-label="Higher or Lower">
-          <button class="pill active">Higher</button>
-          <button class="pill">Lower</button>
+        <div id="proposalsBody" class="trade-proposals-body">
+          <div class="proposal-config">
+          <div class="field">
+            <div class="field-label">Select your trade type</div>
+            <select id="sidebarTradeTypeSelect" class="field-input" aria-label="Select your trade type">
+              <option value="rise_fall">Rise/Fall</option>
+              <option value="higher_lower">Higher/Lower</option>
+            </select>
+          </div>
+          <div id="riseFallExpiryField" class="field">
+            <div class="field-label">Expiry</div>
+            <select id="riseFallExpirySelect" class="field-input" aria-label="Rise or fall expiry">
+              <option value="candle_end">Candle end</option>
+              <option value="5t">5 ticks</option>
+              <option value="10t">10 ticks</option>
+              <option value="30s">30 seconds</option>
+              <option value="60s">1 minute</option>
+              <option value="300s">5 minutes</option>
+              <option value="3600s">1 hour</option>
+              <option value="86400s">1 day</option>
+            </select>
+          </div>
+          <div class="field">
+            <div class="field-label">Stake</div>
+            <input id="sidebarStakeInput" class="field-input" type="number" min="0.35" step="0.01" value="1" />
+          </div>
+          <div id="sidebarBarrierField" class="field">
+            <div class="field-label">Barrier offset</div>
+            <input id="sidebarBarrierInput" class="field-input" type="number" min="0.0001" step="0.0001" value="0.5" />
+          </div>
         </div>
-        <div id="tradeList" class="trade-list"></div>
+          <div id="hlButtons" class="hl-buttons proposal-direction" role="group" aria-label="Trade direction">
+            <button class="pill active" data-direction="CALL">Higher</button>
+            <button class="pill" data-direction="PUT">Lower</button>
+          </div>
+          <div id="tradeProfitSummary" class="trade-profit-summary">Profit: --</div>
+          <div id="tradeList" class="trade-list"></div>
+        </div>
       </section>
       </section>
 

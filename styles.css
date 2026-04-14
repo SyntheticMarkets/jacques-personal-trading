@@ -99,6 +99,16 @@ body {
   margin-bottom: 10px;
 }
 
+.topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sidebar-toggle-btn {
+  display: none;
+}
+
 .account-summary {
   display: inline-flex;
   align-items: center;
@@ -135,6 +145,12 @@ button.ghost {
   border: 1px solid #2b3442;
 }
 
+button.ghost.active {
+  background: #1c2432;
+  border-color: #35507a;
+  color: #ffffff;
+}
+
 button.small {
   padding: 4px 10px;
   font-size: 11px;
@@ -151,6 +167,14 @@ button.small {
   grid-template-columns: repeat(5, 1fr);
   gap: 8px;
   margin: 8px 0 12px;
+}
+
+.desktop-sidebar-extra {
+  display: none;
+}
+
+.desktop-sidebar-extra:empty {
+  display: none !important;
 }
 
 .app-tab {
@@ -437,6 +461,34 @@ button.small {
   margin-top: 4px;
 }
 
+.trade-proposals-body {
+  display: grid;
+  gap: 12px;
+}
+
+.trade-proposals-body.collapsed {
+  display: none;
+}
+
+.proposal-config {
+  display: grid;
+  gap: 10px;
+}
+
+.trade-profit-summary {
+  font-size: 13px;
+  color: var(--muted);
+  padding: 2px 2px 0;
+}
+
+.mode-rise-fall .trade-list {
+  display: none;
+}
+
+.mode-higher-lower .trade-profit-summary {
+  display: none;
+}
+
 .trade-list {
   display: grid;
   gap: 8px;
@@ -476,6 +528,35 @@ button.small {
 .trade-title {
   font-size: 14px;
   font-weight: 600;
+}
+
+.proposal-direction .pill {
+  min-height: 58px;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: 4px;
+}
+
+.proposal-pill-label {
+  font-size: 16px;
+  font-weight: 600;
+  line-height: 1;
+}
+
+.proposal-pill-pct {
+  font-size: 12px;
+  color: var(--muted);
+  line-height: 1;
+}
+
+.proposal-direction .pill.active .proposal-pill-pct {
+  color: #ffffff;
+}
+
+.proposal-direction .pill.loading .proposal-pill-pct {
+  color: #ffd27a;
 }
 
 .trade-meta {
@@ -655,6 +736,10 @@ button.small {
   background-repeat: no-repeat;
 }
 
+.chart-drawing-select {
+  min-width: 148px;
+}
+
 .auto-section {
   display: grid;
   gap: 10px;
@@ -758,11 +843,209 @@ button.small {
   .phone {
     width: calc(100vw - 32px);
     min-height: calc(100vh - 32px);
+    height: auto;
     margin: 0 auto;
     border-radius: 24px;
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-rows: auto auto;
+    gap: 14px;
+    align-items: stretch;
+  }
+
+  .topbar {
+    grid-column: 1 / -1;
+    margin-bottom: 0;
+  }
+
+  .sidebar-toggle-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .desktop-sidebar {
+    grid-column: 1;
+    grid-row: 2;
+    display: flex;
+    flex-direction: column;
+    align-self: stretch;
+    gap: 12px;
+    margin: 0;
+    position: sticky;
+    top: 14px;
+    padding: 12px;
+    border: 1px solid #243143;
+    border-radius: 18px;
+    background: #10151d;
+    box-shadow: inset 0 0 0 1px rgba(36, 49, 67, 0.18);
+    min-width: 0;
+  }
+
+  .app-tabs {
+    grid-template-columns: 1fr;
+    margin: 0;
+  }
+
+  .app-tab {
+    width: 100%;
+    min-height: 44px;
+    text-align: left;
+    padding: 10px 14px;
+    font-size: 14px;
+  }
+
+  .app-tab[data-app-tab="chart_2"] {
+    display: none;
+  }
+
+  .desktop-sidebar-extra {
+    display: grid;
+    gap: 12px;
+  }
+
+  .desktop-sidebar-extra > .card {
+    margin-bottom: 0;
+  }
+
+  .desktop-sidebar-extra .trade-tabs {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    margin: 0;
+  }
+
+  .desktop-sidebar-extra .trade-tabs .tab {
+    width: 100%;
+    min-height: 44px;
+    text-align: left;
+    justify-content: flex-start;
+    padding: 0 14px;
+  }
+
+  .app-panel.active {
+    grid-column: 2;
+    grid-row: 2;
+    min-width: 0;
+  }
+
+  .app-panel[data-app-panel="settings"].active {
+    display: block;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active {
+    display: flex;
+    flex-direction: column;
+    min-height: calc(100vh - 120px);
+    height: auto;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard .proposal-config {
+    gap: 12px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard .trade-profit-summary {
+    padding: 0;
+    font-size: 14px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard .proposal-direction .pill {
+    min-height: 70px;
+    border-radius: 16px;
+    padding: 10px 14px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard .proposal-pill-label {
+    font-size: 18px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard .proposal-pill-pct {
+    font-size: 13px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard.mode-higher-lower .trade-list {
+    display: grid !important;
+    max-height: 280px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard.mode-rise-fall .trade-list {
+    display: none !important;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 320px;
+    grid-template-rows: auto 1fr;
+    gap: 12px 14px;
+    min-height: calc(100vh - 120px);
+    flex: 1 1 auto;
+    margin-bottom: 0;
+    align-items: stretch;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child {
+    grid-column: 2;
+    grid-row: 1;
+    margin-bottom: 0;
+    padding: 14px 14px 10px;
+    border: 1px solid #243143;
+    border-bottom: 0;
+    border-radius: 16px 16px 0 0;
+    background: #10151d;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
+    grid-column: 2;
+    grid-row: 2;
+    max-height: none;
+    align-content: start;
+    padding: 0 14px 14px;
+    border: 1px solid #243143;
+    border-top: 0;
+    border-radius: 0 0 16px 16px;
+    background: #10151d;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"] #toggleChart,
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"] #toggleSignal {
+    opacity: 0.45;
+    pointer-events: none;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-chart-head {
+    grid-column: 1;
+    grid-row: 1;
+    margin-top: 0;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body {
+    grid-column: 1;
+    grid-row: 2;
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body #miniChart {
+    flex: 1 1 auto;
+    min-height: 0;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body .chart-footer,
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body .chart-indicator-list {
+    flex: 0 0 auto;
+  }
+
+  .phone.chart2-mode .desktop-sidebar-extra > #proposalsCard {
+    display: none !important;
   }
 
   .phone.chart2-mode {
+    display: grid;
+    grid-template-columns: 220px minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
+    gap: 14px;
     width: calc(100vw - 32px);
     min-height: calc(100vh - 32px);
     height: calc(100vh - 32px);
@@ -791,6 +1074,39 @@ button.small {
   .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
     flex: 0 0 auto;
   }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
+    display: block;
+    min-height: 0;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
+    border-left: 0;
+    padding-left: 0;
+  }
+
+  .phone.sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+
+  .phone.sidebar-collapsed .desktop-sidebar {
+    opacity: 0;
+    pointer-events: none;
+    width: 0;
+    padding: 0;
+    border-width: 0;
+    overflow: hidden;
+  }
+
+  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child,
+  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
+    display: none;
+  }
 }
 
 .chart-tf-picker {
@@ -803,6 +1119,29 @@ button.small {
 
 .chart-tf-picker.hidden {
   display: none;
+}
+
+.drawing-action-bar {
+  position: absolute;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px;
+  border: 1px solid #2b3442;
+  border-radius: 12px;
+  background: rgba(16, 21, 30, 0.96);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.34);
+  z-index: 6;
+}
+
+.drawing-action-bar.hidden {
+  display: none !important;
+}
+
+.drawing-action-btn.active {
+  background: #1c2432;
+  border-color: #35507a;
+  color: #ffffff;
 }
 
 .trade-row {
