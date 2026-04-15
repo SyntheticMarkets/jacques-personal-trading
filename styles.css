@@ -1256,3 +1256,52 @@ button.small {
   font-size: 11px;
   cursor: pointer;
 }
+
+@media (max-width: 900px), (max-height: 430px) {
+  .phone.chart2-mode {
+    display: flex !important;
+    flex-direction: column !important;
+    grid-template-columns: none !important;
+    grid-template-rows: none !important;
+    gap: 12px !important;
+    width: min(calc(100vw - 24px), 420px) !important;
+    max-width: calc(100vw - 24px) !important;
+    min-height: 0 !important;
+    height: auto !important;
+    overflow: hidden !important;
+  }
+
+  .phone.chart2-mode .desktop-sidebar,
+  .phone.chart2-mode .desktop-sidebar-extra {
+    display: none !important;
+  }
+
+  .phone.chart2-mode .app-panel.active,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] > .trade-section:first-child,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-body {
+    display: flex !important;
+    flex-direction: column !important;
+    min-height: 0 !important;
+    width: 100% !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active {
+    overflow: auto !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] #miniChart {
+    display: block !important;
+    width: 100% !important;
+    flex: 0 0 auto !important;
+    height: 180px !important;
+    min-height: 180px !important;
+    max-height: 42vh !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-footer,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
+    flex: 0 0 auto !important;
+    width: 100% !important;
+  }
+}
