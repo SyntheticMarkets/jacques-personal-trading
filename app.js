@@ -160,6 +160,8 @@ const TIMEFRAME_OPTIONS = [
 const DEFAULT_TIMEFRAME_SEC = 60;
 const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
+  { value: "ALGO_BEHAVIOR_ENGINE", label: "Algo Behavior Engine" },
+  { value: "PRICE_ACTION_TOOLKIT", label: "Price Action Toolkit" },
   { value: "ICT_FVG", label: "ICT FVG" },
   { value: "ICT_OB", label: "ICT OB" },
   { value: "ICT_STRUCTURE", label: "ICT Structure" },
@@ -168,6 +170,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "ICT_KILLZONES", label: "ICT Killzones" },
   { value: "ICT_BPR", label: "ICT BPR" },
   { value: "LIQ_SWEEP_OB", label: "Liquidity Sweep OB" },
+  { value: "LDMSS", label: "Liquidity-Driven Market Structure" },
   { value: "SMC_SETUP_08", label: "SMC Setup 08" },
   { value: "SMC_PRO_COMBO", label: "SMC Pro Combo" },
   { value: "ADX_VOL_WAVES", label: "ADX Volatility Waves" },
@@ -184,9 +187,24 @@ const CHART_INDICATOR_OPTIONS = [
 ];
 const CHART_INDICATOR_GROUPS = [
   {
+    key: "AB",
+    label: "Algo Behavior",
+    items: ["ALGO_BEHAVIOR_ENGINE"],
+  },
+  {
+    key: "PA",
+    label: "Price Action",
+    items: ["PRICE_ACTION_TOOLKIT"],
+  },
+  {
+    key: "LIQ",
+    label: "Liquidity",
+    items: ["LDMSS", "LIQ_SWEEP_OB"],
+  },
+  {
     key: "ICT",
     label: "ICT",
-    items: ["ICT_FVG", "ICT_OB", "ICT_STRUCTURE", "ICT_LIQUIDITY", "ICT_FIB", "ICT_KILLZONES", "ICT_BPR", "LIQ_SWEEP_OB"],
+    items: ["ICT_FVG", "ICT_OB", "ICT_STRUCTURE", "ICT_LIQUIDITY", "ICT_FIB", "ICT_KILLZONES", "ICT_BPR"],
   },
   {
     key: "SMC",
@@ -1713,24 +1731,42 @@ function buildICTOrderBlocks(candles, structureEvents, activeLimit = 2) {
 }
 
 function buildICTFibLevels(structureEvents) {
-  const lastEvent = structureEvents[structureEvents.length - 1];
-  if (!lastEvent?.oppositePivot) return null;
-  const bullish = lastEvent.direction === "UP";
-  const anchor0 = bullish ? lastEvent.pivotPrice : lastEvent.oppositePivot.price;
-  const anchor1 = bullish ? lastEvent.oppositePivot.price : lastEvent.pivotPrice;
-  const range = anchor1 - anchor0;
-  if (!Number.isFinite(range) || range === 0) return null;
-  const makeLevel = (ratio) => anchor0 + (range * ratio);
+  if (!Array.isArray(structureEvents) || !structureEvents.length) return null;
+
+  const sourceEvent = [...structureEvents]
+    .reverse()
+    .find((event) => {
+      if (!event?.oppositePivot) return false;
+      if (!Number.isFinite(event.pivotPrice) || !Number.isFinite(event.oppositePivot.price)) return false;
+      if (!Number.isInteger(event.breakIndex) || !Number.isInteger(event.pivotIndex)) return false;
+      return Math.abs(event.pivotPrice - event.oppositePivot.price) > (currentPip || 0.0001) * 10;
+    });
+
+  if (!sourceEvent) return null;
+
+  const bullish = sourceEvent.direction === "UP";
+  const swingLow = bullish ? sourceEvent.oppositePivot.price : sourceEvent.pivotPrice;
+  const swingHigh = bullish ? sourceEvent.pivotPrice : sourceEvent.oppositePivot.price;
+  const range = swingHigh - swingLow;
+  if (!Number.isFinite(range) || range <= 0) return null;
+
+  const makeRetracement = (ratio) => bullish
+    ? swingHigh - (range * ratio)
+    : swingLow + (range * ratio);
 
   return {
-    direction: lastEvent.direction,
-    startIndex: Math.min(lastEvent.pivotIndex, lastEvent.oppositePivot.index ?? lastEvent.pivotIndex),
-    endIndex: lastEvent.breakIndex,
+    direction: sourceEvent.direction,
+    startIndex: Math.min(sourceEvent.pivotIndex, sourceEvent.oppositePivot.index ?? sourceEvent.pivotIndex),
+    endIndex: sourceEvent.breakIndex,
+    swingLow,
+    swingHigh,
     levels: [
-      { label: "0.5", price: makeLevel(0.5), color: "#9aa7b8" },
-      { label: "0.618", price: makeLevel(0.618), color: "#0db787" },
-      { label: "0.705", price: makeLevel(0.705), color: "#5ce1ff" },
-      { label: "0.79", price: makeLevel(0.79), color: "#f2c94c" },
+      { label: "0.0", price: bullish ? swingHigh : swingLow, color: "#6b7280" },
+      { label: "0.5", price: makeRetracement(0.5), color: "#9aa7b8" },
+      { label: "0.618", price: makeRetracement(0.618), color: "#0db787" },
+      { label: "0.705", price: makeRetracement(0.705), color: "#5ce1ff" },
+      { label: "0.79", price: makeRetracement(0.79), color: "#f2c94c" },
+      { label: "1.0", price: bullish ? swingLow : swingHigh, color: "#6b7280" },
     ],
   };
 }
@@ -3780,6 +3816,544 @@ function buildLiquiditySweepOrderBlockSystem(candles, config = {}) {
   };
 }
 
+function buildLiquidityDrivenMarketStructureSystem(candles, config = {}) {
+  const confirmedCandles = candles.slice(0, -1);
+  const pivotLen = Math.max(2, config.pivotLen ?? 3);
+  const sweepLookahead = Math.max(4, config.sweepLookahead ?? 10);
+  const pullbackLookahead = Math.max(4, config.pullbackLookahead ?? 12);
+
+  if (!Array.isArray(candles) || confirmedCandles.length < 40) {
+    return {
+      trend: "RANGE",
+      trendLabel: "RANGE",
+      sessionActive: false,
+      sessionLabel: "Outside Session",
+      confidence: 0,
+      setupText: "--",
+      pools: [],
+      setups: [],
+      activeSetup: null,
+      latestSweep: null,
+    };
+  }
+
+  const avgRange = averageRange(confirmedCandles, 20) || ((confirmedCandles[confirmedCandles.length - 1]?.close ?? 1) * 0.001);
+  const tolerance = Math.max(avgRange * 0.25, currentPip || 0.0001);
+  const structure = buildICTStructureAnalysis(confirmedCandles, pivotLen);
+  const fvg = buildICTFVGs(confirmedCandles, 12);
+  const orderFlow = buildLiquiditySweepOrderBlockSystem(candles, {
+    pivotLen,
+    sweepLookahead,
+    pullbackLookahead,
+  });
+
+  const lastHigh = structure.pivotHighs[structure.pivotHighs.length - 1] || null;
+  const prevHigh = structure.pivotHighs[structure.pivotHighs.length - 2] || null;
+  const lastLow = structure.pivotLows[structure.pivotLows.length - 1] || null;
+  const prevLow = structure.pivotLows[structure.pivotLows.length - 2] || null;
+
+  let trend = "RANGE";
+  if (lastHigh && prevHigh && lastLow && prevLow) {
+    if (lastHigh.price > prevHigh.price && lastLow.price > prevLow.price) trend = "UP";
+    else if (lastHigh.price < prevHigh.price && lastLow.price < prevLow.price) trend = "DOWN";
+  }
+
+  const current = confirmedCandles[confirmedCandles.length - 1];
+  const sessionKey = getKillzoneKey(current.time);
+  const sessionActive = sessionKey === "LONDON" || sessionKey === "NYAM" || sessionKey === "NYPM";
+  const sessionLabel =
+    sessionKey === "LONDON" ? "London" :
+    sessionKey === "NYAM" || sessionKey === "NYPM" ? "New York" :
+    "Outside Session";
+
+  const pools = [...orderFlow.pools];
+  const seenPoolKeys = new Set(pools.map((pool) => `${pool.kind}|${pool.side}|${pool.startIndex}|${pool.endIndex ?? pool.startIndex}`));
+  const addPool = (pool) => {
+    const key = `${pool.kind}|${pool.side}|${pool.startIndex}|${pool.endIndex ?? pool.startIndex}`;
+    if (seenPoolKeys.has(key)) return;
+    seenPoolKeys.add(key);
+    pools.push(pool);
+  };
+
+  const dailySessions = [];
+  let currentDayKey = null;
+  let currentSession = null;
+  confirmedCandles.forEach((candle, index) => {
+    const date = new Date(candle.time * 1000);
+    const dayKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`;
+    if (dayKey !== currentDayKey) {
+      if (currentSession) dailySessions.push(currentSession);
+      currentDayKey = dayKey;
+      currentSession = {
+        key: dayKey,
+        startIndex: index,
+        endIndex: index,
+        high: candle.high,
+        low: candle.low,
+      };
+      return;
+    }
+    currentSession.endIndex = index;
+    currentSession.high = Math.max(currentSession.high, candle.high);
+    currentSession.low = Math.min(currentSession.low, candle.low);
+  });
+  if (currentSession) dailySessions.push(currentSession);
+
+  const previousSession = dailySessions[dailySessions.length - 2] || null;
+  if (previousSession) {
+    addPool({
+      kind: "prevSessionHigh",
+      side: "high",
+      level: previousSession.high,
+      startIndex: previousSession.startIndex,
+      endIndex: previousSession.endIndex,
+      strength: 2,
+    });
+    addPool({
+      kind: "prevSessionLow",
+      side: "low",
+      level: previousSession.low,
+      startIndex: previousSession.startIndex,
+      endIndex: previousSession.endIndex,
+      strength: 2,
+    });
+  }
+
+  const lineValueAt = (a, b, index) => {
+    const dx = b.index - a.index;
+    if (dx === 0) return a.price;
+    return a.price + (((b.price - a.price) / dx) * (index - a.index));
+  };
+
+  const recentPools = pools
+    .filter((pool) => pool.startIndex < confirmedCandles.length - 1)
+    .sort((a, b) => (b.strength ?? 0) - (a.strength ?? 0));
+
+  let latestSweep = null;
+  for (let i = Math.max(pivotLen + 3, confirmedCandles.length - 14); i < confirmedCandles.length; i += 1) {
+    const candle = confirmedCandles[i];
+    for (const pool of recentPools) {
+      const level = pool.a && pool.b ? lineValueAt(pool.a, pool.b, i) : pool.level;
+      if (!Number.isFinite(level)) continue;
+      if (pool.side === "high" && candle.high > level + (tolerance * 0.1) && candle.close < level) {
+        latestSweep = {
+          index: i,
+          direction: "SELL",
+          side: "buy-side",
+          label: "Buy-side liquidity taken",
+          level,
+          kind: pool.kind,
+        };
+      } else if (pool.side === "low" && candle.low < level - (tolerance * 0.1) && candle.close > level) {
+        latestSweep = {
+          index: i,
+          direction: "BUY",
+          side: "sell-side",
+          label: "Sell-side liquidity taken",
+          level,
+          kind: pool.kind,
+        };
+      }
+    }
+  }
+
+  const mapZoneLabel = (setup) => {
+    if (setup.entryModel === "FVG") return setup.direction === "BUY" ? "bullish FVG" : "bearish FVG";
+    return setup.direction === "BUY" ? "bullish OB" : "bearish OB";
+  };
+
+  const findFvgForSetup = (setup) => {
+    const source = setup.direction === "BUY" ? fvg.bullish : fvg.bearish;
+    let best = null;
+    source.forEach((zone) => {
+      if (zone.startIndex > setup.structureEvent.breakIndex) return;
+      if (!best || zone.startIndex > best.startIndex) best = zone;
+    });
+    return best;
+  };
+
+  const setups = orderFlow.setups.map((setup) => {
+    const entryCandle = candles[setup.entryIndex] || candles[setup.pullbackIndex] || current;
+    const entryPrice = entryCandle?.open ?? entryCandle?.close ?? setup.orderBlock.top;
+    const stopLoss = setup.direction === "BUY"
+      ? Math.min(candles[setup.sweepIndex]?.low ?? setup.orderBlock.bottom, setup.orderBlock.bottom) - tolerance
+      : Math.max(candles[setup.sweepIndex]?.high ?? setup.orderBlock.top, setup.orderBlock.top) + tolerance;
+    const risk = Math.max(Math.abs(entryPrice - stopLoss), tolerance);
+    const takeProfit = setup.direction === "BUY" ? entryPrice + (risk * 2) : entryPrice - (risk * 2);
+    const sessionForEntry = getKillzoneKey((candles[setup.entryIndex]?.time ?? current.time));
+    const sessionAllowed = sessionForEntry === "LONDON" || sessionForEntry === "NYAM" || sessionForEntry === "NYPM";
+    const matchingFvg = findFvgForSetup(setup);
+    const confidence = Math.round(clamp(
+      0.3 +
+      ((trend === (setup.direction === "BUY" ? "UP" : "DOWN")) ? 0.2 : 0) +
+      ((setup.liquidityKind.startsWith("equal") || setup.liquidityKind.startsWith("prevSession")) ? 0.2 : 0.1) +
+      (sessionAllowed ? 0.15 : 0) +
+      (matchingFvg ? 0.1 : 0.05) +
+      ((setup.structureEvent.type === "BOS") ? 0.05 : 0.1),
+      0,
+      1,
+    ) * 100);
+    return {
+      ...setup,
+      entryModel: "OB",
+      fallbackFvg: matchingFvg,
+      entryPrice,
+      stopLoss,
+      takeProfit,
+      rr: 2,
+      confidence,
+      sessionAllowed,
+      setupText: `${setup.direction === "BUY" ? "Bullish" : "Bearish"} sweep -> ${setup.structureEvent.type} -> retest ${mapZoneLabel({ ...setup, entryModel: "OB" })}`,
+    };
+  });
+
+  const activeSetup = [...setups]
+    .reverse()
+    .find((setup) => setup.entryIndex >= candles.length - 2 || setup.pullbackIndex >= confirmedCandles.length - 2) || null;
+
+  let setupText = "--";
+  if (!sessionActive) {
+    setupText = `${trend === "UP" ? "Bullish" : trend === "DOWN" ? "Bearish" : "Range"} structure, waiting for London/New York`;
+  } else if (activeSetup) {
+    setupText = activeSetup.setupText;
+  } else if (latestSweep) {
+    const awaited = latestSweep.direction === "BUY" ? "bullish BOS / OB retest" : "bearish BOS / OB retest";
+    setupText = `${latestSweep.label}, waiting for ${awaited}`;
+  } else if (trend === "UP") {
+    setupText = "Bullish structure, waiting for sell-side sweep";
+  } else if (trend === "DOWN") {
+    setupText = "Bearish structure, waiting for buy-side sweep";
+  } else {
+    setupText = "Range structure, waiting for liquidity sweep";
+  }
+
+  const confidence = activeSetup?.confidence ?? Math.round(clamp(
+    0.2 +
+    (trend === "RANGE" ? 0.05 : 0.25) +
+    (sessionActive ? 0.15 : 0) +
+    (latestSweep ? 0.2 : 0),
+    0,
+    1,
+  ) * 100);
+
+  return {
+    trend,
+    trendLabel: trend === "UP" ? "UP" : trend === "DOWN" ? "DOWN" : "RANGE",
+    structure,
+    pools: pools.slice(-16),
+    setups: setups.slice(-10),
+    activeSetup,
+    latestSweep,
+    sessionActive,
+    sessionLabel,
+    confidence,
+    setupText,
+  };
+}
+
+function buildPriceActionToolkit(candles, config = {}) {
+  const confirmedCandles = candles.slice(0, -1);
+  if (!Array.isArray(candles) || confirmedCandles.length < 30) {
+    return {
+      structure: null,
+      fib: null,
+      trendlines: { upperChannels: [], lowerChannels: [], signals: [] },
+      sr: {
+        supports: [],
+        resistances: [],
+        manipulations: [],
+        signals: [],
+        stats: {},
+      },
+      bias: "RANGE",
+      setupText: "--",
+      actionableSignals: [],
+    };
+  }
+
+  const pivotLen = Math.max(3, config.pivotLen ?? 4);
+  const structure = buildICTStructureAnalysis(confirmedCandles, pivotLen);
+  const fib = buildICTFibLevels(structure.events);
+  const trendlines = buildLiquidityTrendlineSignals(confirmedCandles, {
+    len: Math.max(4, config.trendlineLen ?? 5),
+    space: 2,
+    colorUp: "#089981",
+    colorDown: "#f23645",
+  });
+  const sr = buildSupportResistanceSignalsMTF(confirmedCandles, {
+    length: Math.max(4, config.srLen ?? 6),
+    zoneAtrMult: 0.5,
+    securityAtrMult: 0,
+    manipulationMult: 1.3,
+    maxActive: 5,
+    showBroken: true,
+    extendActive: true,
+  });
+
+  const lastEvent = structure.events[structure.events.length - 1] || null;
+  const bias = lastEvent?.direction === "UP"
+    ? "BULLISH"
+    : lastEvent?.direction === "DOWN"
+      ? "BEARISH"
+      : "RANGE";
+
+  const nearestSupport = sr.supports[sr.supports.length - 1] || null;
+  const nearestResistance = sr.resistances[sr.resistances.length - 1] || null;
+  const latestTrendlineSignal = trendlines.signals[trendlines.signals.length - 1] || null;
+  const latestSrSignal = sr.signals[sr.signals.length - 1] || null;
+
+  let setupText = "--";
+  if (bias === "BULLISH") {
+    if (latestTrendlineSignal?.type === "UP") {
+      setupText = "Bullish structure with trendline breakout";
+    } else if (latestSrSignal?.direction === "BUY") {
+      setupText = `Bullish reaction from support ${formatPrice(latestSrSignal.price, currentPip)}`;
+    } else if (fib?.direction === "UP") {
+      const fib705 = fib.levels.find((level) => level.label === "0.705");
+      setupText = fib705
+        ? `Bullish structure, watch fib retrace near ${formatPrice(fib705.price, currentPip)}`
+        : "Bullish structure, watch retrace into support";
+    } else {
+      setupText = "Bullish structure, watch support and pullback";
+    }
+  } else if (bias === "BEARISH") {
+    if (latestTrendlineSignal?.type === "DOWN") {
+      setupText = "Bearish structure with trendline breakdown";
+    } else if (latestSrSignal?.direction === "SELL") {
+      setupText = `Bearish reaction from resistance ${formatPrice(latestSrSignal.price, currentPip)}`;
+    } else if (fib?.direction === "DOWN") {
+      const fib705 = fib.levels.find((level) => level.label === "0.705");
+      setupText = fib705
+        ? `Bearish structure, watch fib retrace near ${formatPrice(fib705.price, currentPip)}`
+        : "Bearish structure, watch retrace into resistance";
+    } else {
+      setupText = "Bearish structure, watch resistance and pullback";
+    }
+  } else {
+    const supportPrice = nearestSupport ? formatPrice(nearestSupport.basePrice, currentPip) : "--";
+    const resistancePrice = nearestResistance ? formatPrice(nearestResistance.basePrice, currentPip) : "--";
+    setupText = `Range price action between ${supportPrice} and ${resistancePrice}`;
+  }
+
+  const actionableSignals = [];
+  sr.signals.forEach((signal) => {
+    actionableSignals.push({
+      entryIndex: signal.entryIndex,
+      direction: signal.direction,
+      kind: `sr-${signal.kind}`,
+      price: signal.price,
+    });
+  });
+  trendlines.signals.forEach((signal) => {
+    actionableSignals.push({
+      entryIndex: signal.entryIndex,
+      direction: signal.type === "UP" ? "BUY" : "SELL",
+      kind: "trendline-break",
+      price: signal.price,
+    });
+  });
+
+  return {
+    structure,
+    fib,
+    trendlines,
+    sr,
+    bias,
+    setupText,
+    actionableSignals: actionableSignals
+      .filter((signal) => Number.isInteger(signal.entryIndex))
+      .sort((a, b) => a.entryIndex - b.entryIndex)
+      .slice(-20),
+  };
+}
+
+function buildAlgoBehaviorEngine(candles, config = {}) {
+  const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
+  const minCandles = Math.max(30, config.minCandles ?? 36);
+  if (confirmedCandles.length < minCandles) {
+    return {
+      trend: "RANGE",
+      regime: "BUILDING",
+      phase: "BUILDING",
+      score: 0,
+      confidence: 0,
+      setupText: "--",
+      expirySuggestion: "--",
+      trapLabel: "--",
+      sweepLabel: "--",
+      focusPrice: null,
+      microLiquidity: [],
+      activeSetup: null,
+      signals: [],
+    };
+  }
+
+  const structure = buildICTStructureAnalysis(confirmedCandles, Math.max(3, config.pivotLen ?? 3));
+  const lastEvent = structure.events[structure.events.length - 1] || null;
+  const trend = lastEvent?.direction === "UP"
+    ? "UP"
+    : lastEvent?.direction === "DOWN"
+      ? "DOWN"
+      : "RANGE";
+
+  const recent = confirmedCandles.slice(-20);
+  const recent5 = confirmedCandles.slice(-5);
+  const current = confirmedCandles[confirmedCandles.length - 1];
+  const prev = confirmedCandles[confirmedCandles.length - 2];
+  const avgRange20 = averageRange(confirmedCandles, 20) || ((current?.close ?? 1) * 0.001);
+  const avgRange8 = averageRange(confirmedCandles, 8) || avgRange20;
+  const threshold = getLevelThreshold(recent) || Math.max((currentPip || 0.0001) * 4, avgRange20 * 0.08);
+  const bullishCount = recent5.filter((c) => c.close > c.open).length;
+  const bearishCount = recent5.filter((c) => c.close < c.open).length;
+  const sequenceExtreme = bullishCount >= 4 || bearishCount >= 4;
+
+  const directionalShare = trend === "UP"
+    ? bullishCount / Math.max(1, recent5.length)
+    : trend === "DOWN"
+      ? bearishCount / Math.max(1, recent5.length)
+      : 0.5;
+
+  let regime = "CHOPPY";
+  if (avgRange8 > avgRange20 * 1.35) regime = "EXPANSION";
+  else if (avgRange8 < avgRange20 * 0.75) regime = "COMPRESSION";
+  if (trend !== "RANGE" && directionalShare >= 0.6) regime = `TRENDING ${trend}`;
+
+  const pullbackWindow = confirmedCandles.slice(-4, -1);
+  const avgBodyPullback = pullbackWindow.length
+    ? pullbackWindow.reduce((sum, candle) => sum + Math.abs(candle.close - candle.open), 0) / pullbackWindow.length
+    : 0;
+  const bullishPullbackCount = pullbackWindow.filter((c) => c.close > c.open).length;
+  const bearishPullbackCount = pullbackWindow.filter((c) => c.close < c.open).length;
+  const currentBody = Math.abs(current.close - current.open);
+
+  let phase = "NEUTRAL";
+  let pushResume = false;
+  if (trend === "UP") {
+    if (bearishPullbackCount >= 2 && avgBodyPullback < avgRange20 * 0.8) phase = "PULLBACK";
+    if (bullishCount >= 3 && currentBody > avgRange20 * 0.45) phase = "PUSH";
+    pushResume = phase === "PULLBACK" && current.close > current.open && currentBody >= avgRange20 * 0.45;
+  } else if (trend === "DOWN") {
+    if (bullishPullbackCount >= 2 && avgBodyPullback < avgRange20 * 0.8) phase = "PULLBACK";
+    if (bearishCount >= 3 && currentBody > avgRange20 * 0.45) phase = "PUSH";
+    pushResume = phase === "PULLBACK" && current.close < current.open && currentBody >= avgRange20 * 0.45;
+  }
+
+  const equalHighs = [];
+  const equalLows = [];
+  for (let i = Math.max(2, confirmedCandles.length - 12); i < confirmedCandles.length; i += 1) {
+    const sample = confirmedCandles.slice(Math.max(0, i - 2), i + 1);
+    if (sample.length < 3) continue;
+    const highs = sample.map((c) => c.high);
+    const lows = sample.map((c) => c.low);
+    if (Math.max(...highs) - Math.min(...highs) <= threshold) {
+      equalHighs.push({
+        side: "high",
+        level: highs.reduce((a, b) => a + b, 0) / highs.length,
+        startIndex: i - sample.length + 1,
+        endIndex: i,
+      });
+    }
+    if (Math.max(...lows) - Math.min(...lows) <= threshold) {
+      equalLows.push({
+        side: "low",
+        level: lows.reduce((a, b) => a + b, 0) / lows.length,
+        startIndex: i - sample.length + 1,
+        endIndex: i,
+      });
+    }
+  }
+
+  const microLiquidity = [...equalHighs.slice(-2), ...equalLows.slice(-2)];
+  const sweep = detectLiquiditySweepEvent(confirmedCandles, confirmedCandles.length - 1, 12)
+    || detectLiquiditySweepEvent(confirmedCandles, confirmedCandles.length - 2, 12);
+  const rejection = analyzeRejection(current);
+  const volatilitySpike = (current.high - current.low) > avgRange20 * 1.5;
+
+  let trapDirection = null;
+  let trapLabel = "--";
+  let focusPrice = sweep?.referenceLevel ?? null;
+  if (sweep?.sweepType === "BUY" && rejection.lowerWick > rejection.safeBody * 2 && current.close > sweep.referenceLevel) {
+    trapDirection = "BUY";
+    trapLabel = "BULL TRAP RECLAIM";
+    focusPrice = sweep.referenceLevel;
+  } else if (sweep?.sweepType === "SELL" && rejection.upperWick > rejection.safeBody * 2 && current.close < sweep.referenceLevel) {
+    trapDirection = "SELL";
+    trapLabel = "BEAR TRAP REJECT";
+    focusPrice = sweep.referenceLevel;
+  }
+
+  const trendAligned = trend !== "RANGE" && sweep && trapDirection === sweep.sweepType && (
+    (trend === "UP" && trapDirection === "BUY") ||
+    (trend === "DOWN" && trapDirection === "SELL")
+  );
+
+  let score = 0;
+  if (trend !== "RANGE") score += 2;
+  if (phase === "PULLBACK" || pushResume) score += 1;
+  if (microLiquidity.length) score += 2;
+  if (sweep) score += 2;
+  if (trapDirection) score += 3;
+  if (volatilitySpike) score += 2;
+  if (sequenceExtreme) score += 1;
+  if (regime === "CHOPPY") score -= 2;
+  const confidence = Math.round(clamp(score / 11, 0, 1) * 100);
+
+  let expirySuggestion = "2-3m";
+  if (volatilitySpike || regime === "EXPANSION") expirySuggestion = "1m";
+  else if (regime === "COMPRESSION") expirySuggestion = "2m";
+
+  const activeSetup = trendAligned && (phase === "PULLBACK" || pushResume) && trapDirection && score >= 7
+    ? {
+        direction: trapDirection,
+        entryIndex: confirmedCandles.length - 1,
+        score,
+        confidence,
+        focusPrice: focusPrice ?? current.close,
+        expirySuggestion,
+        setupText: `${trend} ${phase === "PULLBACK" ? "pullback" : "resume"} after ${sweep?.liquidityLabel || "micro liquidity"} sweep at ${formatPrice(focusPrice ?? current.close, currentPip)}`,
+      }
+    : null;
+
+  const focusText = focusPrice != null ? formatPrice(focusPrice, currentPip) : "liquidity";
+  const trapText = trapDirection
+    ? `${trapLabel} @ ${focusText}`
+    : focusPrice != null
+      ? `WATCH @ ${focusText}`
+      : "--";
+  const setupText = activeSetup
+    ? `${activeSetup.setupText}; trap confirmed, ${volatilitySpike ? "volatility spike" : "normal volatility"}, expiry ${expirySuggestion}`
+    : trend === "RANGE"
+      ? "Range regime, wait for micro liquidity sweep and trap candle"
+      : `${regime}; ${phase === "PULLBACK" ? "watch pullback resume" : "wait for pullback"} near ${focusText}${focusPrice != null ? ` | trap ${trapText}` : ""}`;
+
+  const sweepText = sweep
+    ? `${sweep.sweepType === "BUY" ? "Sell-side liquidity taken" : "Buy-side liquidity taken"}${focusPrice != null ? ` @ ${focusText}` : ""}`
+    : "--";
+  const entryPrice = activeSetup?.focusPrice ?? focusPrice;
+
+  return {
+    trend,
+    regime,
+    phase,
+    sequenceExtreme,
+    bullishCount,
+    bearishCount,
+    volatilitySpike,
+    microLiquidity,
+    sweep,
+    sweepLabel: sweepText,
+    trapLabel: trapText,
+    focusPrice,
+    entryPrice,
+    score,
+    confidence,
+    expirySuggestion,
+    setupText,
+    activeSetup,
+    signals: activeSetup ? [activeSetup] : [],
+  };
+}
+
 function buildBreakoutTargets(candles, config = {}) {
   const len = config.len ?? 99;
   const preventOverlap = config.preventOverlap ?? true;
@@ -4279,6 +4853,99 @@ function calculateConfidence({ trendStrength, wickStrength, candleStrength, leve
 }
 
 function getSignalState(candles) {
+  const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
+  if (hasAlgoBehaviorEngine) {
+    const abe = buildAlgoBehaviorEngine(candles, {});
+    const allowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
+    let signal = "--";
+    let tradeDirection = null;
+
+    if (abe.activeSetup) {
+      const isBuy = abe.activeSetup.direction === "BUY";
+      signal = allowEntry ? `ENTER NOW ${isBuy ? "BUY" : "SELL"}` : `WAIT ${isBuy ? "BUY" : "SELL"}`;
+      tradeDirection = isBuy ? "CALL" : "PUT";
+    } else if (abe.score >= 5 && abe.trend !== "RANGE") {
+      const isBuy = abe.trend === "UP";
+      signal = `WATCH ${isBuy ? "BUY" : "SELL"}`;
+      tradeDirection = isBuy ? "CALL" : "PUT";
+    }
+
+    return {
+      trend: abe.trend === "RANGE" ? "RANGE" : `${abe.trend} (${abe.regime})`,
+      divergence: abe.phase === "NEUTRAL" ? "WAITING" : abe.phase,
+      sweep: abe.sweepLabel,
+      confidence: abe.confidence,
+      signal,
+      tradeDirection,
+      setup: `${abe.setupText} | expiry ${abe.expirySuggestion}`,
+      time: Date.now(),
+    };
+  }
+
+  const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT");
+  if (hasPriceActionToolkit) {
+    const pa = buildPriceActionToolkit(candles, {});
+    const latestSignal = pa.actionableSignals[pa.actionableSignals.length - 1] || null;
+    const allowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
+    let signal = "--";
+    let tradeDirection = null;
+    let confidence = pa.bias === "RANGE" ? 42 : 58;
+
+    if (latestSignal && latestSignal.entryIndex >= candles.length - 2) {
+      const isBuy = latestSignal.direction === "BUY";
+      signal = allowEntry ? `ENTER NOW ${isBuy ? "BUY" : "SELL"}` : `WAIT ${isBuy ? "BUY" : "SELL"}`;
+      tradeDirection = isBuy ? "CALL" : "PUT";
+      confidence = Math.min(100, confidence + 18);
+    } else if (pa.bias !== "RANGE") {
+      signal = `WAIT ${pa.bias === "BULLISH" ? "BUY" : "SELL"}`;
+    }
+
+    return {
+      trend: pa.bias === "BULLISH" ? "UP" : pa.bias === "BEARISH" ? "DOWN" : "RANGE",
+      divergence: "--",
+      sweep: latestSignal ? latestSignal.kind.toUpperCase() : "--",
+      confidence,
+      signal,
+      setup: pa.setupText,
+      time: Date.now(),
+      allowEntry,
+      tradeDirection,
+    };
+  }
+
+  const hasLDMSS = activeChartIndicators.has("LDMSS");
+  if (hasLDMSS) {
+    const ldmss = buildLiquidityDrivenMarketStructureSystem(candles, {
+      pivotLen: 3,
+      sweepLookahead: 10,
+      pullbackLookahead: 12,
+    });
+    const allowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
+    const activeSetup = ldmss.activeSetup && ldmss.activeSetup.sessionAllowed ? ldmss.activeSetup : null;
+    let signal = "--";
+    let tradeDirection = null;
+
+    if (activeSetup) {
+      const buySide = activeSetup.direction === "BUY";
+      signal = allowEntry
+        ? `ENTER NOW ${buySide ? "BUY" : "SELL"}`
+        : `WAIT ${buySide ? "BUY" : "SELL"}`;
+      tradeDirection = buySide ? "CALL" : "PUT";
+    }
+
+    return {
+      trend: ldmss.trendLabel,
+      divergence: "--",
+      sweep: ldmss.latestSweep ? `${ldmss.latestSweep.label} (${ldmss.sessionLabel})` : `-- (${ldmss.sessionLabel})`,
+      confidence: ldmss.confidence,
+      signal,
+      setup: ldmss.setupText,
+      time: Date.now(),
+      allowEntry,
+      tradeDirection,
+    };
+  }
+
   const trendState = detectTrend(candles);
   const obv = calculateOBV(candles);
   const divergence = detectDivergence(candles, obv);
@@ -4368,6 +5035,18 @@ function updateVisibleCandleCountUI(blueCount, whiteCount) {
 }
 
 function getLiquidityPanelState(candles) {
+  if (activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE")) {
+    const abe = buildAlgoBehaviorEngine(candles, {});
+    return {
+      trend: abe.trend === "RANGE" ? "RANGE" : `${abe.trend} ${abe.regime}`,
+      sweep: abe.sweepLabel,
+      rejection: abe.trapLabel,
+      confidence: abe.confidence ? `${abe.confidence}%` : "--",
+      entry: abe.expirySuggestion || "--",
+      level: abe.focusPrice != null ? formatPrice(abe.focusPrice, currentPip) : "--",
+    };
+  }
+
   if (candles.length < MIN_SIGNAL_CANDLES) {
     return {
       trend: `BUILDING ${Math.min(100, Math.floor((candles.length / MIN_SIGNAL_CANDLES) * 100))}%`,
@@ -4625,7 +5304,10 @@ function renderMiniChart(candles) {
   const hasICTFib = activeChartIndicators.has("ICT_FIB");
   const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY");
   const hasAnyICT = hasICTKillzones || hasICTFVG || hasICTBPR || hasICTOB || hasICTStructure || hasICTFib || hasICTLiquidity;
+  const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
+  const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT");
   const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB");
+  const hasLDMSS = activeChartIndicators.has("LDMSS");
   const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08");
   const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO");
   const hasADXVolWaves = activeChartIndicators.has("ADX_VOL_WAVES");
@@ -4739,6 +5421,333 @@ function renderMiniChart(candles) {
       ctx.closePath();
       ctx.fill();
       ctx.fillText(isBuy ? "LQ BUY" : "LQ SELL", entryX, isBuy ? entryY + 6 : entryY - 6);
+      ctx.restore();
+    });
+  }
+
+  if (hasLDMSS) {
+    const ldmss = buildLiquidityDrivenMarketStructureSystem(candles, {
+      pivotLen: 3,
+      sweepLookahead: 10,
+      pullbackLookahead: 12,
+    });
+
+    ldmss.pools.forEach((pool) => {
+      const x1 = leftPad + ((Math.max(start, pool.startIndex) - start) * slotW) + (slotW / 2);
+      const x2 = leftPad + ((Math.min(end - 1, (pool.endIndex ?? pool.startIndex) + 14) - start) * slotW) + (slotW / 2);
+      const level = pool.a && pool.b ? pool.b.price : pool.level;
+      const y = toY(level);
+      if (!Number.isFinite(y)) return;
+      ctx.save();
+      ctx.strokeStyle = pool.side === "high"
+        ? (pool.kind.startsWith("prevSession") ? "rgba(242, 201, 76, 0.68)" : "rgba(242, 54, 69, 0.52)")
+        : (pool.kind.startsWith("prevSession") ? "rgba(242, 201, 76, 0.68)" : "rgba(8, 153, 129, 0.52)");
+      ctx.lineWidth = pool.kind.startsWith("prevSession") ? 1.2 : 1;
+      ctx.setLineDash(pool.kind.startsWith("trendline") ? [6, 3] : pool.kind.startsWith("prevSession") ? [2, 2] : [3, 3]);
+      if (pool.a && pool.b) {
+        const xa = leftPad + ((Math.max(start, pool.a.index) - start) * slotW) + (slotW / 2);
+        const xb = leftPad + ((Math.min(end - 1, pool.b.index) - start) * slotW) + (slotW / 2);
+        ctx.beginPath();
+        ctx.moveTo(xa, toY(pool.a.price));
+        ctx.lineTo(xb, toY(pool.b.price));
+      } else {
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(x2, y);
+      }
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.restore();
+    });
+
+    ldmss.setups.slice(-3).forEach((setup) => {
+      const isBuy = setup.direction === "BUY";
+      const sweepCandle = candles[setup.sweepIndex];
+      const sweepX = leftPad + ((setup.sweepIndex - start) * slotW) + (slotW / 2);
+      const sweepY = isBuy ? toY(sweepCandle.low) + 8 : toY(sweepCandle.high) - 8;
+      const breakX1 = leftPad + ((setup.structureEvent.pivotIndex - start) * slotW) + (slotW / 2);
+      const breakX2 = leftPad + ((setup.structureEvent.breakIndex - start) * slotW) + (slotW / 2);
+      const breakY = toY(setup.structureEvent.pivotPrice);
+      const obStart = Math.max(start, setup.orderBlock.index);
+      const obEnd = Math.min(end - 1, setup.pullbackIndex);
+      const obX = leftPad + ((obStart - start) * slotW);
+      const obW = Math.max(slotW, ((obEnd - obStart) + 1) * slotW);
+      const obTopY = toY(setup.orderBlock.top);
+      const obBottomY = toY(setup.orderBlock.bottom);
+      const entryX = leftPad + ((setup.entryIndex - start) * slotW) + (slotW / 2);
+      const entryY = toY(setup.entryPrice);
+      const slY = toY(setup.stopLoss);
+      const tpY = toY(setup.takeProfit);
+      const color = isBuy ? "#18d89f" : "#ff6a4d";
+
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = isBuy ? "rgba(24, 216, 159, 0.12)" : "rgba(255, 106, 77, 0.12)";
+      ctx.lineWidth = 1.2;
+      ctx.beginPath();
+      ctx.moveTo(breakX1, breakY);
+      ctx.lineTo(breakX2, breakY);
+      ctx.stroke();
+      ctx.fillRect(obX, obTopY, obW, Math.max(2, obBottomY - obTopY));
+      ctx.strokeRect(obX, obTopY, obW, Math.max(2, obBottomY - obTopY));
+
+      ctx.setLineDash([4, 3]);
+      ctx.strokeStyle = "rgba(255, 106, 77, 0.85)";
+      ctx.beginPath();
+      ctx.moveTo(leftPad, slY);
+      ctx.lineTo(width - rightPad, slY);
+      ctx.stroke();
+      ctx.strokeStyle = "rgba(24, 216, 159, 0.85)";
+      ctx.beginPath();
+      ctx.moveTo(leftPad, tpY);
+      ctx.lineTo(width - rightPad, tpY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+
+      ctx.beginPath();
+      ctx.arc(sweepX, sweepY, 4, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.stroke();
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillStyle = color;
+      ctx.fillText(setup.liquidityKind, sweepX, isBuy ? sweepY + 8 : sweepY - 8);
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(entryX, entryY - 8);
+        ctx.lineTo(entryX - 5, entryY + 2);
+        ctx.lineTo(entryX + 5, entryY + 2);
+      } else {
+        ctx.moveTo(entryX, entryY + 8);
+        ctx.lineTo(entryX - 5, entryY - 2);
+        ctx.lineTo(entryX + 5, entryY - 2);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillText(isBuy ? "LDMSS BUY" : "LDMSS SELL", entryX, isBuy ? entryY + 6 : entryY - 6);
+      ctx.restore();
+    });
+  }
+
+  if (hasAlgoBehaviorEngine) {
+    const abe = buildAlgoBehaviorEngine(candles, {});
+    ctx.save();
+
+    abe.microLiquidity.forEach((zone) => {
+      const localStart = Math.max(0, (zone.startIndex ?? 0) - start);
+      const localEnd = Math.min(points.length - 1, (zone.endIndex ?? zone.startIndex ?? 0) - start);
+      if (localEnd < 0 || localStart > points.length - 1) return;
+      const x1 = leftPad + (localStart * slotW);
+      const x2 = leftPad + ((localEnd + 1) * slotW);
+      const y = toY(zone.level);
+      if (!Number.isFinite(y)) return;
+      ctx.strokeStyle = zone.side === "high" ? "rgba(242, 54, 69, 0.75)" : "rgba(8, 153, 129, 0.75)";
+      ctx.setLineDash([3, 3]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+    });
+
+    if (abe.activeSetup) {
+      const localIndex = Math.max(0, Math.min(points.length - 1, abe.activeSetup.entryIndex - start));
+      const x = leftPad + ((localIndex + 0.5) * slotW);
+      const fallbackPrice = points[localIndex]?.close ?? points[points.length - 1]?.close ?? candles[candles.length - 1]?.close;
+      const y = toY(abe.activeSetup.focusPrice ?? fallbackPrice);
+      if (Number.isFinite(x) && Number.isFinite(y)) {
+        ctx.fillStyle = abe.activeSetup.direction === "BUY" ? "#0db787" : "#f23645";
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 1.2;
+        ctx.beginPath();
+        ctx.arc(x, y, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.fillStyle = ctx.strokeStyle = abe.activeSetup.direction === "BUY" ? "#0db787" : "#f23645";
+        ctx.font = "10px Segoe UI, sans-serif";
+        ctx.textAlign = "left";
+        ctx.textBaseline = "bottom";
+        ctx.fillText(`ABE ${abe.activeSetup.direction} ${abe.score}`, x + 8, y - 6);
+      }
+    }
+
+    const drawAbeRay = (price, color, label, dashed = false) => {
+      if (!Number.isFinite(price)) return;
+      const y = toY(price);
+      if (!Number.isFinite(y)) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.fillStyle = color;
+      ctx.lineWidth = 1.2;
+      ctx.setLineDash(dashed ? [5, 4] : []);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, y);
+      ctx.lineTo(width - rightPad - 78, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "10px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "bottom";
+      ctx.fillText(label, leftPad + 6, y - 4);
+      ctx.restore();
+    };
+
+    if (abe.sweep?.referenceLevel != null) {
+      const sweepLabel = abe.sweep.sweepType === "BUY" ? "SSL" : "BSL";
+      const sweepColor = abe.sweep.sweepType === "BUY" ? "#18d89f" : "#f23645";
+      drawAbeRay(abe.sweep.referenceLevel, sweepColor, `${sweepLabel} ${formatPrice(abe.sweep.referenceLevel, currentPip)}`);
+    }
+
+    if (abe.entryPrice != null) {
+      const entryDirection = abe.activeSetup?.direction ?? abe.trend;
+      const entryIsBuy = entryDirection === "BUY" || entryDirection === "UP";
+      const entryColor = entryIsBuy ? "#5be660" : "#ffb84d";
+      drawAbeRay(abe.entryPrice, entryColor, `ENTRY ${formatPrice(abe.entryPrice, currentPip)}`, true);
+    }
+
+    ctx.restore();
+  }
+
+  if (hasPriceActionToolkit) {
+    const pa = buildPriceActionToolkit(candles, {});
+
+    pa.sr.supports.forEach((level) => {
+      const x1 = leftPad + ((Math.max(start, level.startIndex) - start) * slotW);
+      const x2 = leftPad + ((Math.min(end - 1, level.drawEndIndex ?? level.endIndex) - start + 1) * slotW);
+      const topY = toY(level.top);
+      const bottomY = toY(level.bottom);
+      ctx.save();
+      ctx.fillStyle = "rgba(8, 153, 129, 0.10)";
+      ctx.strokeStyle = "rgba(8, 153, 129, 0.45)";
+      ctx.fillRect(x1, topY, Math.max(slotW, x2 - x1), Math.max(2, bottomY - topY));
+      ctx.strokeRect(x1, topY, Math.max(slotW, x2 - x1), Math.max(2, bottomY - topY));
+      ctx.restore();
+    });
+
+    pa.sr.resistances.forEach((level) => {
+      const x1 = leftPad + ((Math.max(start, level.startIndex) - start) * slotW);
+      const x2 = leftPad + ((Math.min(end - 1, level.drawEndIndex ?? level.endIndex) - start + 1) * slotW);
+      const topY = toY(level.top);
+      const bottomY = toY(level.bottom);
+      ctx.save();
+      ctx.fillStyle = "rgba(242, 54, 69, 0.10)";
+      ctx.strokeStyle = "rgba(242, 54, 69, 0.45)";
+      ctx.fillRect(x1, topY, Math.max(slotW, x2 - x1), Math.max(2, bottomY - topY));
+      ctx.strokeRect(x1, topY, Math.max(slotW, x2 - x1), Math.max(2, bottomY - topY));
+      ctx.restore();
+    });
+
+    pa.trendlines.upperChannels.forEach((channel) => {
+      const startIndex = channel.startIndex;
+      const endIndex = channel.liveEndIndex ?? channel.endIndex;
+      if (!Number.isInteger(startIndex) || !Number.isInteger(endIndex)) return;
+      if (endIndex < start || startIndex > end - 1) return;
+      const x1 = leftPad + ((Math.max(start, startIndex) - start) * slotW) + (slotW / 2);
+      const x2 = leftPad + ((Math.min(end - 1, endIndex) - start) * slotW) + (slotW / 2);
+      const upperA = channel.top1;
+      const upperB = channel.liveTop ?? channel.top2;
+      const lowerA = channel.bottom1;
+      const lowerB = channel.liveBottom ?? channel.bottom2;
+      ctx.save();
+      ctx.strokeStyle = "rgba(242, 54, 69, 0.70)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(x1, toY(upperA));
+      ctx.lineTo(x2, toY(upperB));
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x1, toY(lowerA));
+      ctx.lineTo(x2, toY(lowerB));
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    pa.trendlines.lowerChannels.forEach((channel) => {
+      const startIndex = channel.startIndex;
+      const endIndex = channel.liveEndIndex ?? channel.endIndex;
+      if (!Number.isInteger(startIndex) || !Number.isInteger(endIndex)) return;
+      if (endIndex < start || startIndex > end - 1) return;
+      const x1 = leftPad + ((Math.max(start, startIndex) - start) * slotW) + (slotW / 2);
+      const x2 = leftPad + ((Math.min(end - 1, endIndex) - start) * slotW) + (slotW / 2);
+      const upperA = channel.top1;
+      const upperB = channel.liveTop ?? channel.top2;
+      const lowerA = channel.bottom1;
+      const lowerB = channel.liveBottom ?? channel.bottom2;
+      ctx.save();
+      ctx.strokeStyle = "rgba(8, 153, 129, 0.70)";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(x1, toY(upperA));
+      ctx.lineTo(x2, toY(upperB));
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(x1, toY(lowerA));
+      ctx.lineTo(x2, toY(lowerB));
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    if (pa.fib?.levels?.length) {
+      pa.fib.levels.forEach((level) => {
+        const y = toY(level.price);
+        if (!Number.isFinite(y)) return;
+        ctx.save();
+        ctx.strokeStyle = level.color;
+        ctx.setLineDash([4, 4]);
+        ctx.beginPath();
+        ctx.moveTo(leftPad, y);
+        ctx.lineTo(width - rightPad, y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.font = "8px Segoe UI, sans-serif";
+        ctx.textAlign = "right";
+        ctx.textBaseline = "bottom";
+        ctx.fillStyle = level.color;
+        ctx.fillText(level.label, width - rightPad - 2, y - 2);
+        ctx.restore();
+      });
+    }
+
+    const lastStructureEvent = pa.structure?.events?.[pa.structure.events.length - 1] || null;
+    if (lastStructureEvent) {
+      const x1 = leftPad + ((lastStructureEvent.pivotIndex - start) * slotW) + (slotW / 2);
+      const x2 = leftPad + ((lastStructureEvent.breakIndex - start) * slotW) + (slotW / 2);
+      const y = toY(lastStructureEvent.pivotPrice);
+      ctx.save();
+      ctx.strokeStyle = lastStructureEvent.direction === "UP" ? "#18d89f" : "#ff6a4d";
+      ctx.lineWidth = 1.1;
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.fillText(lastStructureEvent.type, x2, y - 4);
+      ctx.restore();
+    }
+
+    pa.actionableSignals.slice(-6).forEach((signal) => {
+      const isBuy = signal.direction === "BUY";
+      const candle = candles[signal.entryIndex];
+      if (!candle) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const y = isBuy ? toY(candle.low) + 10 : toY(candle.high) - 10;
+      ctx.save();
+      ctx.fillStyle = isBuy ? "#18d89f" : "#ff6a4d";
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, y - 7);
+        ctx.lineTo(x - 5, y + 3);
+        ctx.lineTo(x + 5, y + 3);
+      } else {
+        ctx.moveTo(x, y + 7);
+        ctx.lineTo(x - 5, y - 3);
+        ctx.lineTo(x + 5, y - 3);
+      }
+      ctx.closePath();
+      ctx.fill();
       ctx.restore();
     });
   }
@@ -6614,6 +7623,16 @@ function buildIndicatorSignalAlerts(candles) {
     cp.signals.forEach((signal) => addAlert("CHART_PATTERNS", signal.entryIndex, signal.direction, signal.label));
   }
 
+  if (activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE")) {
+    const abe = buildAlgoBehaviorEngine(candles, {});
+    abe.signals.forEach((signal) => addAlert("ALGO_BEHAVIOR_ENGINE", signal.entryIndex, signal.direction, `score-${signal.score}`));
+  }
+
+  if (activeChartIndicators.has("PRICE_ACTION_TOOLKIT")) {
+    const pa = buildPriceActionToolkit(candles, {});
+    pa.actionableSignals.forEach((signal) => addAlert("PRICE_ACTION_TOOLKIT", signal.entryIndex, signal.direction, signal.kind));
+  }
+
   if (activeChartIndicators.has("LIQ_SWEEP_OB")) {
     const lq = buildLiquiditySweepOrderBlockSystem(candles, {
       pivotLen: 3,
@@ -6621,6 +7640,17 @@ function buildIndicatorSignalAlerts(candles) {
       pullbackLookahead: 12,
     });
     lq.setups.forEach((setup) => addAlert("LIQ_SWEEP_OB", setup.entryIndex, setup.direction, setup.liquidityKind));
+  }
+
+  if (activeChartIndicators.has("LDMSS")) {
+    const ldmss = buildLiquidityDrivenMarketStructureSystem(candles, {
+      pivotLen: 3,
+      sweepLookahead: 10,
+      pullbackLookahead: 12,
+    });
+    ldmss.setups
+      .filter((setup) => setup.sessionAllowed)
+      .forEach((setup) => addAlert("LDMSS", setup.entryIndex, setup.direction, setup.liquidityKind));
   }
 
   return alerts.sort((a, b) => a.entryIndex - b.entryIndex);
