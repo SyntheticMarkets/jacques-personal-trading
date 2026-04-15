@@ -357,6 +357,10 @@ let chartSelectedDrawingId = null;
 let chartDrawingMoveMode = false;
 let chartDrawingMoveOrigin = null;
 let chartDrawingAdjustHandle = null;
+let chartDrawingToolbarVisible = false;
+let chartDrawingPressTimer = null;
+let chartLastDrawingTapAt = 0;
+let chartLastDrawingTapId = null;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
@@ -427,12 +431,17 @@ function clearChartDrawingSelection() {
   chartDrawingMoveMode = false;
   chartDrawingMoveOrigin = null;
   chartDrawingAdjustHandle = null;
+  chartDrawingToolbarVisible = false;
+  if (chartDrawingPressTimer) {
+    clearTimeout(chartDrawingPressTimer);
+    chartDrawingPressTimer = null;
+  }
 }
 
 function syncDrawingActionBarUI() {
   if (!drawingActionBarEl) return;
   const drawing = getSelectedChartDrawing();
-  if (!drawing || !chartViewportState) {
+  if (!drawing || !chartViewportState || !chartDrawingToolbarVisible) {
     drawingActionBarEl.classList.add("hidden");
     return;
   }
@@ -463,6 +472,7 @@ function setDrawingTool(tool) {
   chartDrawingTool = DRAWING_TOOL_OPTIONS.includes(tool) ? tool : "SELECT";
   chartDrawingDraft = null;
   chartDrawingHitCandidateId = null;
+  chartDrawingToolbarVisible = false;
   if (chartDrawingTool !== "SELECT") {
     clearChartDrawingSelection();
   }
@@ -787,6 +797,7 @@ function ensureDrawingActionBar() {
   drawingMoveBtnEl?.addEventListener("click", () => {
     const drawing = getSelectedChartDrawing();
     if (!drawing || drawing.locked) return;
+    chartDrawingToolbarVisible = true;
     chartDrawingMoveMode = !chartDrawingMoveMode;
     chartDrawingMoveOrigin = null;
     syncDrawingActionBarUI();
@@ -798,6 +809,7 @@ function ensureDrawingActionBar() {
     if (!clone) return;
     addChartDrawing(clone);
     chartSelectedDrawingId = clone.id;
+    chartDrawingToolbarVisible = true;
     chartDrawingMoveMode = false;
     renderMiniChart(getBuiltCandles());
   });
@@ -806,6 +818,7 @@ function ensureDrawingActionBar() {
     const drawing = getSelectedChartDrawing();
     if (!drawing) return;
     updateChartDrawing({ ...drawing, locked: !drawing.locked });
+    chartDrawingToolbarVisible = true;
     chartDrawingMoveMode = false;
     renderMiniChart(getBuiltCandles());
   });
@@ -8255,8 +8268,13 @@ function init() {
     chartDragX = event.clientX;
     chartDragY = event.clientY;
     chartDrawingHitCandidateId = null;
+    if (chartDrawingPressTimer) {
+      clearTimeout(chartDrawingPressTimer);
+      chartDrawingPressTimer = null;
+    }
     const hitHandle = chartDrawingTool === "SELECT" && pointerPoint ? hitTestSelectedDrawingHandle(pointerPoint) : null;
     if (hitHandle) {
+      chartDrawingToolbarVisible = false;
       chartDragMode = "drawing-adjust";
       chartDrawingAdjustHandle = hitHandle;
       chartGestureMoved = false;
@@ -8268,15 +8286,27 @@ function init() {
     if (hitDrawingId && chartDrawingTool === "SELECT") {
       const wasSelected = chartSelectedDrawingId === hitDrawingId;
       chartSelectedDrawingId = hitDrawingId;
+      chartDrawingHitCandidateId = hitDrawingId;
       const selected = getSelectedChartDrawing();
       if (selected && !selected.locked && (chartDrawingMoveMode || wasSelected)) {
+        chartDrawingToolbarVisible = false;
         chartDragMode = "drawing-move";
         chartDrawingMoveOrigin = null;
         chartGestureMoved = false;
         miniChartCanvas.setPointerCapture?.(event.pointerId);
       } else {
+        chartDrawingToolbarVisible = false;
         chartDragMode = "select";
         chartGestureMoved = false;
+      }
+      if (event.pointerType !== "mouse") {
+        chartDrawingPressTimer = setTimeout(() => {
+          if (chartSelectedDrawingId === hitDrawingId && !chartGestureMoved) {
+            chartDrawingToolbarVisible = true;
+            chartDrawingMoveMode = false;
+            renderMiniChart(getBuiltCandles());
+          }
+        }, 450);
       }
       renderMiniChart(getBuiltCandles());
       return;
@@ -8334,6 +8364,10 @@ function init() {
     chartDragY = event.clientY;
     chartGestureMoved = true;
     chartDrawingHitCandidateId = null;
+    if (chartDrawingPressTimer) {
+      clearTimeout(chartDrawingPressTimer);
+      chartDrawingPressTimer = null;
+    }
     if (chartDragMode === "drawing") {
       const point = createDrawingPointFromPointer(event);
       if (point && chartDrawingDraft) {
@@ -8363,6 +8397,10 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointerup", (event) => {
+    if (chartDrawingPressTimer) {
+      clearTimeout(chartDrawingPressTimer);
+      chartDrawingPressTimer = null;
+    }
     if (chartDragMode === "drawing") {
       const drawing = buildDrawingFromDraft(chartDrawingDraft);
       chartDrawingDraft = null;
@@ -8373,6 +8411,7 @@ function init() {
       if (drawing) {
         addChartDrawing(drawing);
         chartSelectedDrawingId = drawing.id;
+        chartDrawingToolbarVisible = false;
         chartDrawingMoveMode = false;
         chartDrawingMoveOrigin = null;
         setDrawingTool("SELECT");
@@ -8400,6 +8439,18 @@ function init() {
       chartDrawingAdjustHandle = null;
       renderMiniChart(getBuiltCandles());
       return;
+    }
+    if (chartDrawingTool === "SELECT" && chartDrawingHitCandidateId && !chartGestureMoved) {
+      const now = Date.now();
+      if (event.pointerType === "mouse") {
+        if (chartLastDrawingTapId === chartDrawingHitCandidateId && now - chartLastDrawingTapAt < 350) {
+          chartDrawingToolbarVisible = true;
+          chartDrawingMoveMode = false;
+          renderMiniChart(getBuiltCandles());
+        }
+        chartLastDrawingTapId = chartDrawingHitCandidateId;
+        chartLastDrawingTapAt = now;
+      }
     }
     if (!chartGestureMoved) {
       const now = Date.now();
@@ -8432,6 +8483,10 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointercancel", () => {
+    if (chartDrawingPressTimer) {
+      clearTimeout(chartDrawingPressTimer);
+      chartDrawingPressTimer = null;
+    }
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
@@ -8444,6 +8499,10 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointerleave", (event) => {
+    if (chartDrawingPressTimer) {
+      clearTimeout(chartDrawingPressTimer);
+      chartDrawingPressTimer = null;
+    }
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
