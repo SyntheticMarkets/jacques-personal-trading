@@ -234,7 +234,32 @@ button.small {
 .phone.chart2-mode .app-panel[data-app-panel="chart"] #miniChart {
   flex: 1 1 auto;
   height: auto;
-  min-height: 420px;
+  min-height: 220px;
+}
+
+.phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body {
+  display: flex !important;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-top: 10px;
+}
+
+.phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body #miniChart {
+  flex: 1 1 auto;
+  min-height: 180px;
+}
+
+.phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body .chart-footer,
+.phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body .chart-indicator-list {
+  flex: 0 0 auto;
 }
 
 .trade-tabs .tab {
@@ -581,6 +606,9 @@ button.small {
 
 .signal-chart-head {
   margin-top: 10px;
+  gap: 8px;
+  flex-wrap: wrap;
+  align-items: flex-start;
 }
 
 .signal-chart-meta {
@@ -588,6 +616,8 @@ button.small {
   align-items: center;
   gap: 8px;
   min-width: 0;
+  flex: 1 1 100%;
+  flex-wrap: wrap;
 }
 
 .chart-tf-label {
@@ -711,6 +741,9 @@ button.small {
   display: inline-flex;
   gap: 6px;
   align-items: center;
+  flex: 1 1 100%;
+  justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 .chart-reset-btn {
@@ -738,6 +771,68 @@ button.small {
 
 .chart-drawing-select {
   min-width: 148px;
+}
+
+@media (max-width: 900px), (max-height: 430px) {
+  .signal-chart-head {
+    display: block !important;
+  }
+
+  .signal-chart-head .signal-chart-meta {
+    display: grid !important;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 8px;
+    width: 100%;
+    margin-bottom: 8px;
+  }
+
+  .signal-chart-head .chart-mode-select,
+  .signal-chart-head .chart-drawing-select {
+    width: 100% !important;
+    min-width: 0 !important;
+  }
+
+  .signal-chart-head .chart-controls {
+    display: grid !important;
+    grid-template-columns: repeat(4, 36px);
+    justify-content: start;
+    gap: 4px;
+    width: 100%;
+  }
+
+  .signal-chart-head .chart-controls > button {
+    padding: 4px 8px;
+    min-width: 36px;
+    min-height: 32px;
+  }
+
+  .signal-chart-head .chart-controls #toggleChart {
+    grid-column: 1 / -1;
+    width: 100%;
+    min-width: 0;
+  }
+
+  .phone.chart2-mode {
+    min-height: calc(100vh - 24px);
+    height: auto;
+    overflow: hidden;
+  }
+
+  .phone.chart2-mode .app-panel.active {
+    min-height: 0;
+    overflow: auto;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .trade-section,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-body {
+    min-height: 0 !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] #miniChart,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body #miniChart {
+    min-height: 140px !important;
+    height: 140px !important;
+  }
 }
 
 .auto-section {
