@@ -126,6 +126,23 @@ let autoSectionEl;
 let toggleAutoBtn;
 let toggleAutoConfigBtn;
 let toggleAutoResultsBtn;
+let generateBacktestSignalBtn;
+let runBacktestNowBtn;
+let backtestStatusEl;
+let backtestContextEl;
+let backtestDirectionEl;
+let backtestConfidenceEl;
+let backtestEntryPriceEl;
+let backtestEntryAtEl;
+let backtestCountdownEl;
+let backtestWinRateEl;
+let backtestTradeCountEl;
+let backtestWinsLossesEl;
+let backtestReasonsEl;
+let backtestBullScoreEl;
+let backtestBearScoreEl;
+let backtestAnalysisChartEl;
+let backtestReadyTradeEl;
 let currentAppTab = "settings";
 let chart2HideEls;
 let tradeModeTabsEl;
@@ -138,6 +155,11 @@ let originalProposalsNextSibling = null;
 let originalDesktopTradeTypeParent = null;
 let originalDesktopTradeTypeNextSibling = null;
 let quickDirectionQuotes = { CALL: null, PUT: null };
+let backtestCountdownTimer = null;
+let backtestRunInFlight = false;
+let backtestEntryTargetMs = null;
+let backtestSignalInFlight = false;
+let backtestReadyProposal = null;
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -8007,6 +8029,27 @@ function syncBarrierControls(sourceEl = null) {
   }
 }
 
+function getDefaultBarrierForDisplay(displayName) {
+  const name = String(displayName || "").trim().toLowerCase();
+  if (!name) return null;
+  if (name.includes("bear market")) return "0.8";
+  if (name.includes("bull market")) return "1";
+  if (name.includes("volatility 10 (1s)")) return "0.6";
+  if (name.includes("volatility 10 index")) return "0.3";
+  if (name.includes("volatility 100 (1s)")) return "0.8";
+  if (name.includes("volatility 100 index")) return "0.4";
+  if (name.includes("volatility 15 (1s)")) return "1.1";
+  if (name.includes("volatility 25 (1s)")) return "120";
+  if (name.includes("volatility 25 index")) return "0.5";
+  if (name.includes("volatility 30 (1s)")) return "1.1";
+  if (name.includes("volatility 50 (1s)")) return "100";
+  if (name.includes("volatility 50 index")) return "0.03";
+  if (name.includes("volatility 75 (1s)")) return "2";
+  if (name.includes("volatility 75 index")) return "15";
+  if (name.includes("volatility 90 (1s)")) return "5";
+  return null;
+}
+
 function updateProposalDirectionButtons() {
   if (!directionButtons?.length) return;
   const isRiseFall = getActiveTradeMode() === "rise_fall";
@@ -8022,6 +8065,757 @@ function updateProposalDirectionButtons() {
       <span class="proposal-pill-pct">${pctText}</span>
     `;
   });
+}
+
+function normalizeHistoryCandle(candle) {
+  if (!candle) return null;
+  const time = Number(candle.epoch ?? candle.time ?? candle.open_time);
+  const open = Number(candle.open);
+  const high = Number(candle.high);
+  const low = Number(candle.low);
+  const close = Number(candle.close);
+  if (![time, open, high, low, close].every(Number.isFinite)) return null;
+  return { time, open, high, low, close };
+}
+
+async function fetchHistoricalCandles(symbol, granularity = 60, count = 160) {
+  const res = await wsRequest({
+    ticks_history: symbol,
+    end: "latest",
+    count,
+    style: "candles",
+    granularity,
+  });
+  const candleHistory = Array.isArray(res.candles)
+    ? res.candles
+    : Array.isArray(res.history?.candles)
+      ? res.history.candles
+      : [];
+  return candleHistory.map(normalizeHistoryCandle).filter(Boolean);
+}
+
+function buildReplayInputForNextCandle(candles, granularity = 60) {
+  if (!Array.isArray(candles) || !candles.length) return [];
+  const last = candles[candles.length - 1];
+  return [
+    ...candles,
+    {
+      ...last,
+      time: (last.time || 0) + granularity,
+    },
+  ];
+}
+
+function getRecentAverageRange(candles, lookback = 20) {
+  if (!Array.isArray(candles) || candles.length < 2) return 0;
+  const recent = candles.slice(-lookback);
+  const sum = recent.reduce((acc, candle) => acc + Math.max(0, Number(candle.high) - Number(candle.low)), 0);
+  return recent.length ? sum / recent.length : 0;
+}
+
+function isVoteUsableForBacktestSignal(vote, referencePrice, avgRange) {
+  if (!vote) return false;
+  if (!Number.isFinite(vote.price) || !Number.isFinite(referencePrice)) return true;
+  const distance = Math.abs(vote.price - referencePrice);
+  const maxDistance = Math.max(avgRange * 4, Math.abs(referencePrice) * 0.004);
+  return distance <= maxDistance;
+}
+
+function classifyDirectionalOutcome(candle) {
+  if (!candle) return null;
+  if (candle.close > candle.open) return "CALL";
+  if (candle.close < candle.open) return "PUT";
+  return "FLAT";
+}
+
+function formatClockTime(timestampMs) {
+  if (!Number.isFinite(timestampMs)) return "--";
+  const date = new Date(timestampMs);
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+}
+
+function computeBacktestEntrySchedule(bufferMs = 3000) {
+  const now = Date.now();
+  let nextBoundary = Math.ceil(now / 60000) * 60000;
+  let entryAt = nextBoundary - bufferMs;
+  if (now >= entryAt) {
+    nextBoundary += 60000;
+    entryAt = nextBoundary - bufferMs;
+  }
+  return {
+    now,
+    entryAt,
+    candleOpenAt: nextBoundary,
+    bufferMs,
+  };
+}
+
+function buildCompositeBacktestSignal(candles, options = {}) {
+  if (!Array.isArray(candles) || candles.length < 45) {
+    return {
+      direction: null,
+      confidence: 0,
+      entryPrice: null,
+      reasons: [],
+      systemsChecked: 0,
+    };
+  }
+
+  const votes = [];
+  const pushVote = (direction, weight, system, price, reason) => {
+    if (!direction || !Number.isFinite(weight) || weight <= 0) return;
+    votes.push({
+      direction,
+      weight,
+      system,
+      price: Number.isFinite(price) ? price : null,
+      reason,
+    });
+  };
+
+  try {
+    const abe = buildAlgoBehaviorEngine(candles, {});
+    if (abe.activeSetup?.direction === "BUY") pushVote("CALL", 4, "Algo Behavior", abe.entryPrice ?? abe.focusPrice, abe.setupText);
+    else if (abe.activeSetup?.direction === "SELL") pushVote("PUT", 4, "Algo Behavior", abe.entryPrice ?? abe.focusPrice, abe.setupText);
+    else if (abe.trend === "UP" && abe.score >= 6) pushVote("CALL", 2, "Algo Behavior", abe.focusPrice, abe.setupText);
+    else if (abe.trend === "DOWN" && abe.score >= 6) pushVote("PUT", 2, "Algo Behavior", abe.focusPrice, abe.setupText);
+  } catch (err) {}
+
+  try {
+    const ldmss = buildLiquidityDrivenMarketStructureSystem(candles, {});
+    if (ldmss.activeSetup?.direction === "BUY") pushVote("CALL", 4, "LDMSS", ldmss.activeSetup.entryPrice, ldmss.activeSetup.setupText);
+    else if (ldmss.activeSetup?.direction === "SELL") pushVote("PUT", 4, "LDMSS", ldmss.activeSetup.entryPrice, ldmss.activeSetup.setupText);
+    else if (ldmss.trend === "UP" && ldmss.confidence >= 55) pushVote("CALL", 2, "LDMSS", ldmss.latestSweep?.level, ldmss.setupText);
+    else if (ldmss.trend === "DOWN" && ldmss.confidence >= 55) pushVote("PUT", 2, "LDMSS", ldmss.latestSweep?.level, ldmss.setupText);
+  } catch (err) {}
+
+  try {
+    const pa = buildPriceActionToolkit(candles, {});
+    const latestSignal = pa.actionableSignals[pa.actionableSignals.length - 1] || null;
+    if (latestSignal?.direction === "BUY") pushVote("CALL", 3, "Price Action", latestSignal.price, pa.setupText);
+    else if (latestSignal?.direction === "SELL") pushVote("PUT", 3, "Price Action", latestSignal.price, pa.setupText);
+    else if (pa.bias === "BULLISH") pushVote("CALL", 1.5, "Price Action", pa.fib?.levels?.find((level) => level.label === "0.705")?.price, pa.setupText);
+    else if (pa.bias === "BEARISH") pushVote("PUT", 1.5, "Price Action", pa.fib?.levels?.find((level) => level.label === "0.705")?.price, pa.setupText);
+  } catch (err) {}
+
+  try {
+    const liq = buildLiquiditySweepOrderBlockSystem(candles, {});
+    const latest = liq.setups[liq.setups.length - 1] || null;
+    if (latest?.direction === "BUY") pushVote("CALL", 3, "Liquidity Sweep OB", latest.entryPrice, `${latest.liquidityKind} -> ${latest.structureEvent?.type ?? "shift"}`);
+    else if (latest?.direction === "SELL") pushVote("PUT", 3, "Liquidity Sweep OB", latest.entryPrice, `${latest.liquidityKind} -> ${latest.structureEvent?.type ?? "shift"}`);
+  } catch (err) {}
+
+  try {
+    const spc = buildStructurePullbackContinuation(candles, {});
+    const latest = spc.signals[spc.signals.length - 1] || null;
+    if (latest?.direction === "BUY") pushVote("CALL", 2.5, "Structure Pullback", latest.entryPrice ?? candles[latest.entryIndex]?.open, latest.reason || "pullback continuation");
+    else if (latest?.direction === "SELL") pushVote("PUT", 2.5, "Structure Pullback", latest.entryPrice ?? candles[latest.entryIndex]?.open, latest.reason || "pullback continuation");
+  } catch (err) {}
+
+  try {
+    const trendline = buildLiquidityTrendlineSignals(candles, {});
+    const latest = trendline.signals[trendline.signals.length - 1] || null;
+    if (latest?.type === "UP") pushVote("CALL", 2, "Liquidity Trendline", latest.price, "trendline breakout up");
+    else if (latest?.type === "DOWN") pushVote("PUT", 2, "Liquidity Trendline", latest.price, "trendline breakout down");
+  } catch (err) {}
+
+  try {
+    const patterns = buildChartPatternsSignals(candles, {});
+    const latest = patterns.signals[patterns.signals.length - 1] || null;
+    if (latest?.direction === "BUY") pushVote("CALL", 2, "Chart Patterns", latest.entryPrice ?? latest.neckline, latest.patternType || "pattern breakout");
+    else if (latest?.direction === "SELL") pushVote("PUT", 2, "Chart Patterns", latest.entryPrice ?? latest.neckline, latest.patternType || "pattern breakout");
+  } catch (err) {}
+
+  const referencePrice = Number.isFinite(options.referencePrice)
+    ? Number(options.referencePrice)
+    : Number(candles[candles.length - 1]?.close);
+  const avgRange = getRecentAverageRange(candles, 20);
+  const filteredVotes = votes.filter((vote) => isVoteUsableForBacktestSignal(vote, referencePrice, avgRange));
+  const callWeight = filteredVotes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
+  const putWeight = filteredVotes.filter((vote) => vote.direction === "PUT").reduce((sum, vote) => sum + vote.weight, 0);
+  const totalWeight = callWeight + putWeight;
+  const direction = callWeight === putWeight ? null : (callWeight > putWeight ? "CALL" : "PUT");
+  const winningVotes = filteredVotes.filter((vote) => vote.direction === direction);
+  const pricedWinningVotes = winningVotes.filter((vote) => Number.isFinite(vote.price));
+  let entryPrice = null;
+  if (pricedWinningVotes.length) {
+    const sortedByFit = pricedWinningVotes
+      .map((vote) => ({
+        ...vote,
+        distance: Number.isFinite(referencePrice) ? Math.abs(vote.price - referencePrice) : 0,
+      }))
+      .sort((a, b) => {
+        if (a.distance !== b.distance) return a.distance - b.distance;
+        if (a.weight !== b.weight) return b.weight - a.weight;
+        return 0;
+      });
+    entryPrice = sortedByFit[0]?.price ?? null;
+  }
+  const confidence = totalWeight > 0
+    ? Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100)
+    : 0;
+
+  return {
+    direction,
+    confidence,
+    entryPrice: Number.isFinite(entryPrice) ? entryPrice : null,
+    reasons: filteredVotes
+      .sort((a, b) => b.weight - a.weight)
+      .slice(0, 6),
+    systemsChecked: filteredVotes.length,
+    callWeight,
+    putWeight,
+    winningVotes,
+    referencePrice: Number.isFinite(referencePrice) ? referencePrice : null,
+  };
+}
+
+function runCompositeBacktest(candles) {
+  if (!Array.isArray(candles) || candles.length < 70) {
+    return { tested: 0, wins: 0, losses: 0, flats: 0, winRate: 0 };
+  }
+  const startIndex = Math.max(45, candles.length - 60);
+  let tested = 0;
+  let wins = 0;
+  let losses = 0;
+  let flats = 0;
+
+  for (let targetIndex = startIndex; targetIndex < candles.length; targetIndex += 1) {
+    const replayCandles = candles.slice(0, targetIndex + 1);
+    const signal = buildCompositeBacktestSignal(replayCandles);
+    if (!signal.direction) continue;
+    tested += 1;
+    const actual = classifyDirectionalOutcome(candles[targetIndex]);
+    if (actual === "FLAT") {
+      flats += 1;
+      continue;
+    }
+    if (actual === signal.direction) wins += 1;
+    else losses += 1;
+  }
+
+  return {
+    tested,
+    wins,
+    losses,
+    flats,
+    winRate: tested ? (wins / tested) * 100 : 0,
+  };
+}
+
+function renderBacktestReasons(reasons) {
+  if (!backtestReasonsEl) return;
+  if (!Array.isArray(reasons) || !reasons.length) {
+    backtestReasonsEl.textContent = "--";
+    return;
+  }
+  backtestReasonsEl.innerHTML = reasons.map((reason) => {
+    const side = reason.direction === "CALL" ? "BUY" : "SELL";
+    const priceText = Number.isFinite(reason.price) ? ` @ ${formatPrice(reason.price, currentPip)}` : "";
+    const weightText = Number.isFinite(reason.weight) ? ` • w${reason.weight.toFixed(1)}` : "";
+    return `<div class="backtest-reason-item"><strong>${reason.system}</strong> ${side}${priceText}${weightText} • ${reason.reason || "signal aligned"}</div>`;
+  }).join("");
+}
+
+function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
+  if (!backtestAnalysisChartEl) return;
+  if (!prediction || !Array.isArray(candles) || candles.length < 5) {
+    backtestAnalysisChartEl.textContent = "--";
+    return;
+  }
+  if (!Number.isFinite(renderBacktestAnalysisChart._pan)) {
+    renderBacktestAnalysisChart._pan = 0;
+  }
+  const callWeight = Number(prediction?.callWeight || 0);
+  const putWeight = Number(prediction?.putWeight || 0);
+  const currentPrice = Number.isFinite(options.currentPrice)
+    ? Number(options.currentPrice)
+    : Number.isFinite(prediction?.referencePrice)
+      ? Number(prediction.referencePrice)
+      : Number(candles[candles.length - 1]?.close);
+  const total = Math.max(callWeight + putWeight, 0.0001);
+  const callPct = Math.max(0, Math.min(100, (callWeight / total) * 100));
+  const putPct = Math.max(0, Math.min(100, (putWeight / total) * 100));
+  backtestAnalysisChartEl.innerHTML = `
+    <div class="backtest-analysis-row">
+      <div class="backtest-analysis-label"><span>Bullish</span><strong>${callWeight.toFixed(1)}</strong></div>
+      <div class="backtest-analysis-track"><div class="backtest-analysis-fill buy" style="width:${callPct}%;"></div></div>
+    </div>
+    <div class="backtest-analysis-row">
+      <div class="backtest-analysis-label"><span>Bearish</span><strong>${putWeight.toFixed(1)}</strong></div>
+      <div class="backtest-analysis-track"><div class="backtest-analysis-fill sell" style="width:${putPct}%;"></div></div>
+    </div>
+    <canvas id="backtestAnalysisCanvas" width="420" height="180"></canvas>
+    <div class="trade-meta">Weighted vote model. Direction follows score, not raw count.</div>
+  `;
+  const canvas = document.getElementById("backtestAnalysisCanvas");
+  if (!(canvas instanceof HTMLCanvasElement)) return;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const windowSize = 28;
+  const maxPan = Math.max(0, candles.length - windowSize);
+  renderBacktestAnalysisChart._pan = clamp(renderBacktestAnalysisChart._pan || 0, 0, maxPan);
+  const endIndex = candles.length - renderBacktestAnalysisChart._pan;
+  const startIndex = Math.max(0, endIndex - windowSize);
+  const visible = candles.slice(startIndex, endIndex);
+  const levels = [];
+  if (Number.isFinite(prediction.entryPrice)) {
+    levels.push({
+      price: prediction.entryPrice,
+      color: prediction.direction === "CALL" ? "rgba(31,186,122,0.95)" : "rgba(255,99,99,0.95)",
+      label: `Entry ${formatPrice(prediction.entryPrice, currentPip)}`,
+    });
+  }
+  prediction.winningVotes?.forEach((reason, index) => {
+    if (!Number.isFinite(reason.price) || index > 2) return;
+    levels.push({
+      price: reason.price,
+      color: reason.direction === "CALL" ? "rgba(31,186,122,0.45)" : "rgba(255,99,99,0.45)",
+      label: reason.system,
+    });
+  });
+  if (Number.isFinite(currentPrice)) {
+    levels.push({
+      price: currentPrice,
+      color: "rgba(121, 162, 255, 0.9)",
+      label: `Now ${formatPrice(currentPrice, currentPip)}`,
+    });
+  }
+  const lows = visible.map((c) => c.low);
+  const highs = visible.map((c) => c.high);
+  levels.forEach((level) => {
+    lows.push(level.price);
+    highs.push(level.price);
+  });
+  const minPrice = Math.min(...lows);
+  const maxPrice = Math.max(...highs);
+  const priceRange = Math.max(maxPrice - minPrice, 0.0001);
+  const width = canvas.width;
+  const height = canvas.height;
+  const leftPad = 10;
+  const rightPad = 70;
+  const topPad = 10;
+  const bottomPad = 14;
+  const chartWidth = width - leftPad - rightPad;
+  const chartHeight = height - topPad - bottomPad;
+  ctx.clearRect(0, 0, width, height);
+  ctx.fillStyle = "#111821";
+  ctx.fillRect(0, 0, width, height);
+  const priceToY = (price) => {
+    const norm = (price - minPrice) / priceRange;
+    return topPad + chartHeight - (norm * chartHeight);
+  };
+  const candleW = Math.max(4, Math.floor(chartWidth / Math.max(visible.length, 1) * 0.58));
+  visible.forEach((candle, index) => {
+    const xStep = chartWidth / Math.max(visible.length, 1);
+    const x = leftPad + (index * xStep) + (xStep / 2);
+    const openY = priceToY(candle.open);
+    const closeY = priceToY(candle.close);
+    const highY = priceToY(candle.high);
+    const lowY = priceToY(candle.low);
+    const top = Math.min(openY, closeY);
+    const bodyH = Math.max(2, Math.abs(closeY - openY));
+    const bullish = candle.close >= candle.open;
+    ctx.strokeStyle = "#3c4658";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(x, highY);
+    ctx.lineTo(x, lowY);
+    ctx.stroke();
+    ctx.fillStyle = bullish ? "#3b8cff" : "#f0efe9";
+    ctx.fillRect(Math.round(x - candleW / 2), Math.round(top), candleW, Math.round(bodyH));
+  });
+  ctx.strokeStyle = "rgba(35, 45, 58, 0.9)";
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(leftPad, topPad + chartHeight);
+  ctx.lineTo(leftPad + chartWidth, topPad + chartHeight);
+  ctx.stroke();
+  levels.forEach((level) => {
+    const y = priceToY(level.price);
+    ctx.strokeStyle = level.color;
+    ctx.lineWidth = 1.5;
+    ctx.setLineDash(level.label.startsWith("Entry") ? [6, 4] : [3, 3]);
+    ctx.beginPath();
+    ctx.moveTo(leftPad, y);
+    ctx.lineTo(leftPad + chartWidth, y);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = level.color;
+    ctx.font = "11px Segoe UI";
+    ctx.fillText(level.label, leftPad + chartWidth + 8, y + 4);
+  });
+  let dragStartX = null;
+  let dragStartPan = renderBacktestAnalysisChart._pan || 0;
+  canvas.style.cursor = "grab";
+  canvas.onpointerdown = (event) => {
+    dragStartX = event.clientX;
+    dragStartPan = renderBacktestAnalysisChart._pan || 0;
+    canvas.style.cursor = "grabbing";
+    canvas.setPointerCapture?.(event.pointerId);
+  };
+  canvas.onpointermove = (event) => {
+    if (dragStartX == null) return;
+    const stepPx = chartWidth / Math.max(visible.length, 1);
+    const deltaBars = Math.round((event.clientX - dragStartX) / Math.max(stepPx, 1));
+    renderBacktestAnalysisChart._pan = clamp(dragStartPan - deltaBars, 0, maxPan);
+    renderBacktestAnalysisChart(prediction, candles, options);
+  };
+  const endDrag = (event) => {
+    if (dragStartX == null) return;
+    dragStartX = null;
+    canvas.style.cursor = "grab";
+    canvas.releasePointerCapture?.(event.pointerId);
+  };
+  canvas.onpointerup = endDrag;
+  canvas.onpointercancel = endDrag;
+  canvas.onwheel = (event) => {
+    event.preventDefault();
+    const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+    const step = dominantDelta > 0 ? 2 : -2;
+    renderBacktestAnalysisChart._pan = clamp((renderBacktestAnalysisChart._pan || 0) + step, 0, maxPan);
+    renderBacktestAnalysisChart(prediction, candles, options);
+  };
+}
+
+function clearBacktestReadyTrade() {
+  backtestReadyProposal = null;
+  if (backtestReadyTradeEl) {
+    backtestReadyTradeEl.textContent = "--";
+  }
+}
+
+function executeProposalBuy(proposalId, price, direction) {
+  if (!proposalId) {
+    setStatus("Proposal not ready yet", true);
+    return Promise.resolve(false);
+  }
+  if (!activeToken || !isAuthorized) {
+    setStatus("Please log in to execute trades.", true);
+    window.location.href = OAUTH_URL;
+    return Promise.resolve(false);
+  }
+  const buyPrice = Number(price);
+  if (!buyPrice) {
+    setStatus("Invalid buy price", true);
+    return Promise.resolve(false);
+  }
+  setStatus("Placing trade...");
+  return wsRequest({ buy: proposalId, price: buyPrice })
+    .then((res) => {
+      const buy = res.buy;
+      const contractId = buy?.contract_id ?? "--";
+      const filledPrice = buy?.buy_price ?? buyPrice;
+      setStatus(`Trade opened. Contract ${contractId}, price ${filledPrice}`);
+      tradeResults.unshift({
+        time: Date.now(),
+        success: true,
+        contractId,
+        price: filledPrice,
+        profit: null,
+        direction: direction || currentDirection,
+        isSold: false,
+        expiry: null,
+      });
+      tradeResults = tradeResults.slice(0, 20);
+      renderTradeResults();
+      if (contractId && contractId !== "--") {
+        subscribeOpenContract(contractId);
+      }
+      return true;
+    })
+    .catch((err) => {
+      setStatus(err.message || "Buy failed", true);
+      tradeResults.unshift({
+        time: Date.now(),
+        success: false,
+        contractId: null,
+        price: buyPrice,
+        profit: null,
+        direction: direction || currentDirection,
+        isSold: true,
+        expiry: null,
+      });
+      tradeResults = tradeResults.slice(0, 20);
+      renderTradeResults();
+      return false;
+    });
+}
+
+async function loadBacktestReadyProposal(prediction, schedule) {
+  clearBacktestReadyTrade();
+  if (!backtestReadyTradeEl) return;
+  if (!prediction?.direction) {
+    backtestReadyTradeEl.textContent = "No trade ready because there is no clear directional edge.";
+    return;
+  }
+  const symbol = getBacktestTargetSymbol();
+  const mode = getActiveTradeMode();
+  const stake = Number(stakeInput?.value || sidebarStakeInputEl?.value || "0");
+  if (!symbol || !stake) {
+    backtestReadyTradeEl.textContent = "Select a symbol and valid stake first.";
+    return;
+  }
+  backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Fetching ready quote...</div>`;
+  const direction = prediction.direction === "PUT" ? "PUT" : "CALL";
+  let proposal = null;
+  let expiryLabel = "--";
+  let quoteMode = "fallback";
+  try {
+    if (mode === "rise_fall") {
+      const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
+      const nowSec = Math.floor(Date.now() / 1000);
+      const durationSec = expiryChoice.mode === "candle_end"
+        ? Math.max(minDurationSec, Math.floor(schedule.candleOpenAt / 1000) - nowSec)
+        : Math.max(1, expiryChoice.duration);
+      const durationUnit = expiryChoice.mode === "candle_end" ? "s" : expiryChoice.unit;
+      expiryLabel = expiryChoice.label;
+      quoteMode = "live";
+      proposal = await getProposal({
+        symbol,
+        contractType: direction,
+        barrier: null,
+        stake,
+        durationSec,
+        durationUnit,
+      });
+    } else {
+      const offsetVal = Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5");
+      const strikePrice = Number.isFinite(prediction?.entryPrice) ? prediction.entryPrice : null;
+      const signedOffset = direction === "CALL" ? offsetVal : -offsetVal;
+      let barrier = strikePrice != null ? formatPrice(strikePrice, currentPip) : formatOffset(signedOffset, currentPip);
+      const durationSec = Math.max(60, Math.floor((schedule.candleOpenAt - schedule.entryAt) / 1000) || 60);
+      expiryLabel = `1m @ ${barrier}`;
+      try {
+        quoteMode = strikePrice != null ? "entry-strike" : "offset";
+        proposal = await getProposal({
+          symbol,
+          contractType: direction,
+          barrier,
+          stake,
+          durationSec,
+        });
+      } catch (err) {
+        if (strikePrice != null) {
+          barrier = formatOffset(signedOffset, currentPip);
+          expiryLabel = `1m @ ${barrier}`;
+          quoteMode = "nearest-offset";
+          proposal = await getProposal({
+            symbol,
+            contractType: direction,
+            barrier,
+            stake,
+            durationSec,
+          });
+        } else {
+        barrier = formatOffset(signedOffset, currentPip);
+        expiryLabel = `1m @ ${barrier}`;
+        quoteMode = "offset";
+        proposal = await getProposal({
+          symbol,
+          contractType: direction,
+          barrier,
+          stake,
+          durationSec,
+        });
+        }
+      }
+    }
+  } catch (err) {
+    backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Quote failed: ${err?.message || "unknown error"}</div>`;
+    return;
+  }
+  if (!proposal) {
+    backtestReadyTradeEl.innerHTML = `<div class="trade-meta">No quote returned.</div>`;
+    return;
+  }
+  const payout = Number(proposal.payout);
+  const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
+  const profit = Number.isFinite(payout) ? payout - stake : null;
+  backtestReadyProposal = {
+    proposalId: proposal.id,
+    direction,
+    askPrice,
+    payout,
+    expiryLabel,
+    quoteMode,
+  };
+  backtestReadyTradeEl.innerHTML = `
+    <div class="backtest-ready-summary">
+      <div><strong>${direction === "CALL" ? "BUY / UP" : "SELL / DOWN"}</strong> ready</div>
+      <div class="backtest-ready-meta">Quote ${expiryLabel}${
+        quoteMode === "entry-strike"
+          ? " • exact entry strike"
+          : quoteMode === "nearest-offset"
+            ? ` • exact strike ${formatPrice(prediction.entryPrice, currentPip)} unavailable, using nearest offset`
+            : quoteMode === "offset"
+              ? " • offset quote"
+              : ""
+      }</div>
+      <div class="backtest-ready-meta">Stake ${stake.toFixed(2)} • Payout ${Number.isFinite(payout) ? payout.toFixed(2) : "--"} • Profit ${Number.isFinite(profit) ? profit.toFixed(2) : "--"}</div>
+    </div>
+    <div class="backtest-ready-actions">
+      <button id="backtestReadyBuyBtn" class="backtest-buy-btn" type="button">Buy now</button>
+    </div>
+  `;
+}
+
+function stopBacktestCountdown() {
+  if (backtestCountdownTimer) {
+    clearInterval(backtestCountdownTimer);
+    backtestCountdownTimer = null;
+  }
+  backtestEntryTargetMs = null;
+}
+
+function startBacktestCountdown(targetMs) {
+  stopBacktestCountdown();
+  backtestEntryTargetMs = targetMs;
+  const tick = () => {
+    if (!backtestCountdownEl || !Number.isFinite(backtestEntryTargetMs)) return;
+    const diffMs = Math.max(0, backtestEntryTargetMs - Date.now());
+    const totalSec = Math.ceil(diffMs / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    backtestCountdownEl.textContent = `${min}:${String(sec).padStart(2, "0")}`;
+  };
+  tick();
+  backtestCountdownTimer = setInterval(tick, 1000);
+}
+
+function getBacktestTargetSymbol() {
+  return currentSymbol || symbolSelect?.value || null;
+}
+
+function handleGenerateBacktestSignalClick() {
+  if (backtestStatusEl && !backtestSignalInFlight) {
+    backtestStatusEl.textContent = "Starting signal generation...";
+  }
+  generateBacktestSignalNow().catch((err) => {
+    if (backtestStatusEl) backtestStatusEl.textContent = `Signal generation failed: ${err?.message || "unknown error"}`;
+  });
+}
+
+function handleRunBacktestNowClick() {
+  if (backtestStatusEl && !backtestRunInFlight) {
+    backtestStatusEl.textContent = "Starting backtest...";
+  }
+  runBacktestNow().catch((err) => {
+    if (backtestStatusEl) backtestStatusEl.textContent = `Backtest failed: ${err?.message || "unknown error"}`;
+  });
+}
+
+async function generateBacktestSignalNow() {
+  if (backtestSignalInFlight) return;
+  const symbol = getBacktestTargetSymbol();
+  if (!symbol) {
+    if (backtestStatusEl) backtestStatusEl.textContent = "Select a market first.";
+    return;
+  }
+  backtestSignalInFlight = true;
+  if (generateBacktestSignalBtn) {
+    generateBacktestSignalBtn.disabled = true;
+    generateBacktestSignalBtn.textContent = "Generating...";
+  }
+  if (backtestStatusEl) backtestStatusEl.textContent = "Generating next 1m composite signal...";
+
+  try {
+    const liveCandles = currentSymbol === symbol ? getBuiltCandles() : [];
+    const sourceCandles = liveCandles.length >= 45
+      ? liveCandles
+      : await fetchHistoricalCandles(symbol, 60, 180);
+    const replayCandles = buildReplayInputForNextCandle(sourceCandles, 60);
+    const liveReferencePrice = currentSymbol === symbol && Number.isFinite(lastSpot)
+      ? Number(lastSpot)
+      : Number(sourceCandles[sourceCandles.length - 1]?.close);
+    const prediction = buildCompositeBacktestSignal(replayCandles, { referencePrice: liveReferencePrice });
+    const schedule = computeBacktestEntrySchedule(3000);
+    const mode = getActiveTradeMode();
+    const barrierText = mode === "higher_lower"
+      ? formatOffset(Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5"), currentPip)
+      : "N/A";
+
+    if (backtestContextEl) {
+      backtestContextEl.textContent = `${symbolSelect?.selectedOptions?.[0]?.textContent || symbol} • ${mode === "rise_fall" ? "Rise/Fall" : "Higher/Lower"} • Barrier ${barrierText}`;
+    }
+    if (backtestDirectionEl) {
+      backtestDirectionEl.textContent = prediction.direction === "CALL" ? "BUY / UP" : prediction.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
+    }
+    if (backtestConfidenceEl) backtestConfidenceEl.textContent = prediction.direction ? `${prediction.confidence}%` : "--";
+    if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
+    if (backtestBearScoreEl) backtestBearScoreEl.textContent = prediction.putWeight ? prediction.putWeight.toFixed(1) : "0.0";
+    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(prediction.entryPrice) ? formatPrice(prediction.entryPrice, currentPip) : formatPrice(liveReferencePrice ?? 0, currentPip);
+    if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(schedule.entryAt)} (${formatClockTime(schedule.candleOpenAt)} candle)`;
+    renderBacktestReasons(prediction.reasons);
+    renderBacktestAnalysisChart(prediction, sourceCandles, { currentPrice: liveReferencePrice });
+    await loadBacktestReadyProposal(prediction, schedule);
+    startBacktestCountdown(schedule.entryAt);
+    if (backtestStatusEl) {
+      backtestStatusEl.textContent = prediction.direction
+        ? `Signal ready. ${prediction.direction === "CALL" ? "BUY" : "SELL"} won on weighted score ${Math.max(prediction.callWeight || 0, prediction.putWeight || 0).toFixed(1)} vs ${Math.min(prediction.callWeight || 0, prediction.putWeight || 0).toFixed(1)}. Enter about 3 seconds before the next 1m candle.`
+        : "No clear composite edge right now. Review the last-hour win rate before taking the next trade.";
+    }
+  } catch (err) {
+    stopBacktestCountdown();
+    if (backtestStatusEl) backtestStatusEl.textContent = `Backtest failed: ${err?.message || "unknown error"}`;
+    if (backtestDirectionEl) backtestDirectionEl.textContent = "--";
+    if (backtestConfidenceEl) backtestConfidenceEl.textContent = "--";
+    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = "--";
+    if (backtestEntryAtEl) backtestEntryAtEl.textContent = "--";
+    if (backtestCountdownEl) backtestCountdownEl.textContent = "--";
+    if (backtestWinRateEl) backtestWinRateEl.textContent = "--";
+    if (backtestTradeCountEl) backtestTradeCountEl.textContent = "--";
+    if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = "--";
+    if (backtestBullScoreEl) backtestBullScoreEl.textContent = "--";
+    if (backtestBearScoreEl) backtestBearScoreEl.textContent = "--";
+    renderBacktestReasons([]);
+    renderBacktestAnalysisChart(null);
+    clearBacktestReadyTrade();
+  } finally {
+    backtestSignalInFlight = false;
+    if (generateBacktestSignalBtn) {
+      generateBacktestSignalBtn.disabled = false;
+      generateBacktestSignalBtn.textContent = "Generate signal";
+    }
+  }
+}
+
+async function runBacktestNow() {
+  if (backtestRunInFlight) return;
+  const symbol = getBacktestTargetSymbol();
+  if (!symbol) {
+    if (backtestStatusEl) backtestStatusEl.textContent = "Select a market first.";
+    return;
+  }
+  backtestRunInFlight = true;
+  if (runBacktestNowBtn) {
+    runBacktestNowBtn.disabled = true;
+    runBacktestNowBtn.textContent = "Running...";
+  }
+  if (backtestStatusEl) backtestStatusEl.textContent = "Running last 1h 1m backtest...";
+  try {
+    const candles = await fetchHistoricalCandles(symbol, 60, 180);
+    const score = runCompositeBacktest(candles);
+    if (backtestWinRateEl) backtestWinRateEl.textContent = `${score.winRate.toFixed(1)}%`;
+    if (backtestTradeCountEl) backtestTradeCountEl.textContent = String(score.tested);
+    if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = `${score.wins} / ${score.losses}`;
+    if (backtestStatusEl) {
+      backtestStatusEl.textContent = score.tested
+        ? `Backtest complete over the last hour.`
+        : "Backtest complete, but no qualified signals were found in the last hour.";
+    }
+  } catch (err) {
+    if (backtestStatusEl) backtestStatusEl.textContent = `Backtest failed: ${err?.message || "unknown error"}`;
+    if (backtestWinRateEl) backtestWinRateEl.textContent = "--";
+    if (backtestTradeCountEl) backtestTradeCountEl.textContent = "--";
+    if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = "--";
+  } finally {
+    backtestRunInFlight = false;
+    if (runBacktestNowBtn) {
+      runBacktestNowBtn.disabled = false;
+      runBacktestNowBtn.textContent = "Run test now";
+    }
+  }
 }
 
 function updateTradeProfitSummary() {
@@ -8139,11 +8933,20 @@ function setActiveAppTab(tabName) {
     panel.classList.toggle("active", isActive);
     panel.hidden = !isActive;
   });
+  if (panelTabName !== "backtest") {
+    stopBacktestCountdown();
+  }
   if (panelTabName === "chart") {
     requestAnimationFrame(() => {
       renderMiniChart(getBuiltCandles());
     });
     scheduleChartResize();
+  } else if (panelTabName === "backtest" && currentSymbol) {
+    setTimeout(() => {
+      if (currentAppTab === "backtest" && !backtestSignalInFlight) {
+        generateBacktestSignalNow().catch(() => {});
+      }
+    }, 0);
   }
   const hideForChart2 = tabName === "chart_2";
   chart2HideEls?.forEach((el) => {
@@ -8429,11 +9232,17 @@ function onSymbolChange() {
   const symbol = symbolSelect.value;
   const display = symbolSelect.selectedOptions[0]?.textContent || "--";
   const pip = Number(symbolSelect.selectedOptions[0]?.dataset?.pip || "0");
+  const defaultBarrier = getDefaultBarrierForDisplay(display);
 
   symbolName.textContent = display;
   symbolPrice.textContent = "--";
   currentSymbol = symbol;
   currentPip = pip;
+  if (defaultBarrier != null) {
+    if (barrierInput) barrierInput.value = defaultBarrier;
+    if (sidebarBarrierInputEl) sidebarBarrierInputEl.value = defaultBarrier;
+    syncBarrierControls();
+  }
 
   if (tickStreamId && ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify({ forget: tickStreamId }));
@@ -9048,6 +9857,23 @@ function init() {
   toggleAutoBtn = document.getElementById("toggleAuto");
   toggleAutoConfigBtn = document.getElementById("toggleAutoConfig");
   toggleAutoResultsBtn = document.getElementById("toggleAutoResults");
+  generateBacktestSignalBtn = document.getElementById("generateBacktestSignal");
+  runBacktestNowBtn = document.getElementById("runBacktestNow");
+  backtestStatusEl = document.getElementById("backtestStatus");
+  backtestContextEl = document.getElementById("backtestContext");
+  backtestDirectionEl = document.getElementById("backtestDirection");
+  backtestConfidenceEl = document.getElementById("backtestConfidence");
+  backtestEntryPriceEl = document.getElementById("backtestEntryPrice");
+  backtestEntryAtEl = document.getElementById("backtestEntryAt");
+  backtestCountdownEl = document.getElementById("backtestCountdown");
+  backtestWinRateEl = document.getElementById("backtestWinRate");
+  backtestTradeCountEl = document.getElementById("backtestTradeCount");
+  backtestWinsLossesEl = document.getElementById("backtestWinsLosses");
+  backtestReasonsEl = document.getElementById("backtestReasons");
+  backtestBullScoreEl = document.getElementById("backtestBullScore");
+  backtestBearScoreEl = document.getElementById("backtestBearScore");
+  backtestAnalysisChartEl = document.getElementById("backtestAnalysisChart");
+  backtestReadyTradeEl = document.getElementById("backtestReadyTrade");
   chart2HideEls = document.querySelectorAll(".chart2-hide");
   tradeModeTabsEl = document.getElementById("tradeModeTabs");
   proposalsCardEl = document.getElementById("proposalsCard");
@@ -9096,48 +9922,7 @@ function init() {
       return;
     }
     const price = priceStr ? Number(priceStr) : Number(stakeInput?.value || "0");
-    if (!price) {
-      setStatus("Invalid buy price", true);
-      return;
-    }
-    setStatus("Placing trade...");
-    wsRequest({ buy: proposalId, price })
-      .then((res) => {
-        const buy = res.buy;
-        const contractId = buy?.contract_id ?? "--";
-        const buyPrice = buy?.buy_price ?? price;
-        setStatus(`Trade opened. Contract ${contractId}, price ${buyPrice}`);
-        tradeResults.unshift({
-          time: Date.now(),
-          success: true,
-          contractId,
-          price: buyPrice,
-          profit: null,
-          direction: currentDirection,
-          isSold: false,
-          expiry: null,
-        });
-        tradeResults = tradeResults.slice(0, 20);
-        renderTradeResults();
-        if (contractId && contractId !== "--") {
-          subscribeOpenContract(contractId);
-        }
-      })
-      .catch((err) => {
-        setStatus(err.message || "Buy failed", true);
-        tradeResults.unshift({
-          time: Date.now(),
-          success: false,
-          contractId: null,
-          price: price,
-          profit: null,
-          direction: currentDirection,
-          isSold: true,
-          expiry: null,
-        });
-        tradeResults = tradeResults.slice(0, 20);
-        renderTradeResults();
-      });
+    executeProposalBuy(proposalId, price, currentDirection);
   });
 
   tabs.forEach((tab) => {
@@ -9268,6 +10053,21 @@ function init() {
     if (chartTfPickerEl?.contains(target)) return;
     if (chartBodyEl?.contains(target)) return;
     hideTimeframePicker();
+  });
+
+  document.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const generateBtn = target.closest("#generateBacktestSignal");
+    const runBtn = target.closest("#runBacktestNow");
+    const readyBuyBtn = target.closest("#backtestReadyBuyBtn");
+    if (generateBtn) {
+      handleGenerateBacktestSignalClick();
+    } else if (runBtn) {
+      handleRunBacktestNowClick();
+    } else if (readyBuyBtn && backtestReadyProposal) {
+      executeProposalBuy(backtestReadyProposal.proposalId, backtestReadyProposal.askPrice, backtestReadyProposal.direction);
+    }
   });
 
   miniChartCanvas?.addEventListener("wheel", (event) => {
@@ -9705,6 +10505,11 @@ function init() {
     if (getActiveTradeMode() !== "rise_fall") return;
     scheduleProposalRefresh(true);
   });
+  generateBacktestSignalBtn?.addEventListener("click", handleGenerateBacktestSignalClick);
+  runBacktestNowBtn?.addEventListener("click", handleRunBacktestNowClick);
+
+  window.__generateBacktestSignalNow = handleGenerateBacktestSignalClick;
+  window.__runBacktestNow = handleRunBacktestNowClick;
 
   setActiveTab("higher_lower");
   setActiveAppTab("settings");

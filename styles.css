@@ -164,7 +164,7 @@ button.small {
 
 .app-tabs {
   display: grid;
-  grid-template-columns: repeat(5, 1fr);
+  grid-template-columns: repeat(6, 1fr);
   gap: 8px;
   margin: 8px 0 12px;
 }
@@ -197,6 +197,162 @@ button.small {
 
 .app-panel.active {
   display: block;
+}
+
+.backtest-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.backtest-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  position: relative;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.backtest-actions-body {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: flex-start;
+  margin-top: 2px;
+}
+
+.backtest-actions button {
+  position: relative;
+  z-index: 4;
+  pointer-events: auto;
+}
+
+.backtest-stat-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.backtest-why-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(0, 1.5fr) minmax(240px, 1fr);
+  align-items: start;
+}
+
+.backtest-reasons {
+  display: grid;
+  gap: 8px;
+  min-height: 54px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #1d2531;
+  background: #10151d;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.backtest-reason-item {
+  color: var(--text);
+}
+
+.backtest-reason-item strong {
+  color: #d8e1ee;
+  font-weight: 700;
+}
+
+.backtest-analysis-chart {
+  display: grid;
+  gap: 10px;
+  min-height: 54px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  border: 1px solid #1d2531;
+  background: #10151d;
+}
+
+.backtest-analysis-chart canvas {
+  width: 100%;
+  height: 180px;
+  display: block;
+  border-radius: 12px;
+  background: #111821;
+}
+
+.backtest-analysis-row {
+  display: grid;
+  gap: 6px;
+}
+
+.backtest-analysis-label {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  color: var(--text);
+  font-size: 12px;
+}
+
+.backtest-analysis-track {
+  height: 10px;
+  border-radius: 999px;
+  background: #0d1219;
+  overflow: hidden;
+  border: 1px solid #1d2635;
+}
+
+.backtest-analysis-fill {
+  height: 100%;
+  border-radius: 999px;
+}
+
+.backtest-analysis-fill.buy {
+  background: linear-gradient(90deg, #0db787, #22d3a5);
+}
+
+.backtest-analysis-fill.sell {
+  background: linear-gradient(90deg, #e15b64, #ff7b84);
+}
+
+.backtest-ready-trade {
+  display: grid;
+  gap: 10px;
+  min-height: 54px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #1d2531;
+  background: #10151d;
+  color: var(--muted);
+}
+
+.backtest-ready-summary {
+  display: grid;
+  gap: 4px;
+  color: var(--text);
+}
+
+.backtest-ready-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.backtest-ready-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.backtest-buy-btn {
+  background: #0db787;
+  color: #0b1117;
+  border: 0;
+  font-weight: 700;
+}
+
+.backtest-buy-btn[disabled] {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .chart2-only {
@@ -1201,6 +1357,12 @@ button.small {
   .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child,
   .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
     display: none;
+  }
+}
+
+@media (max-width: 979px) {
+  .backtest-why-grid {
+    grid-template-columns: 1fr;
   }
 }
 

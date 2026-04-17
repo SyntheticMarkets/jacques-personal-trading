@@ -35,6 +35,7 @@
           <button class="app-tab" data-app-tab="results" role="tab" aria-selected="false">Results</button>
           <button class="app-tab" data-app-tab="chart_2" role="tab" aria-selected="false">Chart 2</button>
           <button class="app-tab" data-app-tab="auto" role="tab" aria-selected="false">Auto</button>
+          <button class="app-tab" data-app-tab="backtest" role="tab" aria-selected="false">Backtest</button>
         </nav>
         <div id="desktopSidebarExtra" class="desktop-sidebar-extra"></div>
       </aside>
@@ -275,6 +276,78 @@
               <button id="toggleAutoResults" class="ghost small" aria-expanded="true">Collapse</button>
             </div>
             <div id="autoResults" class="trade-list auto-results-list"></div>
+          </div>
+        </div>
+      </section>
+      </section>
+
+      <section class="app-panel" data-app-panel="backtest" hidden>
+      <section class="card trade-section">
+        <header class="card-head">
+          <h2>Backtest</h2>
+        </header>
+        <div class="backtest-panel">
+          <div id="backtestStatus" class="trade-meta">Ready.</div>
+          <div id="backtestContext" class="trade-meta">--</div>
+          <div class="backtest-actions backtest-actions-body">
+            <button id="generateBacktestSignal" class="ghost small" type="button" onclick="window.__generateBacktestSignalNow && window.__generateBacktestSignalNow()">Generate signal</button>
+            <button id="runBacktestNow" class="ghost small" type="button" onclick="window.__runBacktestNow && window.__runBacktestNow()">Run test now</button>
+          </div>
+          <div class="backtest-stat-grid">
+            <div class="signal-item">
+              <div class="field-label">Direction</div>
+              <div id="backtestDirection" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Confidence</div>
+              <div id="backtestConfidence" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Watch Price</div>
+              <div id="backtestEntryPrice" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Enter At</div>
+              <div id="backtestEntryAt" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Countdown</div>
+              <div id="backtestCountdown" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Last 1h Win Rate</div>
+              <div id="backtestWinRate" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Tested Signals</div>
+              <div id="backtestTradeCount" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Wins / Losses</div>
+              <div id="backtestWinsLosses" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Bull Score</div>
+              <div id="backtestBullScore" class="field-value">--</div>
+            </div>
+            <div class="signal-item">
+              <div class="field-label">Bear Score</div>
+              <div id="backtestBearScore" class="field-value">--</div>
+            </div>
+          </div>
+          <div class="backtest-why-grid">
+            <div>
+              <div class="field-label">Why</div>
+              <div id="backtestReasons" class="backtest-reasons">--</div>
+            </div>
+            <div>
+              <div class="field-label">Analysis</div>
+              <div id="backtestAnalysisChart" class="backtest-analysis-chart">--</div>
+            </div>
+          </div>
+          <div>
+            <div class="field-label">Trade Ready</div>
+            <div id="backtestReadyTrade" class="backtest-ready-trade">--</div>
           </div>
         </div>
       </section>
