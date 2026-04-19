@@ -135,6 +135,7 @@ let backtestConfidenceEl;
 let backtestEntryPriceEl;
 let backtestEntryAtEl;
 let backtestCountdownEl;
+let backtestEntryStateEl;
 let backtestWinRateEl;
 let backtestTradeCountEl;
 let backtestWinsLossesEl;
@@ -165,6 +166,7 @@ let backtestSignalTargetSymbol = null;
 let backtestSignalSchedule = null;
 let backtestPendingPrediction = null;
 let backtestCommittedSignal = null;
+let backtestEntryDecision = null;
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -8307,6 +8309,9 @@ function buildCompositeBacktestSignal(candles, options = {}) {
   const referencePrice = Number.isFinite(options.referencePrice)
     ? Number(options.referencePrice)
     : Number(candles[candles.length - 1]?.close);
+  const microConfirmation = buildBacktestMicroConfirmation(candles, referencePrice);
+  if (microConfirmation?.direction === "CALL") pushVote("CALL", microConfirmation.weight, "Micro Confirm", microConfirmation.price, microConfirmation.reason);
+  else if (microConfirmation?.direction === "PUT") pushVote("PUT", microConfirmation.weight, "Micro Confirm", microConfirmation.price, microConfirmation.reason);
   const avgRange = getRecentAverageRange(candles, 20);
   const filteredVotes = votes.filter((vote) => isVoteUsableForBacktestSignal(vote, referencePrice, avgRange));
   const callWeight = filteredVotes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
@@ -8476,6 +8481,9 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
   const bottomPad = 14;
   const chartWidth = width - leftPad - rightPad;
   const chartHeight = height - topPad - bottomPad;
+  const bodyBarrierThreshold = getActiveTradeMode() === "higher_lower"
+    ? Math.abs(Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0"))
+    : 0;
   ctx.clearRect(0, 0, width, height);
   ctx.fillStyle = "#111821";
   ctx.fillRect(0, 0, width, height);
@@ -8508,14 +8516,18 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
     const lowY = priceToY(candle.low);
     const top = Math.min(openY, closeY);
     const bodyH = Math.max(2, Math.abs(closeY - openY));
+    const bodySize = Math.abs(Number(candle.close) - Number(candle.open));
     const bullish = candle.close >= candle.open;
+    const bodyClearsBarrier = !Number.isFinite(bodyBarrierThreshold) || bodyBarrierThreshold <= 0 || bodySize >= bodyBarrierThreshold;
     ctx.strokeStyle = "#3c4658";
     ctx.lineWidth = 2;
     ctx.beginPath();
     ctx.moveTo(x, highY);
     ctx.lineTo(x, lowY);
     ctx.stroke();
-    ctx.fillStyle = bullish ? "#3b8cff" : "#f0efe9";
+    ctx.fillStyle = bodyClearsBarrier
+      ? (bullish ? "#3b8cff" : "#f0efe9")
+      : (bullish ? "rgba(59,140,255,0.28)" : "rgba(240,239,233,0.28)");
     ctx.fillRect(Math.round(x - candleW / 2), Math.round(top), candleW, Math.round(bodyH));
   });
   ctx.strokeStyle = "rgba(35, 45, 58, 0.9)";
@@ -8625,6 +8637,98 @@ function clearBacktestReadyTrade() {
   }
 }
 
+function renderBacktestReadyTradeFromSharedState(direction) {
+  if (!backtestReadyTradeEl) return;
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const stake = Number(stakeInput?.value || "0");
+  const directionLabel = getDirectionLabel(direction);
+  const dirClass = direction === "CALL" ? "higher" : "lower";
+
+  if (isRiseFall) {
+    const quote = direction === "PUT" ? quickDirectionQuotes.PUT : quickDirectionQuotes.CALL;
+    if (!quote?.proposalId) {
+      backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Main chart proposal is not ready yet.</div>`;
+      return;
+    }
+    const payout = Number(quote.payout);
+    const profit = Number.isFinite(payout) ? payout - stake : null;
+    const priceAttr = Number.isFinite(quote.askPrice) ? `data-price="${quote.askPrice}"` : "";
+    backtestReadyProposal = {
+      proposalId: quote.proposalId,
+      direction,
+      askPrice: Number(quote.askPrice ?? stake),
+      payout,
+      expiryLabel: quote.expiryLabel || "--",
+      quoteMode: "shared-main-proposal",
+    };
+    backtestReadyTradeEl.innerHTML = `
+      <div class="trade-row">
+        <button class="trade-btn ${dirClass}" data-backtest-proposal="${quote.proposalId}" ${priceAttr}>
+          <div class="trade-title"><span class="trade-tag">${directionLabel}</span> • ${quote.expiryLabel || "live"}</div>
+          <div class="trade-meta">Profit: ${profit == null ? "--" : profit.toFixed(2)} (${quote.profitPct == null ? "--" : quote.profitPct.toFixed(1)}%)</div>
+          <div class="trade-meta">Shared main chart proposal</div>
+        </button>
+        <button class="buy-btn" data-backtest-proposal="${quote.proposalId}" ${priceAttr}>Buy</button>
+      </div>
+    `;
+    return;
+  }
+
+  const usableProposals = proposals.filter((item) => item && item.proposalId);
+  if (!usableProposals.length) {
+    backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Main chart proposals are not ready yet.</div>`;
+    return;
+  }
+  backtestReadyProposal = {
+    proposalId: usableProposals[0].proposalId,
+    direction,
+    askPrice: Number(usableProposals[0].askPrice ?? stake),
+    payout: Number(usableProposals[0].payout),
+    expiryLabel: "--",
+    quoteMode: "shared-main-proposal",
+  };
+  backtestReadyTradeEl.innerHTML = usableProposals.map((item) => {
+    const profit = item.payout == null || !stake ? null : item.payout - stake;
+    const barrierText = item.barrier == null ? "--" : formatPrice(item.barrier, currentPip);
+    const offsetText = item.offset == null ? "--" : formatOffset(item.offset, currentPip);
+    const countdown = formatCountdown(item.expiry);
+    const priceAttr = Number.isFinite(item.askPrice) ? `data-price="${item.askPrice}"` : "";
+    return `
+      <div class="trade-row">
+        <button class="trade-btn ${dirClass}" data-backtest-proposal="${item.proposalId}" ${priceAttr}>
+          <div class="trade-title"><span class="trade-tag">${directionLabel}</span> • ends in ${countdown}</div>
+          <div class="trade-meta">Profit: ${profit == null ? "--" : profit.toFixed(2)} (${item.profitPct == null ? "--" : item.profitPct.toFixed(1)}%)</div>
+          <div class="trade-meta">Barrier: ${barrierText} (offset ${offsetText})</div>
+        </button>
+        <button class="buy-btn" data-backtest-proposal="${item.proposalId}" ${priceAttr}>Buy</button>
+      </div>
+    `;
+  }).join("");
+}
+
+function resolveSharedProposalById(proposalId, direction) {
+  if (!proposalId) return null;
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  if (isRiseFall) {
+    const quote = direction === "PUT" ? quickDirectionQuotes.PUT : quickDirectionQuotes.CALL;
+    if (quote?.proposalId === proposalId) {
+      return {
+        proposalId,
+        askPrice: Number(quote.askPrice),
+        direction,
+      };
+    }
+    return null;
+  }
+  const match = proposals.find((item) => item?.proposalId === proposalId);
+  if (!match) return null;
+  return {
+    proposalId,
+    askPrice: Number(match.askPrice),
+    direction,
+  };
+}
+
 function executeProposalBuy(proposalId, price, direction) {
   if (!proposalId) {
     setStatus("Proposal not ready yet", true);
@@ -8698,106 +8802,16 @@ async function loadBacktestReadyProposal(prediction, schedule) {
   }
   backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Fetching ready quote...</div>`;
   const direction = prediction.direction === "PUT" ? "PUT" : "CALL";
-  let proposal = null;
-  let expiryLabel = "--";
-  let quoteMode = "fallback";
   try {
-    if (mode === "rise_fall") {
-      const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
-      const nowSec = Math.floor(Date.now() / 1000);
-      const durationSec = expiryChoice.mode === "candle_end"
-        ? Math.max(minDurationSec, Math.floor(schedule.candleOpenAt / 1000) - nowSec)
-        : Math.max(1, expiryChoice.duration);
-      const durationUnit = expiryChoice.mode === "candle_end" ? "s" : expiryChoice.unit;
-      expiryLabel = expiryChoice.label;
-      quoteMode = "live";
-      proposal = await getProposal({
-        symbol,
-        contractType: direction,
-        barrier: null,
-        stake,
-        durationSec,
-        durationUnit,
-      });
-    } else {
-      const offsetVal = Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5");
-      const strikePrice = Number.isFinite(prediction?.entryPrice) ? prediction.entryPrice : null;
-      const signedOffset = direction === "CALL" ? offsetVal : -offsetVal;
-      let barrier = strikePrice != null ? formatPrice(strikePrice, currentPip) : formatOffset(signedOffset, currentPip);
-      const durationSec = Math.max(60, Math.floor((schedule.candleOpenAt - schedule.entryAt) / 1000) || 60);
-      expiryLabel = `1m @ ${barrier}`;
-      try {
-        quoteMode = strikePrice != null ? "entry-strike" : "offset";
-        proposal = await getProposal({
-          symbol,
-          contractType: direction,
-          barrier,
-          stake,
-          durationSec,
-        });
-      } catch (err) {
-        if (strikePrice != null) {
-          barrier = formatOffset(signedOffset, currentPip);
-          expiryLabel = `1m @ ${barrier}`;
-          quoteMode = "nearest-offset";
-          proposal = await getProposal({
-            symbol,
-            contractType: direction,
-            barrier,
-            stake,
-            durationSec,
-          });
-        } else {
-        barrier = formatOffset(signedOffset, currentPip);
-        expiryLabel = `1m @ ${barrier}`;
-        quoteMode = "offset";
-        proposal = await getProposal({
-          symbol,
-          contractType: direction,
-          barrier,
-          stake,
-          durationSec,
-        });
-        }
-      }
-    }
+    const previousDirection = currentDirection;
+    setDirection(direction, { refresh: false });
+    await refreshProposals();
+    renderBacktestReadyTradeFromSharedState(direction);
+    return;
   } catch (err) {
     backtestReadyTradeEl.innerHTML = `<div class="trade-meta">Quote failed: ${err?.message || "unknown error"}</div>`;
     return;
   }
-  if (!proposal) {
-    backtestReadyTradeEl.innerHTML = `<div class="trade-meta">No quote returned.</div>`;
-    return;
-  }
-  const payout = Number(proposal.payout);
-  const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
-  const profit = Number.isFinite(payout) ? payout - stake : null;
-  backtestReadyProposal = {
-    proposalId: proposal.id,
-    direction,
-    askPrice,
-    payout,
-    expiryLabel,
-    quoteMode,
-  };
-  backtestReadyTradeEl.innerHTML = `
-    <div class="backtest-ready-summary">
-      <div><strong>${direction === "CALL" ? "BUY / UP" : "SELL / DOWN"}</strong> ready</div>
-      <div class="backtest-ready-meta">Quote ${expiryLabel}${
-        quoteMode === "entry-strike"
-          ? " • exact entry strike"
-          : quoteMode === "nearest-offset"
-            ? ` • exact strike ${formatPrice(prediction.entryPrice, currentPip)} unavailable, using nearest offset`
-            : quoteMode === "offset"
-              ? " • offset quote"
-              : ""
-      }</div>
-      <div class="backtest-ready-meta">Stake ${stake.toFixed(2)} • Payout ${Number.isFinite(payout) ? payout.toFixed(2) : "--"} • Profit ${Number.isFinite(profit) ? profit.toFixed(2) : "--"}</div>
-    </div>
-    <div class="backtest-ready-actions">
-      <button id="backtestReadyBuyBtn" class="backtest-buy-btn" type="button">Buy now</button>
-    </div>
-  `;
 }
 
 function stopBacktestCountdown() {
@@ -8833,12 +8847,233 @@ function computeBacktestSignalSchedule() {
   };
 }
 
+function aggregateCandlesBySeconds(candles, targetSeconds = 300) {
+  const sourceSeconds = 60;
+  const step = Math.max(1, Math.round(targetSeconds / sourceSeconds));
+  if (!Array.isArray(candles) || candles.length < step) return [];
+  const grouped = [];
+  for (let i = 0; i < candles.length; i += step) {
+    const slice = candles.slice(i, i + step);
+    if (slice.length < step) continue;
+    grouped.push({
+      time: slice[0].time,
+      open: slice[0].open,
+      high: Math.max(...slice.map((c) => c.high)),
+      low: Math.min(...slice.map((c) => c.low)),
+      close: slice[slice.length - 1].close,
+    });
+  }
+  return grouped;
+}
+
+function buildBacktestMicroConfirmation(candles, referencePrice) {
+  const recent = Array.isArray(candles) ? candles.slice(-10) : [];
+  if (recent.length < 5) return null;
+  const last = recent[recent.length - 1];
+  const prev = recent[recent.length - 2];
+  const avgRange = getRecentAverageRange(recent, recent.length);
+  const tolerance = Math.max(avgRange * 0.18, Math.abs(Number(referencePrice || last.close || 0)) * 0.00012);
+  let callWeight = 0;
+  let putWeight = 0;
+  const reasons = [];
+
+  const bullishEngulf = last.close > last.open && prev.close < prev.open && last.close >= prev.open && last.open <= prev.close;
+  const bearishEngulf = last.close < last.open && prev.close > prev.open && last.open >= prev.close && last.close <= prev.open;
+  if (bullishEngulf) {
+    callWeight += 1.8;
+    reasons.push("bullish engulfing");
+  }
+  if (bearishEngulf) {
+    putWeight += 1.8;
+    reasons.push("bearish engulfing");
+  }
+
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const body = Math.max(Math.abs(last.close - last.open), 0.00001);
+  if (lowerWick > body * 1.8 && last.close >= last.open) {
+    callWeight += 1.2;
+    reasons.push("bullish rejection wick");
+  }
+  if (upperWick > body * 1.8 && last.close <= last.open) {
+    putWeight += 1.2;
+    reasons.push("bearish rejection wick");
+  }
+
+  const closes = recent.slice(-5);
+  const bullCount = closes.filter((c) => c.close > c.open).length;
+  const bearCount = closes.filter((c) => c.close < c.open).length;
+  if (bullCount >= 4) {
+    callWeight += 0.8;
+    reasons.push("bullish candle sequence");
+  }
+  if (bearCount >= 4) {
+    putWeight += 0.8;
+    reasons.push("bearish candle sequence");
+  }
+
+  const microHighs = recent.slice(-4).map((c) => c.high);
+  const microLows = recent.slice(-4).map((c) => c.low);
+  if (microHighs.length >= 3) {
+    const highBand = Math.max(...microHighs) - Math.min(...microHighs);
+    if (highBand <= tolerance && last.close < Math.max(...microHighs)) {
+      putWeight += 1.0;
+      reasons.push("micro buy-side liquidity reject");
+    }
+  }
+  if (microLows.length >= 3) {
+    const lowBand = Math.max(...microLows) - Math.min(...microLows);
+    if (lowBand <= tolerance && last.close > Math.min(...microLows)) {
+      callWeight += 1.0;
+      reasons.push("micro sell-side liquidity reclaim");
+    }
+  }
+
+  const higherTimeframe = aggregateCandlesBySeconds(candles.slice(-25), 300);
+  if (higherTimeframe.length >= 3) {
+    const a = higherTimeframe[higherTimeframe.length - 3];
+    const b = higherTimeframe[higherTimeframe.length - 2];
+    const c = higherTimeframe[higherTimeframe.length - 1];
+    if (c.high > b.high && c.low > b.low && b.high > a.high) {
+      callWeight += 1.4;
+      reasons.push("5m structure up");
+    } else if (c.low < b.low && c.high < b.high && b.low < a.low) {
+      putWeight += 1.4;
+      reasons.push("5m structure down");
+    }
+  }
+
+  if (callWeight === 0 && putWeight === 0) return null;
+  return {
+    direction: callWeight >= putWeight ? "CALL" : "PUT",
+    weight: Math.max(callWeight, putWeight),
+    price: Number.isFinite(referencePrice) ? Number(referencePrice) : Number(last.close),
+    reason: reasons.join(" + "),
+  };
+}
+
+function buildBacktestEntryDecision(candles, direction, referencePrice, lockedPrediction = null) {
+  const recent = Array.isArray(candles) ? candles.slice(-8) : [];
+  if (!recent.length || !direction || !Number.isFinite(referencePrice)) {
+    return {
+      ready: false,
+      score: 0,
+      reason: "Waiting for micro confirmation",
+    };
+  }
+  const last = recent[recent.length - 1];
+  const prev = recent[recent.length - 2] || last;
+  const avgRange = getRecentAverageRange(recent, recent.length) || Math.abs(last.high - last.low) || 0.0001;
+  const tolerance = Math.max(avgRange * 0.18, Math.abs(referencePrice) * 0.00012);
+  let score = 0;
+  const reasons = [];
+  const bullish = direction === "CALL";
+  const bearish = direction === "PUT";
+  const candleHighs = recent.map((c) => c.high);
+  const candleLows = recent.map((c) => c.low);
+  const recentHigh = Math.max(...candleHighs);
+  const recentLow = Math.min(...candleLows);
+  const body = Math.max(Math.abs(last.close - last.open), 0.00001);
+  const upperWick = last.high - Math.max(last.open, last.close);
+  const lowerWick = Math.min(last.open, last.close) - last.low;
+
+  if (bullish) {
+    if (last.close >= referencePrice - tolerance) {
+      score += 2.5;
+      reasons.push("holding above entry");
+    }
+    if (last.close > last.open && last.close >= prev.high - tolerance * 0.4) {
+      score += 2.2;
+      reasons.push("bullish impulse candle");
+    }
+    if (lowerWick > body * 1.2) {
+      score += 1.2;
+      reasons.push("lower-wick reclaim");
+    }
+    const lowBand = Math.max(...candleLows.slice(-4)) - Math.min(...candleLows.slice(-4));
+    if (lowBand <= tolerance && last.close > recentLow + tolerance * 0.35) {
+      score += 1.2;
+      reasons.push("micro sell-side liquidity reclaimed");
+    }
+    if (recentLow <= referencePrice + tolerance && last.close >= referencePrice) {
+      score += 1.2;
+      reasons.push("retested entry zone");
+    }
+  }
+
+  if (bearish) {
+    if (last.close <= referencePrice + tolerance) {
+      score += 2.5;
+      reasons.push("holding below entry");
+    }
+    if (last.close < last.open && last.close <= prev.low + tolerance * 0.4) {
+      score += 2.2;
+      reasons.push("bearish impulse candle");
+    }
+    if (upperWick > body * 1.2) {
+      score += 1.2;
+      reasons.push("upper-wick reject");
+    }
+    const highBand = Math.max(...candleHighs.slice(-4)) - Math.min(...candleHighs.slice(-4));
+    if (highBand <= tolerance && last.close < recentHigh - tolerance * 0.35) {
+      score += 1.2;
+      reasons.push("micro buy-side liquidity rejected");
+    }
+    if (recentHigh >= referencePrice - tolerance && last.close <= referencePrice) {
+      score += 1.2;
+      reasons.push("retested entry zone");
+    }
+  }
+
+  const sameColorCount = recent.slice(-4).filter((c) => bullish ? c.close >= c.open : c.close <= c.open).length;
+  if (sameColorCount >= 3) {
+    score += 1.0;
+    reasons.push(bullish ? "bullish micro sequence" : "bearish micro sequence");
+  }
+
+  const dominantLevel = lockedPrediction?.winningVotes?.find((vote) => Number.isFinite(vote.price));
+  if (dominantLevel && Math.abs(dominantLevel.price - referencePrice) <= avgRange * 1.2) {
+    score += 0.8;
+    reasons.push("near dominant system level");
+  }
+
+  return {
+    ready: score >= 4.6,
+    score,
+    reason: reasons.join(" + ") || "Waiting for micro confirmation",
+  };
+}
+
+function renderBacktestEntryState(decision = null, schedule = null) {
+  if (!backtestEntryStateEl) return;
+  if (!decision) {
+    backtestEntryStateEl.textContent = "--";
+    return;
+  }
+  const badgeClass = decision.ready ? "enter" : "wait";
+  const badgeText = decision.ready ? "ENTER NOW" : "WAIT";
+  const now = Date.now();
+  const entryEtaMs = Number.isFinite(schedule?.entryAt) ? Math.max(0, schedule.entryAt - now) : 0;
+  const entryEtaSec = Math.ceil(entryEtaMs / 1000);
+  const etaText = Number.isFinite(schedule?.entryAt)
+    ? `${Math.floor(entryEtaSec / 60)}:${String(entryEtaSec % 60).padStart(2, "0")}`
+    : "--";
+  backtestEntryStateEl.innerHTML = `
+    <span class="entry-state-badge ${badgeClass}">${badgeText}</span>
+    <div class="entry-state-meta">
+      <div>Micro score ${decision.score.toFixed(1)} • ${decision.reason}</div>
+      <div>Entry window ${etaText}</div>
+    </div>
+  `;
+}
+
 function clearBacktestSignalFields(preserveChart = false) {
   if (backtestDirectionEl) backtestDirectionEl.textContent = "--";
   if (backtestConfidenceEl) backtestConfidenceEl.textContent = "--";
   if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = "--";
   if (backtestEntryAtEl) backtestEntryAtEl.textContent = "--";
   if (backtestCountdownEl) backtestCountdownEl.textContent = "--";
+  renderBacktestEntryState(null);
   if (backtestWinRateEl) backtestWinRateEl.textContent = "--";
   if (backtestTradeCountEl) backtestTradeCountEl.textContent = "--";
   if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = "--";
@@ -8855,6 +9090,7 @@ function stopBacktestSignalMonitor() {
   backtestSignalSchedule = null;
   backtestPendingPrediction = null;
   backtestCommittedSignal = null;
+  backtestEntryDecision = null;
   stopBacktestCountdown();
 }
 
@@ -8872,11 +9108,25 @@ async function updateBacktestSignalMonitor(candles, currentPriceOverride = null)
     ? Number(currentPriceOverride)
     : Number(candles[candles.length - 1]?.close);
   const replayCandles = buildReplayInputForNextCandle(candles, 60);
-  const prediction = buildCompositeBacktestSignal(replayCandles, { referencePrice });
+  const rawPrediction = buildCompositeBacktestSignal(replayCandles, { referencePrice });
+  const prediction = {
+    ...rawPrediction,
+    entryPrice: Number.isFinite(referencePrice) ? Number(referencePrice) : rawPrediction.entryPrice,
+    lockedSpotPrice: Number.isFinite(referencePrice) ? Number(referencePrice) : null,
+    referencePrice: Number.isFinite(referencePrice) ? Number(referencePrice) : rawPrediction.referencePrice,
+  };
   backtestPendingPrediction = prediction;
   renderBacktestAnalysisChart(prediction, candles, { currentPrice: referencePrice });
 
   const now = Date.now();
+  const entryDecision = buildBacktestEntryDecision(
+    candles,
+    (backtestCommittedSignal?.direction || prediction.direction || null),
+    Number.isFinite(referencePrice) ? Number(referencePrice) : Number(prediction.entryPrice),
+    backtestCommittedSignal || prediction
+  );
+  backtestEntryDecision = entryDecision;
+  renderBacktestEntryState(entryDecision, backtestSignalSchedule);
   if (backtestCountdownEl) {
     const target = now < backtestSignalSchedule.signalAt
       ? backtestSignalSchedule.signalAt
@@ -8889,7 +9139,7 @@ async function updateBacktestSignalMonitor(candles, currentPriceOverride = null)
     backtestCountdownEl.textContent = `${prefix}${min}:${String(sec).padStart(2, "0")}`;
   }
 
-  if (now < backtestSignalSchedule.signalAt || backtestCommittedSignal) {
+  if (now < backtestSignalSchedule.signalAt) {
     if (backtestDirectionEl) backtestDirectionEl.textContent = "WAITING";
     if (backtestConfidenceEl) backtestConfidenceEl.textContent = `${prediction.confidence}% live`;
     if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
@@ -8902,7 +9152,32 @@ async function updateBacktestSignalMonitor(candles, currentPriceOverride = null)
     return;
   }
 
-  backtestCommittedSignal = prediction;
+  if (backtestCommittedSignal) {
+    if (backtestDirectionEl) {
+      backtestDirectionEl.textContent = backtestCommittedSignal.direction === "CALL" ? "BUY / UP" : backtestCommittedSignal.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
+    }
+    if (backtestConfidenceEl) backtestConfidenceEl.textContent = `${backtestCommittedSignal.confidence}%`;
+    if (backtestBullScoreEl) backtestBullScoreEl.textContent = backtestCommittedSignal.callWeight ? backtestCommittedSignal.callWeight.toFixed(1) : "0.0";
+    if (backtestBearScoreEl) backtestBearScoreEl.textContent = backtestCommittedSignal.putWeight ? backtestCommittedSignal.putWeight.toFixed(1) : "0.0";
+    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(backtestCommittedSignal.entryPrice) ? formatPrice(backtestCommittedSignal.entryPrice, currentPip) : formatPrice(referencePrice ?? 0, currentPip);
+    renderBacktestReasons(backtestCommittedSignal.reasons);
+    if (backtestStatusEl) {
+      backtestStatusEl.textContent = `Signal locked. ${entryDecision.ready ? "Entry confirmed." : "Waiting for entry confirmation."}`;
+    }
+    return;
+  }
+
+  const lockedEntryPrice = Number.isFinite(referencePrice)
+    ? Number(referencePrice)
+    : Number.isFinite(prediction.entryPrice)
+      ? Number(prediction.entryPrice)
+      : null;
+  const lockedPrediction = {
+    ...prediction,
+    entryPrice: Number.isFinite(lockedEntryPrice) ? lockedEntryPrice : prediction.entryPrice,
+    lockedSpotPrice: Number.isFinite(referencePrice) ? Number(referencePrice) : null,
+  };
+  backtestCommittedSignal = lockedPrediction;
   const mode = getActiveTradeMode();
   const barrierText = mode === "higher_lower"
     ? formatOffset(Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5"), currentPip)
@@ -8911,19 +9186,28 @@ async function updateBacktestSignalMonitor(candles, currentPriceOverride = null)
     backtestContextEl.textContent = `${symbolSelect?.selectedOptions?.[0]?.textContent || backtestSignalTargetSymbol} • ${mode === "rise_fall" ? "Rise/Fall" : "Higher/Lower"} • Barrier ${barrierText}`;
   }
   if (backtestDirectionEl) {
-    backtestDirectionEl.textContent = prediction.direction === "CALL" ? "BUY / UP" : prediction.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
+    backtestDirectionEl.textContent = lockedPrediction.direction === "CALL" ? "BUY / UP" : lockedPrediction.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
   }
-  if (backtestConfidenceEl) backtestConfidenceEl.textContent = prediction.direction ? `${prediction.confidence}%` : "--";
-  if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
-  if (backtestBearScoreEl) backtestBearScoreEl.textContent = prediction.putWeight ? prediction.putWeight.toFixed(1) : "0.0";
-  if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(prediction.entryPrice) ? formatPrice(prediction.entryPrice, currentPip) : formatPrice(referencePrice ?? 0, currentPip);
+  if (backtestConfidenceEl) backtestConfidenceEl.textContent = lockedPrediction.direction ? `${lockedPrediction.confidence}%` : "--";
+  if (backtestBullScoreEl) backtestBullScoreEl.textContent = lockedPrediction.callWeight ? lockedPrediction.callWeight.toFixed(1) : "0.0";
+  if (backtestBearScoreEl) backtestBearScoreEl.textContent = lockedPrediction.putWeight ? lockedPrediction.putWeight.toFixed(1) : "0.0";
+  if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(lockedPrediction.entryPrice) ? formatPrice(lockedPrediction.entryPrice, currentPip) : formatPrice(referencePrice ?? 0, currentPip);
   if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(backtestSignalSchedule.entryAt)} (${formatClockTime(backtestSignalSchedule.candleOpenAt)} candle)`;
-  renderBacktestReasons(prediction.reasons);
-  await loadBacktestReadyProposal(prediction, backtestSignalSchedule);
+  renderBacktestReasons(lockedPrediction.reasons);
+  renderBacktestAnalysisChart(lockedPrediction, candles, { currentPrice: referencePrice });
+  const lockedDecision = buildBacktestEntryDecision(
+    candles,
+    lockedPrediction.direction,
+    Number.isFinite(referencePrice) ? Number(referencePrice) : Number(lockedPrediction.entryPrice),
+    lockedPrediction
+  );
+  backtestEntryDecision = lockedDecision;
+  renderBacktestEntryState(lockedDecision, backtestSignalSchedule);
+  await loadBacktestReadyProposal(lockedPrediction, backtestSignalSchedule);
   startBacktestCountdown(backtestSignalSchedule.entryAt);
   if (backtestStatusEl) {
-    backtestStatusEl.textContent = prediction.direction
-      ? `Signal locked. ${prediction.direction === "CALL" ? "BUY" : "SELL"} prepared for ${formatClockTime(backtestSignalSchedule.entryAt)}.`
+    backtestStatusEl.textContent = lockedPrediction.direction
+      ? `Signal locked at ${formatPrice(lockedPrediction.entryPrice, currentPip)}. ${lockedPrediction.direction === "CALL" ? "BUY" : "SELL"} prepared for ${formatClockTime(backtestSignalSchedule.entryAt)}.`
       : "No clear edge at T-6s. Wait for the next cycle.";
   }
 }
@@ -9164,12 +9448,6 @@ function setActiveAppTab(tabName) {
       renderMiniChart(getBuiltCandles());
     });
     scheduleChartResize();
-  } else if (panelTabName === "backtest" && currentSymbol) {
-    setTimeout(() => {
-      if (currentAppTab === "backtest" && !backtestSignalInFlight) {
-        generateBacktestSignalNow().catch(() => {});
-      }
-    }, 0);
   }
   const hideForChart2 = tabName === "chart_2";
   chart2HideEls?.forEach((el) => {
@@ -9931,6 +10209,10 @@ function renderTradeList() {
       </div>
     `;
   }).join("");
+
+  if (currentAppTab === "backtest" && backtestCommittedSignal?.direction && backtestReadyTradeEl) {
+    renderBacktestReadyTradeFromSharedState(backtestCommittedSignal.direction);
+  }
 }
 
 function renderTradeResults() {
@@ -10090,6 +10372,7 @@ function init() {
   backtestEntryPriceEl = document.getElementById("backtestEntryPrice");
   backtestEntryAtEl = document.getElementById("backtestEntryAt");
   backtestCountdownEl = document.getElementById("backtestCountdown");
+  backtestEntryStateEl = document.getElementById("backtestEntryState");
   backtestWinRateEl = document.getElementById("backtestWinRate");
   backtestTradeCountEl = document.getElementById("backtestTradeCount");
   backtestWinsLossesEl = document.getElementById("backtestWinsLosses");
@@ -10285,12 +10568,20 @@ function init() {
     const generateBtn = target.closest("#generateBacktestSignal");
     const runBtn = target.closest("#runBacktestNow");
     const readyBuyBtn = target.closest("#backtestReadyBuyBtn");
+    const sharedReadyBuyBtn = target.closest(".backtest-ready-trade .buy-btn");
     if (generateBtn) {
       handleGenerateBacktestSignalClick();
     } else if (runBtn) {
       handleRunBacktestNowClick();
     } else if (readyBuyBtn && backtestReadyProposal) {
       executeProposalBuy(backtestReadyProposal.proposalId, backtestReadyProposal.askPrice, backtestReadyProposal.direction);
+    } else if (sharedReadyBuyBtn) {
+      const proposalId = sharedReadyBuyBtn.getAttribute("data-backtest-proposal");
+      const price = Number(sharedReadyBuyBtn.getAttribute("data-price"));
+      const resolved = resolveSharedProposalById(proposalId, currentDirection);
+      if (resolved?.proposalId) {
+        executeProposalBuy(resolved.proposalId, Number.isFinite(resolved.askPrice) ? resolved.askPrice : price, resolved.direction);
+      }
     }
   });
 

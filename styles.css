@@ -325,6 +325,50 @@ button.small {
   color: var(--muted);
 }
 
+.backtest-entry-state {
+  min-height: 54px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid #1d2531;
+  background: #10151d;
+  color: var(--text);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.backtest-entry-state .entry-state-badge {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 108px;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid #29364a;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+}
+
+.backtest-entry-state .entry-state-badge.wait {
+  color: #f6d77a;
+  background: rgba(246, 215, 122, 0.1);
+  border-color: rgba(246, 215, 122, 0.28);
+}
+
+.backtest-entry-state .entry-state-badge.enter {
+  color: #0b1117;
+  background: #23d3a5;
+  border-color: #23d3a5;
+}
+
+.backtest-entry-state .entry-state-meta {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
 .backtest-ready-summary {
   display: grid;
   gap: 4px;
