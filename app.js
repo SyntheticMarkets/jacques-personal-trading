@@ -160,6 +160,11 @@ let backtestRunInFlight = false;
 let backtestEntryTargetMs = null;
 let backtestSignalInFlight = false;
 let backtestReadyProposal = null;
+let backtestSignalArmed = false;
+let backtestSignalTargetSymbol = null;
+let backtestSignalSchedule = null;
+let backtestPendingPrediction = null;
+let backtestCommittedSignal = null;
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -404,6 +409,15 @@ let chartLastDrawingTapId = null;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
+let backtestChartPoints = 28;
+let backtestChartOffset = 0;
+let backtestChartDragX = null;
+let backtestChartDragY = null;
+let backtestChartDragMode = null;
+let backtestChartVerticalOffset = 0;
+let backtestChartVerticalScale = 1;
+let backtestChartViewportState = null;
+let backtestChartRenderState = null;
 let autoTradeSessionCount = 0;
 let currentTrendMode = "EMA";
 let signalToastTimer = null;
@@ -7476,6 +7490,65 @@ function resetChartView() {
   renderMiniChart(getBuiltCandles());
 }
 
+function getBacktestChartOffsetBounds(candles) {
+  const built = Array.isArray(candles) ? candles : [];
+  return {
+    min: 0,
+    max: Math.max(0, built.length - backtestChartPoints),
+  };
+}
+
+function getVisibleBacktestChartWindow(candles) {
+  const built = Array.isArray(candles) ? candles : [];
+  const { min, max } = getBacktestChartOffsetBounds(built);
+  backtestChartOffset = clamp(backtestChartOffset, min, max);
+  const end = built.length - backtestChartOffset;
+  const start = Math.max(0, end - Math.max(1, backtestChartPoints));
+  const points = built.slice(start, end);
+  return { points, start, end, visibleSlotCount: Math.max(points.length, 1) };
+}
+
+function rerenderBacktestAnalysisChart() {
+  if (!backtestChartRenderState) return;
+  renderBacktestAnalysisChart(
+    backtestChartRenderState.prediction,
+    backtestChartRenderState.candles,
+    backtestChartRenderState.options,
+  );
+}
+
+function panBacktestChartByPixels(deltaX) {
+  const candles = backtestChartRenderState?.candles;
+  const viewport = backtestChartViewportState;
+  if (!Array.isArray(candles) || !candles.length || !viewport) return;
+  const pixelsPerCandle = viewport.plotW / Math.max(1, viewport.points.length || backtestChartPoints);
+  const candleShift = Math.round(deltaX / Math.max(1, pixelsPerCandle));
+  if (!candleShift) return;
+  const { min, max } = getBacktestChartOffsetBounds(candles);
+  backtestChartOffset = clamp(backtestChartOffset + candleShift, min, max);
+  rerenderBacktestAnalysisChart();
+}
+
+function panBacktestChartVertically(deltaY) {
+  const viewport = backtestChartViewportState;
+  if (!viewport || !viewport.points?.length) return;
+  const lows = viewport.points.map((c) => c.low);
+  const highs = viewport.points.map((c) => c.high);
+  const range = Math.max(0.0000001, Math.max(...highs) - Math.min(...lows));
+  const plotHeight = Math.max(1, viewport.plotH);
+  backtestChartVerticalOffset += (deltaY / plotHeight) * range;
+  rerenderBacktestAnalysisChart();
+}
+
+function scaleBacktestChartVertically(deltaY) {
+  const candles = backtestChartRenderState?.candles;
+  if (!Array.isArray(candles) || !candles.length) return;
+  const sensitivity = 0.012;
+  const nextScale = backtestChartVerticalScale * Math.exp((-deltaY) * sensitivity);
+  backtestChartVerticalScale = clamp(nextScale, 0.5, 8);
+  rerenderBacktestAnalysisChart();
+}
+
 function setStatus(msg, isError = false) {
   if (!statusEl) return;
   statusEl.textContent = msg;
@@ -7944,6 +8017,11 @@ function onMessage(event) {
     const { candles } = candleBuilder.update(data.tick);
     const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
     updateSignalFromCandles(allCandles, { live: true });
+    if (backtestSignalArmed && backtestSignalTargetSymbol === currentSymbol) {
+      updateBacktestSignalMonitor(allCandles, Number(price)).catch((err) => {
+        if (backtestStatusEl) backtestStatusEl.textContent = `Backtest monitor failed: ${err?.message || "unknown error"}`;
+      });
+    }
   }
   if (data.msg_type === "balance" && data.balance) {
     updateAccountSummary(data.balance);
@@ -8320,12 +8398,12 @@ function renderBacktestReasons(reasons) {
 function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
   if (!backtestAnalysisChartEl) return;
   if (!prediction || !Array.isArray(candles) || candles.length < 5) {
+    backtestChartViewportState = null;
+    backtestChartRenderState = null;
     backtestAnalysisChartEl.textContent = "--";
     return;
   }
-  if (!Number.isFinite(renderBacktestAnalysisChart._pan)) {
-    renderBacktestAnalysisChart._pan = 0;
-  }
+  backtestChartRenderState = { prediction, candles, options };
   const callWeight = Number(prediction?.callWeight || 0);
   const putWeight = Number(prediction?.putWeight || 0);
   const currentPrice = Number.isFinite(options.currentPrice)
@@ -8352,12 +8430,7 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
   if (!(canvas instanceof HTMLCanvasElement)) return;
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
-  const windowSize = 28;
-  const maxPan = Math.max(0, candles.length - windowSize);
-  renderBacktestAnalysisChart._pan = clamp(renderBacktestAnalysisChart._pan || 0, 0, maxPan);
-  const endIndex = candles.length - renderBacktestAnalysisChart._pan;
-  const startIndex = Math.max(0, endIndex - windowSize);
-  const visible = candles.slice(startIndex, endIndex);
+  const { points: visible, start: startIndex } = getVisibleBacktestChartWindow(candles);
   const levels = [];
   if (Number.isFinite(prediction.entryPrice)) {
     levels.push({
@@ -8387,8 +8460,13 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
     lows.push(level.price);
     highs.push(level.price);
   });
-  const minPrice = Math.min(...lows);
-  const maxPrice = Math.max(...highs);
+  const baseMin = Math.min(...lows);
+  const baseMax = Math.max(...highs);
+  const baseRange = Math.max(baseMax - baseMin, 0.0001);
+  const scaledRange = baseRange / backtestChartVerticalScale;
+  const midpoint = ((baseMin + baseMax) / 2) + backtestChartVerticalOffset;
+  const minPrice = midpoint - (scaledRange / 2);
+  const maxPrice = midpoint + (scaledRange / 2);
   const priceRange = Math.max(maxPrice - minPrice, 0.0001);
   const width = canvas.width;
   const height = canvas.height;
@@ -8406,6 +8484,21 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
     return topPad + chartHeight - (norm * chartHeight);
   };
   const candleW = Math.max(4, Math.floor(chartWidth / Math.max(visible.length, 1) * 0.58));
+  backtestChartViewportState = {
+    leftPad,
+    rightPad,
+    topPad,
+    bottomPad,
+    width,
+    height,
+    plotW: chartWidth,
+    plotH: chartHeight,
+    start: startIndex,
+    points: visible,
+    toY: priceToY,
+    min: minPrice,
+    max: maxPrice,
+  };
   visible.forEach((candle, index) => {
     const xStep = chartWidth / Math.max(visible.length, 1);
     const x = leftPad + (index * xStep) + (xStep / 2);
@@ -8445,25 +8538,66 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
     ctx.font = "11px Segoe UI";
     ctx.fillText(level.label, leftPad + chartWidth + 8, y + 4);
   });
-  let dragStartX = null;
-  let dragStartPan = renderBacktestAnalysisChart._pan || 0;
+  if (Number.isFinite(currentPrice) && visible.length) {
+    const currentY = priceToY(currentPrice);
+    const xStep = chartWidth / Math.max(visible.length, 1);
+    const currentX = leftPad + ((visible.length - 1) * xStep) + (xStep / 2);
+    const priceLabel = formatPrice(currentPrice, currentPip);
+    ctx.fillStyle = "#79a2ff";
+    ctx.beginPath();
+    ctx.arc(currentX, currentY, 3.5, 0, Math.PI * 2);
+    ctx.fill();
+    const tagPaddingX = 8;
+    const tagH = 20;
+    ctx.font = "bold 11px Segoe UI";
+    const textW = ctx.measureText(priceLabel).width;
+    const tagW = Math.max(52, textW + (tagPaddingX * 2));
+    const tagX = width - tagW - 4;
+    const tagY = clamp(currentY - (tagH / 2), topPad, height - bottomPad - tagH);
+    ctx.fillStyle = "#79a2ff";
+    if (typeof ctx.roundRect === "function") {
+      ctx.beginPath();
+      ctx.roundRect(tagX, tagY, tagW, tagH, 8);
+      ctx.fill();
+    } else {
+      ctx.fillRect(tagX, tagY, tagW, tagH);
+    }
+    ctx.fillStyle = "#0f1520";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(priceLabel, tagX + (tagW / 2), tagY + (tagH / 2) + 0.5);
+    ctx.textAlign = "left";
+    ctx.textBaseline = "alphabetic";
+  }
   canvas.style.cursor = "grab";
+  canvas.style.touchAction = "none";
   canvas.onpointerdown = (event) => {
-    dragStartX = event.clientX;
-    dragStartPan = renderBacktestAnalysisChart._pan || 0;
-    canvas.style.cursor = "grabbing";
+    backtestChartDragX = event.clientX;
+    backtestChartDragY = event.clientY;
+    const rect = canvas.getBoundingClientRect();
+    const localX = event.clientX - rect.left;
+    backtestChartDragMode = localX >= (width - rightPad) ? "scale" : "pan";
+    canvas.style.cursor = backtestChartDragMode === "scale" ? "ns-resize" : "grabbing";
     canvas.setPointerCapture?.(event.pointerId);
   };
   canvas.onpointermove = (event) => {
-    if (dragStartX == null) return;
-    const stepPx = chartWidth / Math.max(visible.length, 1);
-    const deltaBars = Math.round((event.clientX - dragStartX) / Math.max(stepPx, 1));
-    renderBacktestAnalysisChart._pan = clamp(dragStartPan - deltaBars, 0, maxPan);
-    renderBacktestAnalysisChart(prediction, candles, options);
+    if (backtestChartDragX == null || backtestChartDragY == null || !backtestChartDragMode) return;
+    const deltaX = event.clientX - backtestChartDragX;
+    const deltaY = event.clientY - backtestChartDragY;
+    if (backtestChartDragMode === "scale") {
+      scaleBacktestChartVertically(deltaY);
+    } else {
+      panBacktestChartByPixels(deltaX);
+      panBacktestChartVertically(deltaY);
+    }
+    backtestChartDragX = event.clientX;
+    backtestChartDragY = event.clientY;
   };
   const endDrag = (event) => {
-    if (dragStartX == null) return;
-    dragStartX = null;
+    if (backtestChartDragX == null && backtestChartDragY == null) return;
+    backtestChartDragX = null;
+    backtestChartDragY = null;
+    backtestChartDragMode = null;
     canvas.style.cursor = "grab";
     canvas.releasePointerCapture?.(event.pointerId);
   };
@@ -8471,10 +8605,16 @@ function renderBacktestAnalysisChart(prediction, candles = [], options = {}) {
   canvas.onpointercancel = endDrag;
   canvas.onwheel = (event) => {
     event.preventDefault();
-    const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-    const step = dominantDelta > 0 ? 2 : -2;
-    renderBacktestAnalysisChart._pan = clamp((renderBacktestAnalysisChart._pan || 0) + step, 0, maxPan);
-    renderBacktestAnalysisChart(prediction, candles, options);
+    if (event.shiftKey) {
+      const dominantDelta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+      panBacktestChartByPixels(dominantDelta);
+      return;
+    }
+    const step = event.deltaY > 0 ? 2 : -2;
+    backtestChartPoints = clamp(backtestChartPoints + step, 8, 120);
+    const { min, max } = getBacktestChartOffsetBounds(candles);
+    backtestChartOffset = clamp(backtestChartOffset, min, max);
+    rerenderBacktestAnalysisChart();
   };
 }
 
@@ -8683,6 +8823,105 @@ function startBacktestCountdown(targetMs) {
   backtestCountdownTimer = setInterval(tick, 1000);
 }
 
+function computeBacktestSignalSchedule() {
+  const candleMs = 60000;
+  const nextCandleOpen = Math.ceil(Date.now() / candleMs) * candleMs;
+  return {
+    signalAt: nextCandleOpen - 6000,
+    entryAt: nextCandleOpen - 3000,
+    candleOpenAt: nextCandleOpen,
+  };
+}
+
+function clearBacktestSignalFields() {
+  if (backtestDirectionEl) backtestDirectionEl.textContent = "--";
+  if (backtestConfidenceEl) backtestConfidenceEl.textContent = "--";
+  if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = "--";
+  if (backtestEntryAtEl) backtestEntryAtEl.textContent = "--";
+  if (backtestCountdownEl) backtestCountdownEl.textContent = "--";
+  if (backtestWinRateEl) backtestWinRateEl.textContent = "--";
+  if (backtestTradeCountEl) backtestTradeCountEl.textContent = "--";
+  if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = "--";
+  if (backtestBullScoreEl) backtestBullScoreEl.textContent = "--";
+  if (backtestBearScoreEl) backtestBearScoreEl.textContent = "--";
+  renderBacktestReasons([]);
+  renderBacktestAnalysisChart(null);
+  clearBacktestReadyTrade();
+}
+
+function stopBacktestSignalMonitor() {
+  backtestSignalArmed = false;
+  backtestSignalTargetSymbol = null;
+  backtestSignalSchedule = null;
+  backtestPendingPrediction = null;
+  backtestCommittedSignal = null;
+  stopBacktestCountdown();
+}
+
+function resetBacktestPanel(reason = "Ready.") {
+  stopBacktestSignalMonitor();
+  clearBacktestSignalFields();
+  if (backtestContextEl) backtestContextEl.textContent = "--";
+  if (backtestStatusEl) backtestStatusEl.textContent = reason;
+}
+
+async function updateBacktestSignalMonitor(candles, currentPriceOverride = null) {
+  if (!backtestSignalArmed || !backtestSignalSchedule) return;
+  if (!Array.isArray(candles) || candles.length < 45) return;
+  const referencePrice = Number.isFinite(currentPriceOverride)
+    ? Number(currentPriceOverride)
+    : Number(candles[candles.length - 1]?.close);
+  const replayCandles = buildReplayInputForNextCandle(candles, 60);
+  const prediction = buildCompositeBacktestSignal(replayCandles, { referencePrice });
+  backtestPendingPrediction = prediction;
+  renderBacktestAnalysisChart(prediction, candles, { currentPrice: referencePrice });
+
+  const now = Date.now();
+  if (backtestCountdownEl) {
+    const target = now < backtestSignalSchedule.signalAt
+      ? backtestSignalSchedule.signalAt
+      : backtestSignalSchedule.entryAt;
+    const diffMs = Math.max(0, target - now);
+    const totalSec = Math.ceil(diffMs / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    const prefix = now < backtestSignalSchedule.signalAt ? "Signal in " : "Entry in ";
+    backtestCountdownEl.textContent = `${prefix}${min}:${String(sec).padStart(2, "0")}`;
+  }
+
+  if (now < backtestSignalSchedule.signalAt || backtestCommittedSignal) {
+    if (backtestStatusEl) {
+      backtestStatusEl.textContent = `Monitoring live market. Signal locks at ${formatClockTime(backtestSignalSchedule.signalAt)}.`;
+    }
+    return;
+  }
+
+  backtestCommittedSignal = prediction;
+  const mode = getActiveTradeMode();
+  const barrierText = mode === "higher_lower"
+    ? formatOffset(Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5"), currentPip)
+    : "N/A";
+  if (backtestContextEl) {
+    backtestContextEl.textContent = `${symbolSelect?.selectedOptions?.[0]?.textContent || backtestSignalTargetSymbol} • ${mode === "rise_fall" ? "Rise/Fall" : "Higher/Lower"} • Barrier ${barrierText}`;
+  }
+  if (backtestDirectionEl) {
+    backtestDirectionEl.textContent = prediction.direction === "CALL" ? "BUY / UP" : prediction.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
+  }
+  if (backtestConfidenceEl) backtestConfidenceEl.textContent = prediction.direction ? `${prediction.confidence}%` : "--";
+  if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
+  if (backtestBearScoreEl) backtestBearScoreEl.textContent = prediction.putWeight ? prediction.putWeight.toFixed(1) : "0.0";
+  if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(prediction.entryPrice) ? formatPrice(prediction.entryPrice, currentPip) : formatPrice(referencePrice ?? 0, currentPip);
+  if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(backtestSignalSchedule.entryAt)} (${formatClockTime(backtestSignalSchedule.candleOpenAt)} candle)`;
+  renderBacktestReasons(prediction.reasons);
+  await loadBacktestReadyProposal(prediction, backtestSignalSchedule);
+  startBacktestCountdown(backtestSignalSchedule.entryAt);
+  if (backtestStatusEl) {
+    backtestStatusEl.textContent = prediction.direction
+      ? `Signal locked. ${prediction.direction === "CALL" ? "BUY" : "SELL"} prepared for ${formatClockTime(backtestSignalSchedule.entryAt)}.`
+      : "No clear edge at T-6s. Wait for the next cycle.";
+  }
+}
+
 function getBacktestTargetSymbol() {
   return currentSymbol || symbolSelect?.value || null;
 }
@@ -8715,62 +8954,40 @@ async function generateBacktestSignalNow() {
   backtestSignalInFlight = true;
   if (generateBacktestSignalBtn) {
     generateBacktestSignalBtn.disabled = true;
-    generateBacktestSignalBtn.textContent = "Generating...";
+    generateBacktestSignalBtn.textContent = "Arming...";
   }
-  if (backtestStatusEl) backtestStatusEl.textContent = "Generating next 1m composite signal...";
+  if (backtestStatusEl) backtestStatusEl.textContent = "Arming live monitor for next 1m signal...";
 
   try {
     const liveCandles = currentSymbol === symbol ? getBuiltCandles() : [];
     const sourceCandles = liveCandles.length >= 45
       ? liveCandles
       : await fetchHistoricalCandles(symbol, 60, 180);
-    const replayCandles = buildReplayInputForNextCandle(sourceCandles, 60);
     const liveReferencePrice = currentSymbol === symbol && Number.isFinite(lastSpot)
       ? Number(lastSpot)
       : Number(sourceCandles[sourceCandles.length - 1]?.close);
-    const prediction = buildCompositeBacktestSignal(replayCandles, { referencePrice: liveReferencePrice });
-    const schedule = computeBacktestEntrySchedule(3000);
     const mode = getActiveTradeMode();
     const barrierText = mode === "higher_lower"
       ? formatOffset(Number(barrierInput?.value || sidebarBarrierInputEl?.value || "0.5"), currentPip)
       : "N/A";
 
+    stopBacktestSignalMonitor();
+    backtestSignalArmed = true;
+    backtestSignalTargetSymbol = symbol;
+    backtestSignalSchedule = computeBacktestSignalSchedule();
     if (backtestContextEl) {
       backtestContextEl.textContent = `${symbolSelect?.selectedOptions?.[0]?.textContent || symbol} • ${mode === "rise_fall" ? "Rise/Fall" : "Higher/Lower"} • Barrier ${barrierText}`;
     }
-    if (backtestDirectionEl) {
-      backtestDirectionEl.textContent = prediction.direction === "CALL" ? "BUY / UP" : prediction.direction === "PUT" ? "SELL / DOWN" : "NO EDGE";
-    }
-    if (backtestConfidenceEl) backtestConfidenceEl.textContent = prediction.direction ? `${prediction.confidence}%` : "--";
-    if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
-    if (backtestBearScoreEl) backtestBearScoreEl.textContent = prediction.putWeight ? prediction.putWeight.toFixed(1) : "0.0";
-    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(prediction.entryPrice) ? formatPrice(prediction.entryPrice, currentPip) : formatPrice(liveReferencePrice ?? 0, currentPip);
-    if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(schedule.entryAt)} (${formatClockTime(schedule.candleOpenAt)} candle)`;
-    renderBacktestReasons(prediction.reasons);
-    renderBacktestAnalysisChart(prediction, sourceCandles, { currentPrice: liveReferencePrice });
-    await loadBacktestReadyProposal(prediction, schedule);
-    startBacktestCountdown(schedule.entryAt);
-    if (backtestStatusEl) {
-      backtestStatusEl.textContent = prediction.direction
-        ? `Signal ready. ${prediction.direction === "CALL" ? "BUY" : "SELL"} won on weighted score ${Math.max(prediction.callWeight || 0, prediction.putWeight || 0).toFixed(1)} vs ${Math.min(prediction.callWeight || 0, prediction.putWeight || 0).toFixed(1)}. Enter about 3 seconds before the next 1m candle.`
-        : "No clear composite edge right now. Review the last-hour win rate before taking the next trade.";
-    }
+    clearBacktestSignalFields();
+    if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(backtestSignalSchedule.entryAt)} (${formatClockTime(backtestSignalSchedule.candleOpenAt)} candle)`;
+    await updateBacktestSignalMonitor(sourceCandles, liveReferencePrice);
   } catch (err) {
-    stopBacktestCountdown();
+    stopBacktestSignalMonitor();
+    clearBacktestSignalFields();
     if (backtestStatusEl) backtestStatusEl.textContent = `Backtest failed: ${err?.message || "unknown error"}`;
-    if (backtestDirectionEl) backtestDirectionEl.textContent = "--";
-    if (backtestConfidenceEl) backtestConfidenceEl.textContent = "--";
-    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = "--";
     if (backtestEntryAtEl) backtestEntryAtEl.textContent = "--";
     if (backtestCountdownEl) backtestCountdownEl.textContent = "--";
-    if (backtestWinRateEl) backtestWinRateEl.textContent = "--";
-    if (backtestTradeCountEl) backtestTradeCountEl.textContent = "--";
-    if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = "--";
-    if (backtestBullScoreEl) backtestBullScoreEl.textContent = "--";
-    if (backtestBearScoreEl) backtestBearScoreEl.textContent = "--";
-    renderBacktestReasons([]);
     renderBacktestAnalysisChart(null);
-    clearBacktestReadyTrade();
   } finally {
     backtestSignalInFlight = false;
     if (generateBacktestSignalBtn) {
@@ -9238,6 +9455,7 @@ function onSymbolChange() {
   symbolPrice.textContent = "--";
   currentSymbol = symbol;
   currentPip = pip;
+  resetBacktestPanel(`Ready for ${display}.`);
   if (defaultBarrier != null) {
     if (barrierInput) barrierInput.value = defaultBarrier;
     if (sidebarBarrierInputEl) sidebarBarrierInputEl.value = defaultBarrier;
