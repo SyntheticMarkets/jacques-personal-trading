@@ -8833,7 +8833,7 @@ function computeBacktestSignalSchedule() {
   };
 }
 
-function clearBacktestSignalFields() {
+function clearBacktestSignalFields(preserveChart = false) {
   if (backtestDirectionEl) backtestDirectionEl.textContent = "--";
   if (backtestConfidenceEl) backtestConfidenceEl.textContent = "--";
   if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = "--";
@@ -8845,7 +8845,7 @@ function clearBacktestSignalFields() {
   if (backtestBullScoreEl) backtestBullScoreEl.textContent = "--";
   if (backtestBearScoreEl) backtestBearScoreEl.textContent = "--";
   renderBacktestReasons([]);
-  renderBacktestAnalysisChart(null);
+  if (!preserveChart) renderBacktestAnalysisChart(null);
   clearBacktestReadyTrade();
 }
 
@@ -8890,6 +8890,12 @@ async function updateBacktestSignalMonitor(candles, currentPriceOverride = null)
   }
 
   if (now < backtestSignalSchedule.signalAt || backtestCommittedSignal) {
+    if (backtestDirectionEl) backtestDirectionEl.textContent = "WAITING";
+    if (backtestConfidenceEl) backtestConfidenceEl.textContent = `${prediction.confidence}% live`;
+    if (backtestBullScoreEl) backtestBullScoreEl.textContent = prediction.callWeight ? prediction.callWeight.toFixed(1) : "0.0";
+    if (backtestBearScoreEl) backtestBearScoreEl.textContent = prediction.putWeight ? prediction.putWeight.toFixed(1) : "0.0";
+    if (backtestEntryPriceEl) backtestEntryPriceEl.textContent = Number.isFinite(prediction.entryPrice) ? formatPrice(prediction.entryPrice, currentPip) : formatPrice(referencePrice ?? 0, currentPip);
+    renderBacktestReasons(prediction.reasons);
     if (backtestStatusEl) {
       backtestStatusEl.textContent = `Monitoring live market. Signal locks at ${formatClockTime(backtestSignalSchedule.signalAt)}.`;
     }
@@ -8978,7 +8984,7 @@ async function generateBacktestSignalNow() {
     if (backtestContextEl) {
       backtestContextEl.textContent = `${symbolSelect?.selectedOptions?.[0]?.textContent || symbol} • ${mode === "rise_fall" ? "Rise/Fall" : "Higher/Lower"} • Barrier ${barrierText}`;
     }
-    clearBacktestSignalFields();
+    clearBacktestSignalFields(true);
     if (backtestEntryAtEl) backtestEntryAtEl.textContent = `${formatClockTime(backtestSignalSchedule.entryAt)} (${formatClockTime(backtestSignalSchedule.candleOpenAt)} candle)`;
     await updateBacktestSignalMonitor(sourceCandles, liveReferencePrice);
   } catch (err) {
