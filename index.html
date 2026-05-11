@@ -13,6 +13,7 @@
           <span class="acct-label">Log in</span>
         </div>
         <div class="topbar-actions">
+          <button id="chart2BackBtn" class="ghost small chart2-back-btn" type="button">Back to Chart</button>
           <button id="toggleSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Sidebar</button>
           <button id="toggleSignalSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Signals</button>
           <div class="status" id="status">Connecting...</div>
@@ -178,6 +179,16 @@
           <div id="chartTfPicker" class="chart-tf-picker hidden">
             <select id="chartTfSelect" class="field-input" aria-label="Chart timeframe"></select>
           </div>
+          <div id="chart2MobileToolbar" class="chart2-mobile-toolbar" aria-label="Chart tools">
+            <button class="chart2-tool chart2-tool-timeframe" type="button" data-chart2-tool="timeframe">1M</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="indicator" aria-label="Indicators">▤</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="drawing" aria-label="Drawing tools">✎</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="crosshair" aria-label="Crosshair">⌖</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="reset" aria-label="Reset chart">↺</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="zoom-in" aria-label="Zoom in">+</button>
+            <button class="chart2-tool" type="button" data-chart2-tool="zoom-out" aria-label="Zoom out">−</button>
+          </div>
+          <div id="chart2DrawingMenu" class="chart2-drawing-menu hidden"></div>
           <canvas id="miniChart" aria-label="Mini chart"></canvas>
           <div class="chart-footer">
             <div class="chart-footer-group">
@@ -185,7 +196,10 @@
               <button id="chartTfLabel" class="chart-tf-label signal-tf-label chart-tf-trigger" type="button" aria-label="Change chart timeframe">1m</button>
             </div>
             <div class="chart-footer-group chart-footer-group-right">
-              <select id="indicatorSelect" class="field-input chart-indicator-select" aria-label="Add chart indicator"></select>
+              <div id="indicatorPicker" class="chart-indicator-picker">
+                <button id="indicatorMenuButton" class="chart-indicator-select" type="button" aria-expanded="false" aria-controls="indicatorMenu">Indicators</button>
+                <div id="indicatorMenu" class="indicator-menu hidden"></div>
+              </div>
             </div>
           </div>
           <div id="chartIndicatorList" class="chart-indicator-list"></div>

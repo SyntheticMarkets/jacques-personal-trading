@@ -15,6 +15,7 @@ let desktopSidebarEl;
 let desktopSidebarExtraEl;
 let toggleSidebarBtn;
 let toggleSignalSidebarBtn;
+let chart2BackBtn;
 let desktopTradeTypeCardEl;
 let desktopTradeTypeSelectEl;
 let barrierField;
@@ -103,7 +104,12 @@ let toggleChartBtn;
 let chartTfLabelEl;
 let chartTfPickerEl;
 let chartTfSelectEl;
+let chart2MobileToolbarEl;
+let chart2DrawingMenuEl;
 let indicatorSelectEl;
+let indicatorPickerEl;
+let indicatorMenuButtonEl;
+let indicatorMenuEl;
 let chartIndicatorListEl;
 let trendModeSelectEl;
 let drawingToolSelectEl;
@@ -167,6 +173,16 @@ let backtestSignalSchedule = null;
 let backtestPendingPrediction = null;
 let backtestCommittedSignal = null;
 let backtestEntryDecision = null;
+let backtestMonitorRunning = false;
+let backtestMonitorQueued = false;
+let backtestMonitorQueuedCandles = null;
+let backtestMonitorQueuedPrice = null;
+let backtestMonitorLastRunAt = 0;
+let backtestMonitorTimer = null;
+let topDownCandleCache = new Map();
+let topDownCacheLoadState = new Map();
+
+const BACKTEST_MONITOR_MIN_INTERVAL_MS = 900;
 
 const TIMEFRAME_OPTIONS = [
   { seconds: 10, label: "10s" },
@@ -189,6 +205,8 @@ const TIMEFRAME_OPTIONS = [
 const DEFAULT_TIMEFRAME_SEC = 60;
 const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
+  { value: "INST_EXECUTION_MODEL", label: "Institutional Model" },
+  { value: "INST_LEVEL_BEHAVIOR", label: "Institutional Level Behavior" },
   { value: "ALGO_BEHAVIOR_ENGINE", label: "Algo Behavior Engine" },
   { value: "PRICE_ACTION_TOOLKIT", label: "Price Action Toolkit" },
   { value: "ICT_FVG", label: "ICT FVG" },
@@ -216,68 +234,93 @@ const CHART_INDICATOR_OPTIONS = [
 ];
 const CHART_INDICATOR_GROUPS = [
   {
+    key: "IEM",
+    label: "Institutional",
+    category: "SIGNALS",
+    items: ["INST_EXECUTION_MODEL", "INST_LEVEL_BEHAVIOR"],
+  },
+  {
     key: "AB",
     label: "Algo Behavior",
+    category: "SIGNALS",
     items: ["ALGO_BEHAVIOR_ENGINE"],
   },
   {
     key: "PA",
     label: "Price Action",
+    category: "SIGNALS",
     items: ["PRICE_ACTION_TOOLKIT"],
   },
   {
     key: "LIQ",
     label: "Liquidity",
+    category: "SIGNALS",
     items: ["LDMSS", "LIQ_SWEEP_OB"],
   },
   {
     key: "ICT",
     label: "ICT",
+    category: "ANALYSIS",
     items: ["ICT_FVG", "ICT_OB", "ICT_STRUCTURE", "ICT_LIQUIDITY", "ICT_FIB", "ICT_KILLZONES", "ICT_BPR"],
   },
   {
     key: "SMC",
     label: "SMC",
+    category: "SIGNALS",
     items: ["SMC_SETUP_08", "SMC_PRO_COMBO"],
   },
   {
-    key: "VOL",
+    key: "VOL_SIG",
     label: "Volatility",
-    items: ["ADX_VOL_WAVES", "VOLUME_PROFILE_NODES", "TREND_VOLUME_ACCUM"],
+    category: "SIGNALS",
+    items: ["ADX_VOL_WAVES"],
+  },
+  {
+    key: "VOL_ANALYSIS",
+    label: "Volatility",
+    category: "ANALYSIS",
+    items: ["VOLUME_PROFILE_NODES", "TREND_VOLUME_ACCUM"],
   },
   {
     key: "BO",
     label: "Breakouts",
+    category: "SIGNALS",
     items: ["BREAKOUT_TARGETS"],
   },
   {
     key: "TL",
     label: "Trendlines",
+    category: "SIGNALS",
     items: ["LIQUIDITY_TRENDLINE"],
   },
   {
     key: "STRUCT",
     label: "Structure",
+    category: "SIGNALS",
     items: ["STRUCTURE_PULLBACK", "SR_SIGNALS_MTF"],
   },
   {
     key: "PATTERN",
     label: "Patterns",
+    category: "SIGNALS",
     items: ["CHART_PATTERNS"],
   },
   {
     key: "MOM",
     label: "Momentum",
+    category: "SIGNALS",
     items: ["DYNAMIC_Z_DIVERGENCE"],
   },
   {
     key: "MICRO",
     label: "Microstructure",
+    category: "SIGNALS",
     items: ["TICK_REJECTION"],
   },
   {
     key: "MA",
     label: "Moving Avg",
+    category: "ANALYSIS",
     items: ["EMA"],
   },
 ];
@@ -377,6 +420,8 @@ const MIN_SIGNAL_CANDLES = 20;
 const MAX_CANDLES = 5000;
 const MAX_TICK_HISTORY_BATCH = 5000;
 const MAX_TICK_HISTORY_BATCHES = 6;
+const TOP_DOWN_STACK_TIMEFRAMES = [30, 60, 300];
+const TOP_DOWN_CACHE_MAX_AGE_MS = 45000;
 const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
@@ -411,6 +456,7 @@ let chartLastDrawingTapId = null;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
+let activeIndicatorMenuCategory = "ANALYSIS";
 let backtestChartPoints = 28;
 let backtestChartOffset = 0;
 let backtestChartDragX = null;
@@ -423,6 +469,8 @@ let backtestChartRenderState = null;
 let autoTradeSessionCount = 0;
 let currentTrendMode = "EMA";
 let signalToastTimer = null;
+let institutionalExecutionModelCache = null;
+let institutionalPoiDisplayState = null;
 const shownIndicatorSignalKeys = new Set();
 let lastSignalState = {
   trend: "--",
@@ -522,6 +570,7 @@ function syncDrawingActionBarUI() {
 function syncDrawingToolUI() {
   if (!drawingToolSelectEl) return;
   drawingToolSelectEl.value = DRAWING_TOOL_OPTIONS.includes(chartDrawingTool) ? chartDrawingTool : "SELECT";
+  syncChart2MobileToolbar();
 }
 
 function setDrawingTool(tool) {
@@ -1013,18 +1062,22 @@ function detectStructureTrend(candles) {
     if (recent[i].low < recent[i - 1].low) lowerLows += 1;
   }
 
-  if (higherHighs >= 2 && higherLows >= 2) {
+  const closeStructure = assessCloseStructure(candles);
+  const bullishStructureScore = clamp(((higherHighs + higherLows) / 8) + (closeStructure.bullScore * 0.35), 0, 1);
+  const bearishStructureScore = clamp(((lowerHighs + lowerLows) / 8) + (closeStructure.bearScore * 0.35), 0, 1);
+
+  if (higherHighs >= 2 && higherLows >= 2 && closeStructure.bias !== "DOWN" && closeStructure.bullScore >= 0.45) {
     return {
       trend: "UP",
-      trendStrength: clamp((higherHighs + higherLows) / 8, 0, 1),
+      trendStrength: bullishStructureScore,
       structureBias: "HH_HL",
       modeLabel: "SMC",
     };
   }
-  if (lowerHighs >= 2 && lowerLows >= 2) {
+  if (lowerHighs >= 2 && lowerLows >= 2 && closeStructure.bias !== "UP" && closeStructure.bearScore >= 0.45) {
     return {
       trend: "DOWN",
-      trendStrength: clamp((lowerHighs + lowerLows) / 8, 0, 1),
+      trendStrength: bearishStructureScore,
       structureBias: "LL_LH",
       modeLabel: "SMC",
     };
@@ -1424,6 +1477,80 @@ function analyzeRejection(candle) {
     strongBuyRejection: lowerWick > safeBody * 1.5,
     bullishConfirm: candle.close > candle.open,
     bearishConfirm: candle.close < candle.open,
+  };
+}
+
+function assessCloseStructure(candles, options = {}) {
+  if (!Array.isArray(candles) || candles.length < 4) {
+    return {
+      bias: "MIXED",
+      bullScore: 0,
+      bearScore: 0,
+      bullishBreak: false,
+      bearishBreak: false,
+      closeLocation: 0.5,
+      reclaimedLevel: false,
+      lostLevel: false,
+    };
+  }
+
+  const current = candles[candles.length - 1];
+  const previous = candles.slice(-4, -1);
+  const structureWindow = candles.slice(-6, -1);
+  const avgRange = averageRange(candles, Math.min(8, candles.length)) || Math.max(Math.abs(current.close) * 0.001, currentPip || 0.0001);
+  const threshold = getLevelThreshold(structureWindow.length ? structureWindow : candles.slice(0, -1));
+  const range = Math.max(current.high - current.low, currentPip || 0.0001);
+  const closeLocation = clamp((current.close - current.low) / range, 0, 1);
+  const priorCloseHigh = Math.max(...previous.map((candle) => candle.close));
+  const priorCloseLow = Math.min(...previous.map((candle) => candle.close));
+  const priorHigh = Math.max(...structureWindow.map((candle) => candle.high));
+  const priorLow = Math.min(...structureWindow.map((candle) => candle.low));
+  const higherCloseCount = previous.filter((candle, index) => index === 0 ? false : candle.close > previous[index - 1].close).length
+    + (current.close > previous[previous.length - 1].close ? 1 : 0);
+  const lowerCloseCount = previous.filter((candle, index) => index === 0 ? false : candle.close < previous[index - 1].close).length
+    + (current.close < previous[previous.length - 1].close ? 1 : 0);
+  const body = Math.abs(current.close - current.open);
+  const bodyStrength = clamp(body / avgRange, 0, 1);
+  const bullishBody = current.close > current.open ? 1 : 0;
+  const bearishBody = current.close < current.open ? 1 : 0;
+  const bullishBreak = current.close > priorCloseHigh + (threshold * 0.2);
+  const bearishBreak = current.close < priorCloseLow - (threshold * 0.2);
+  const reclaimedLevel = current.close >= priorLow + (avgRange * 0.18);
+  const lostLevel = current.close <= priorHigh - (avgRange * 0.18);
+  const bullScore = clamp(
+    (higherCloseCount / 3) * 0.28 +
+    closeLocation * 0.22 +
+    (bullishBreak ? 0.22 : 0) +
+    bodyStrength * 0.18 +
+    bullishBody * 0.1,
+    0,
+    1
+  );
+  const bearScore = clamp(
+    (lowerCloseCount / 3) * 0.28 +
+    ((1 - closeLocation) * 0.22) +
+    (bearishBreak ? 0.22 : 0) +
+    bodyStrength * 0.18 +
+    bearishBody * 0.1,
+    0,
+    1
+  );
+  const bias =
+    bullScore >= 0.55 && bullScore > bearScore + 0.08 ? "UP" :
+    bearScore >= 0.55 && bearScore > bullScore + 0.08 ? "DOWN" :
+    "MIXED";
+
+  return {
+    bias,
+    bullScore,
+    bearScore,
+    bullishBreak,
+    bearishBreak,
+    closeLocation,
+    reclaimedLevel,
+    lostLevel,
+    priorHigh,
+    priorLow,
   };
 }
 
@@ -3296,6 +3423,626 @@ function buildSupportResistanceSignalsMTF(candles, config = {}) {
   };
 }
 
+function aggregateCandlesByTimeframe(candles, timeframeSec) {
+  if (!Array.isArray(candles) || !candles.length || !Number.isFinite(timeframeSec) || timeframeSec <= 0) return [];
+  const buckets = [];
+  let active = null;
+
+  candles.forEach((candle) => {
+    const time = Number(candle.time ?? candle.epoch);
+    if (!Number.isFinite(time)) return;
+    const bucketTime = Math.floor(time / timeframeSec) * timeframeSec;
+    if (!active || active.time !== bucketTime) {
+      if (active) buckets.push(active);
+      active = {
+        time: bucketTime,
+        open: candle.open,
+        high: candle.high,
+        low: candle.low,
+        close: candle.close,
+      };
+      return;
+    }
+    active.high = Math.max(active.high, candle.high);
+    active.low = Math.min(active.low, candle.low);
+    active.close = candle.close;
+  });
+
+  if (active) buckets.push(active);
+  return buckets;
+}
+
+function getInstitutionalTrend(candles, period = 20) {
+  if (!Array.isArray(candles) || candles.length < period) return "RANGE";
+  const sample = candles.slice(-period);
+  const avgClose = sample.reduce((sum, candle) => sum + candle.close, 0) / sample.length;
+  const lastClose = sample[sample.length - 1].close;
+  if (lastClose > avgClose) return "BULLISH";
+  if (lastClose < avgClose) return "BEARISH";
+  return "RANGE";
+}
+
+function getInstitutionalPoiLevels(candles, tolerance, minTouches = 3) {
+  if (!Array.isArray(candles) || candles.length < minTouches || !Number.isFinite(tolerance) || tolerance <= 0) return [];
+  const levels = [];
+
+  candles.forEach((candle, index) => {
+    const price = candle.close;
+    if (!Number.isFinite(price)) return;
+    const existing = levels.find((level) => Math.abs(level.price - price) <= tolerance);
+    if (existing) {
+      existing.price = ((existing.price * existing.strength) + price) / (existing.strength + 1);
+      existing.strength += 1;
+      existing.lastIndex = index;
+      return;
+    }
+
+    const touches = candles.reduce((count, item) => count + (Math.abs(item.close - price) <= tolerance ? 1 : 0), 0);
+    if (touches >= minTouches) {
+      levels.push({
+        price,
+        strength: touches,
+        firstIndex: index,
+        lastIndex: index,
+      });
+    }
+  });
+
+  return levels
+    .sort((a, b) => (b.strength - a.strength) || (b.lastIndex - a.lastIndex))
+    .slice(0, 12);
+}
+
+function getInstitutionalReactionPoiLevels(candles, tolerance, config = {}) {
+  const pivotLen = Math.max(2, config.pivotLen ?? 3);
+  const minTouches = Math.max(2, config.minTouches ?? 2);
+  const source = config.source || "1m";
+  if (!Array.isArray(candles) || candles.length < (pivotLen * 2) + 3 || !Number.isFinite(tolerance) || tolerance <= 0) return [];
+
+  const raw = [];
+  for (let i = pivotLen; i < candles.length - pivotLen; i += 1) {
+    if (isPivotHighLR(candles, i, pivotLen, pivotLen)) {
+      raw.push({ price: candles[i].high, index: i, kind: "high" });
+    }
+    if (isPivotLowLR(candles, i, pivotLen, pivotLen)) {
+      raw.push({ price: candles[i].low, index: i, kind: "low" });
+    }
+  }
+
+  const levels = [];
+  raw.forEach((point) => {
+    if (!Number.isFinite(point.price)) return;
+    const existing = levels.find((level) => Math.abs(level.price - point.price) <= tolerance);
+    if (existing) {
+      existing.price = ((existing.price * existing.strength) + point.price) / (existing.strength + 1);
+      existing.strength += 1;
+      existing.lastIndex = Math.max(existing.lastIndex, point.index);
+      existing.kinds.add(point.kind);
+      return;
+    }
+    const touches = raw.filter((item) => Math.abs(item.price - point.price) <= tolerance).length;
+    if (touches >= minTouches) {
+      levels.push({
+        price: point.price,
+        strength: touches,
+        firstIndex: point.index,
+        lastIndex: point.index,
+        source,
+        kinds: new Set([point.kind]),
+      });
+    }
+  });
+
+  return levels
+    .map((level) => ({
+      ...level,
+      kind: level.kinds.has("high") && level.kinds.has("low")
+        ? "reaction"
+        : level.kinds.has("high")
+          ? "resistance"
+          : "support",
+      kinds: undefined,
+    }))
+    .sort((a, b) => (b.strength - a.strength) || (b.lastIndex - a.lastIndex))
+    .slice(0, 16);
+}
+
+function mergeInstitutionalPoiCandidates(groups, tolerance) {
+  const merged = [];
+  const safeTolerance = Math.max(tolerance || 0, currentPip || 0.0001);
+  groups.flat().forEach((level) => {
+    if (!Number.isFinite(level?.price)) return;
+    const existing = merged.find((item) => Math.abs(item.price - level.price) <= safeTolerance);
+    if (existing) {
+      const totalStrength = existing.strength + level.strength;
+      existing.price = ((existing.price * existing.strength) + (level.price * level.strength)) / Math.max(1, totalStrength);
+      existing.strength = totalStrength;
+      existing.firstIndex = Math.min(existing.firstIndex ?? level.firstIndex ?? 0, level.firstIndex ?? existing.firstIndex ?? 0);
+      existing.lastIndex = Math.max(existing.lastIndex ?? level.lastIndex ?? 0, level.lastIndex ?? existing.lastIndex ?? 0);
+      existing.source = [existing.source, level.source].filter(Boolean).join("+");
+      return;
+    }
+    merged.push({ ...level });
+  });
+
+  return merged
+    .sort((a, b) => (b.strength - a.strength) || (b.lastIndex - a.lastIndex))
+    .slice(0, 24);
+}
+
+function findInstitutionalPoi(currentPrice, levels, tolerance) {
+  let best = null;
+  levels.forEach((level) => {
+    const distance = Math.abs(currentPrice - level.price);
+    if (distance > tolerance) return;
+    if (!best || distance < best.distance || (distance === best.distance && level.strength > best.strength)) {
+      best = { ...level, distance };
+    }
+  });
+  return best;
+}
+
+function resolveStableInstitutionalPoiLevels({ candidates, currentPrice, avgRange, tolerance, stateKey, maxLevels = 6 }) {
+  const source = Array.isArray(candidates)
+    ? candidates.filter((level) => Number.isFinite(level?.price))
+    : [];
+  if (!Number.isFinite(currentPrice) || !source.length) return [];
+
+  const safeRange = Math.max(avgRange || 0, tolerance || 0, currentPip || 0.0001, Math.abs(currentPrice) * 0.00005);
+  const matchTolerance = Math.max(tolerance || 0, safeRange * 0.25);
+  const retireDistance = safeRange * 7;
+  const promoteDistance = safeRange * 5;
+  const previous = institutionalPoiDisplayState?.key === stateKey
+    ? institutionalPoiDisplayState.levels || []
+    : [];
+
+  const findCandidateFor = (level) => source.find((candidate) => Math.abs(candidate.price - level.price) <= matchTolerance);
+  const active = [];
+  const used = new Set();
+
+  previous.forEach((level) => {
+    const candidate = findCandidateFor(level);
+    if (!candidate) return;
+    const distance = Math.abs(candidate.price - currentPrice);
+    if (distance > retireDistance) return;
+    const merged = {
+      ...candidate,
+      activeSince: level.activeSince ?? candidate.firstIndex ?? candidate.lastIndex ?? 0,
+      distance,
+    };
+    active.push(merged);
+    used.add(candidate);
+  });
+
+  const ranked = source
+    .filter((candidate) => !used.has(candidate))
+    .map((candidate) => ({
+      ...candidate,
+      distance: Math.abs(candidate.price - currentPrice),
+    }))
+    .sort((a, b) => {
+      const aNearby = a.distance <= promoteDistance ? 0 : 1;
+      const bNearby = b.distance <= promoteDistance ? 0 : 1;
+      return (aNearby - bNearby) || (a.distance - b.distance) || (b.strength - a.strength);
+    });
+
+  ranked.forEach((candidate) => {
+    if (active.length >= maxLevels) return;
+    if (candidate.distance > retireDistance && active.length >= Math.ceil(maxLevels / 2)) return;
+    active.push({
+      ...candidate,
+      activeSince: candidate.firstIndex ?? candidate.lastIndex ?? 0,
+    });
+  });
+
+  const nextLevels = active
+    .sort((a, b) => b.price - a.price)
+    .slice(0, maxLevels);
+  institutionalPoiDisplayState = { key: stateKey, levels: nextLevels };
+  return nextLevels;
+}
+
+function hasInstitutionalConfirmation(candles, direction) {
+  if (!Array.isArray(candles) || candles.length < 2) return false;
+  const prev = candles[candles.length - 2];
+  const curr = candles[candles.length - 1];
+  const prevUpperWick = prev.high - Math.max(prev.open, prev.close);
+  const prevLowerWick = Math.min(prev.open, prev.close) - prev.low;
+  const currRange = Math.max(curr.high - curr.low, Math.abs(curr.close) * 0.000001, currentPip || 0.0001);
+  const currBody = Math.abs(curr.close - curr.open);
+  const strongBody = currBody >= currRange * 0.6;
+  const sweptLow = curr.low < prev.low;
+  const sweptHigh = curr.high > prev.high;
+
+  if (direction === "BUY") {
+    return sweptLow && prevLowerWick > prevUpperWick && curr.close > curr.open && strongBody;
+  }
+  if (direction === "SELL") {
+    return sweptHigh && prevUpperWick > prevLowerWick && curr.close < curr.open && strongBody;
+  }
+  return false;
+}
+
+function scoreInstitutionalSetup({ current, prev, direction, poi, tolerance, avgRange }) {
+  if (!current || !prev || !poi || !Number.isFinite(tolerance) || tolerance <= 0) return 0;
+  const range = Math.max(current.high - current.low, currentPip || 0.0001, Math.abs(current.close) * 0.000001);
+  const body = Math.abs(current.close - current.open);
+  const bodyScore = clamp(body / range, 0, 1);
+  const distanceScore = clamp(1 - (Math.abs(current.close - poi.price) / tolerance), 0, 1);
+  const poiScore = clamp((poi.strength - 2) / 8, 0, 1);
+  const upperSweep = Math.max(0, current.high - prev.high);
+  const lowerSweep = Math.max(0, prev.low - current.low);
+  const sweepSize = direction === "BUY" ? lowerSweep : upperSweep;
+  const sweepScore = clamp(sweepSize / Math.max(avgRange * 0.45, currentPip || 0.0001), 0, 1);
+  const closeLocation = clamp((current.close - current.low) / range, 0, 1);
+  const closeScore = direction === "BUY" ? closeLocation : 1 - closeLocation;
+
+  return Math.round(clamp(
+    25 +
+    (bodyScore * 22) +
+    (distanceScore * 16) +
+    (poiScore * 16) +
+    (sweepScore * 13) +
+    (closeScore * 8),
+    0,
+    100,
+  ));
+}
+
+function countInstitutionalLevelTouches(candles, level, tolerance) {
+  if (!Array.isArray(candles) || !Number.isFinite(level?.price)) return { touches: 0, lastTouchIndex: null };
+  let touches = 0;
+  let lastTouchIndex = null;
+  candles.forEach((candle, index) => {
+    const touched = candle.high >= level.price - tolerance && candle.low <= level.price + tolerance;
+    if (!touched) return;
+    if (lastTouchIndex == null || index - lastTouchIndex > 2) {
+      touches += 1;
+    }
+    lastTouchIndex = index;
+  });
+  return { touches, lastTouchIndex };
+}
+
+function getInstitutionalFakeBreakDirection(candle, level, tolerance) {
+  if (!candle || !Number.isFinite(level?.price)) return null;
+  if (candle.high > level.price + (tolerance * 0.15) && candle.close < level.price) return "SELL";
+  if (candle.low < level.price - (tolerance * 0.15) && candle.close > level.price) return "BUY";
+  return null;
+}
+
+function getInstitutionalStrongBreakDirection(candle, level, tolerance) {
+  if (!candle || !Number.isFinite(level?.price)) return null;
+  const range = Math.max(candle.high - candle.low, currentPip || 0.0001, Math.abs(candle.close) * 0.000001);
+  const body = Math.abs(candle.close - candle.open);
+  if (body / range < 0.7) return null;
+  if (candle.close > level.price + (tolerance * 0.2) && candle.close > candle.open) return "BUY";
+  if (candle.close < level.price - (tolerance * 0.2) && candle.close < candle.open) return "SELL";
+  return null;
+}
+
+function buildInstitutionalPoiCandidatePool(history, fiveMinuteSec = 300) {
+  const fiveMinute = aggregateCandlesByTimeframe(history, fiveMinuteSec);
+  const latestAvgRange = averageRange(fiveMinute, 30) || averageRange(history, 30) || 0.0001;
+  const latestTolerance = Math.max(currentPip || 0.0001, latestAvgRange * 0.28);
+  const m5PoiCandidates = getInstitutionalPoiLevels(fiveMinute.slice(-120), latestTolerance, 3)
+    .map((level) => ({ ...level, source: "5m", kind: "close-cluster" }));
+  const m1ReactionTolerance = Math.max(currentPip || 0.0001, (averageRange(history, 30) || latestAvgRange) * 0.32);
+  const m1PoiCandidates = getInstitutionalReactionPoiLevels(history.slice(-360), m1ReactionTolerance, {
+    pivotLen: 3,
+    minTouches: 2,
+    source: "1m",
+  });
+  return {
+    candidates: mergeInstitutionalPoiCandidates(
+      [m5PoiCandidates, m1PoiCandidates],
+      Math.max(latestTolerance, m1ReactionTolerance),
+    ),
+    avgRange: latestAvgRange,
+    tolerance: Math.max(latestTolerance, m1ReactionTolerance),
+    fiveMinute,
+  };
+}
+
+function buildInstitutionalExecutionModel(candles, config = {}) {
+  const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
+  const last = confirmedCandles[confirmedCandles.length - 1] || null;
+  const cacheKey = [
+    currentSymbol || "symbol",
+    candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC,
+    currentPip || 0,
+    baseMinutes || 1,
+    config.minConfidence ?? 70,
+    confirmedCandles.length,
+    last?.time ?? 0,
+    last?.open ?? 0,
+    last?.high ?? 0,
+    last?.low ?? 0,
+    last?.close ?? 0,
+  ].join("|");
+  if (!config.noCache && institutionalExecutionModelCache?.key === cacheKey) {
+    return institutionalExecutionModelCache.value;
+  }
+  const minCandles = Math.max(80, config.minCandles ?? 90);
+  if (confirmedCandles.length < minCandles) {
+    const empty = {
+      signals: [],
+      poiLevels: [],
+      stats: { total: 0, wins: 0, losses: 0, pending: 0, winRate: null },
+      trend15: "RANGE",
+      trend5: "RANGE",
+    };
+    institutionalExecutionModelCache = { key: cacheKey, value: empty };
+    return empty;
+  }
+
+  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
+  const ltfSec = Math.max(60, executionTf);
+  const fiveMinuteSec = 300;
+  const fifteenMinuteSec = 900;
+  const signals = [];
+  const seenSignalKeys = new Set();
+  let lastSignalIndex = -8;
+  const expiryBars = Math.max(1, Math.round(((config.expirySeconds ?? (baseMinutes * 60)) || 60) / Math.max(1, executionTf)));
+  const minConfidence = Math.max(0, Math.min(100, config.minConfidence ?? 70));
+
+  for (let i = minCandles; i < confirmedCandles.length; i += 1) {
+    const history = confirmedCandles.slice(0, i + 1);
+    const ltfHistory = executionTf === ltfSec ? history : aggregateCandlesByTimeframe(history, ltfSec);
+    if (ltfHistory.length < 24) continue;
+
+    const current = history[i];
+    const fiveMinute = aggregateCandlesByTimeframe(history, fiveMinuteSec);
+    const fifteenMinute = aggregateCandlesByTimeframe(history, fifteenMinuteSec);
+    const trend15 = getInstitutionalTrend(fifteenMinute);
+    const trend5 = getInstitutionalTrend(fiveMinute);
+    if (trend15 === "RANGE" || trend15 !== trend5) continue;
+
+    const recentFive = fiveMinute.slice(-120);
+    const poiAvgRange = averageRange(recentFive, 30) || averageRange(history, 30) || Math.abs(current.close) * 0.0005;
+    const tolerance = Math.max(currentPip || 0.0001, poiAvgRange * 0.28);
+    const poiLevels = getInstitutionalPoiLevels(recentFive, tolerance, 3);
+    const poi = findInstitutionalPoi(current.close, poiLevels, tolerance);
+    if (!poi) continue;
+
+    const direction = trend15 === "BULLISH" ? "BUY" : "SELL";
+    if (!hasInstitutionalConfirmation(history.slice(0, i + 1), direction)) continue;
+    if (i - lastSignalIndex < Math.max(3, config.cooldownBars ?? 6)) continue;
+    const prev = history[i - 1];
+    const confidence = scoreInstitutionalSetup({
+      current,
+      prev,
+      direction,
+      poi,
+      tolerance,
+      avgRange: poiAvgRange,
+    });
+    if (confidence < minConfidence) continue;
+
+    const key = `${direction}|${i}|${Math.round(poi.price / Math.max(tolerance, 0.0000001))}`;
+    if (seenSignalKeys.has(key)) continue;
+    seenSignalKeys.add(key);
+    lastSignalIndex = i;
+
+    const entryIndex = i + 1;
+    const entryCandle = candles[entryIndex] || null;
+    const entryPrice = entryCandle?.open ?? entryCandle?.close ?? current.close;
+    const targetIndex = entryIndex + expiryBars;
+    const target = confirmedCandles[targetIndex] || null;
+    const won = target
+      ? direction === "BUY"
+        ? target.close > entryPrice
+        : target.close < entryPrice
+      : null;
+
+    signals.push({
+      confirmationIndex: i,
+      entryIndex,
+      targetIndex,
+      direction,
+      price: entryPrice,
+      confirmationPrice: current.close,
+      poi: poi.price,
+      poiStrength: poi.strength,
+      confidence,
+      expiryBars,
+      tolerance,
+      trend15,
+      trend5,
+      result: won == null ? "PENDING" : won ? "WIN" : "LOSS",
+    });
+  }
+
+  const scored = signals.filter((signal) => signal.result !== "PENDING");
+  const wins = scored.filter((signal) => signal.result === "WIN").length;
+  const losses = scored.length - wins;
+  const winRate = scored.length ? Math.round((wins / scored.length) * 100) : null;
+  const latestHistory = confirmedCandles;
+  const latestFive = aggregateCandlesByTimeframe(latestHistory, fiveMinuteSec);
+  const latestFifteen = aggregateCandlesByTimeframe(latestHistory, fifteenMinuteSec);
+  const latestAvgRange = averageRange(latestFive, 30) || averageRange(latestHistory, 30) || 0.0001;
+  const latestCurrent = latestHistory[latestHistory.length - 1] || null;
+  const latestTolerance = Math.max(currentPip || 0.0001, latestAvgRange * 0.28);
+  const m5PoiCandidates = getInstitutionalPoiLevels(latestFive.slice(-120), latestTolerance, 3)
+    .map((level) => ({ ...level, source: "5m", kind: "close-cluster" }));
+  const m1ReactionTolerance = Math.max(currentPip || 0.0001, (averageRange(latestHistory, 30) || latestAvgRange) * 0.32);
+  const m1PoiCandidates = getInstitutionalReactionPoiLevels(latestHistory.slice(-360), m1ReactionTolerance, {
+    pivotLen: 3,
+    minTouches: 2,
+    source: "1m",
+  });
+  const latestPoiCandidates = mergeInstitutionalPoiCandidates(
+    [m5PoiCandidates, m1PoiCandidates],
+    Math.max(latestTolerance, m1ReactionTolerance),
+  );
+  const displayPoiLevels = resolveStableInstitutionalPoiLevels({
+    candidates: latestPoiCandidates,
+    currentPrice: latestCurrent?.close,
+    avgRange: latestAvgRange,
+    tolerance: latestTolerance,
+    stateKey: `${currentSymbol || "symbol"}|${executionTf}|IEM_POI`,
+    maxLevels: 6,
+  });
+
+  const result = {
+    signals,
+    poiLevels: displayPoiLevels,
+    stats: {
+      total: signals.length,
+      wins,
+      losses,
+      pending: signals.length - scored.length,
+      winRate,
+      minConfidence,
+      expiryBars,
+    },
+    trend15: getInstitutionalTrend(latestFifteen),
+    trend5: getInstitutionalTrend(latestFive),
+  };
+  if (!config.noCache) institutionalExecutionModelCache = { key: cacheKey, value: result };
+  return result;
+}
+
+function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
+  const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
+  const minCandles = Math.max(80, config.minCandles ?? 90);
+  if (confirmedCandles.length < minCandles) {
+    return {
+      signals: [],
+      poiLevels: [],
+      stats: { total: 0, wins: 0, losses: 0, pending: 0, winRate: null, minConfidence: 65 },
+    };
+  }
+
+  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
+  const fiveMinuteSec = 300;
+  const fifteenMinuteSec = 900;
+  const expiryBars = Math.max(1, Math.round(((config.expirySeconds ?? (baseMinutes * 60)) || 60) / Math.max(1, executionTf)));
+  const minConfidence = Math.max(0, Math.min(100, config.minConfidence ?? 65));
+  const signals = [];
+  const seenSignalKeys = new Set();
+  let lastSignalIndex = -10;
+
+  for (let i = minCandles; i < confirmedCandles.length; i += 1) {
+    const history = confirmedCandles.slice(0, i + 1);
+    const current = history[i];
+    const prev = history[i - 1];
+    const fifteenMinute = aggregateCandlesByTimeframe(history, fifteenMinuteSec);
+    const trend15 = getInstitutionalTrend(fifteenMinute);
+    const pool = buildInstitutionalPoiCandidatePool(history, fiveMinuteSec);
+    const atLevelTolerance = Math.max(pool.tolerance, pool.avgRange * 0.35, currentPip || 0.0001);
+    const touchedLevels = pool.candidates
+      .map((level) => ({ ...level, distance: Math.min(Math.abs(current.close - level.price), Math.abs(current.high - level.price), Math.abs(current.low - level.price)) }))
+      .filter((level) => level.distance <= atLevelTolerance)
+      .sort((a, b) => a.distance - b.distance || b.strength - a.strength);
+    const level = touchedLevels[0] || null;
+    if (!level) continue;
+    if (i - lastSignalIndex < Math.max(4, config.cooldownBars ?? 8)) continue;
+
+    const touchState = countInstitutionalLevelTouches(history.slice(Math.max(0, i - 180), i + 1), level, atLevelTolerance);
+    const touches = Math.max(touchState.touches, 1);
+    const fakeBreakDirection = getInstitutionalFakeBreakDirection(current, level, atLevelTolerance);
+    const strongBreakDirection = getInstitutionalStrongBreakDirection(current, level, atLevelTolerance);
+    let direction = null;
+    let behavior = null;
+
+    if (fakeBreakDirection) {
+      direction = fakeBreakDirection;
+      behavior = "FAKE_BREAK_REVERSAL";
+    } else if (touches <= 2) {
+      if (hasInstitutionalConfirmation(history, "BUY") && current.close >= level.price) {
+        direction = "BUY";
+        behavior = touches === 1 ? "FIRST_TOUCH_REVERSAL" : "SECOND_TOUCH_REVERSAL";
+      } else if (hasInstitutionalConfirmation(history, "SELL") && current.close <= level.price) {
+        direction = "SELL";
+        behavior = touches === 1 ? "FIRST_TOUCH_REVERSAL" : "SECOND_TOUCH_REVERSAL";
+      }
+    } else if (strongBreakDirection) {
+      direction = strongBreakDirection;
+      behavior = "MULTI_TOUCH_BREAKOUT";
+    }
+    if (!direction || !behavior) continue;
+
+    const trendBonus =
+      trend15 === "BULLISH" && direction === "BUY" ? 8 :
+      trend15 === "BEARISH" && direction === "SELL" ? 8 :
+      0;
+    const touchScore = touches <= 2
+      ? Math.max(0, 18 - ((touches - 1) * 7))
+      : Math.min(18, (touches - 2) * 6);
+    const breakScore = behavior === "MULTI_TOUCH_BREAKOUT" ? 18 : behavior === "FAKE_BREAK_REVERSAL" ? 16 : 10;
+    const confidence = Math.round(clamp(
+      35 +
+      touchScore +
+      breakScore +
+      trendBonus +
+      clamp(level.strength / 12, 0, 1) * 12 +
+      clamp(1 - (level.distance / atLevelTolerance), 0, 1) * 9,
+      0,
+      100,
+    ));
+    if (confidence < minConfidence) continue;
+
+    const entryIndex = i + 1;
+    const entryCandle = candles[entryIndex] || null;
+    const entryPrice = entryCandle?.open ?? entryCandle?.close ?? current.close;
+    const targetIndex = entryIndex + expiryBars;
+    const target = confirmedCandles[targetIndex] || null;
+    const won = target
+      ? direction === "BUY"
+        ? target.close > entryPrice
+        : target.close < entryPrice
+      : null;
+    const key = `${direction}|${behavior}|${entryIndex}|${Math.round(level.price / Math.max(atLevelTolerance, 0.0000001))}`;
+    if (seenSignalKeys.has(key)) continue;
+    seenSignalKeys.add(key);
+    lastSignalIndex = i;
+
+    signals.push({
+      confirmationIndex: i,
+      entryIndex,
+      targetIndex,
+      direction,
+      behavior,
+      price: entryPrice,
+      level: level.price,
+      poi: level.price,
+      touches,
+      levelStrength: 1 / Math.max(1, touches),
+      confidence,
+      result: won == null ? "PENDING" : won ? "WIN" : "LOSS",
+    });
+  }
+
+  const latestPool = buildInstitutionalPoiCandidatePool(confirmedCandles, fiveMinuteSec);
+  const latestCurrent = confirmedCandles[confirmedCandles.length - 1] || null;
+  const poiLevels = resolveStableInstitutionalPoiLevels({
+    candidates: latestPool.candidates,
+    currentPrice: latestCurrent?.close,
+    avgRange: latestPool.avgRange,
+    tolerance: latestPool.tolerance,
+    stateKey: `${currentSymbol || "symbol"}|${executionTf}|ILB_POI`,
+    maxLevels: 6,
+  });
+  const scored = signals.filter((signal) => signal.result !== "PENDING");
+  const wins = scored.filter((signal) => signal.result === "WIN").length;
+  const losses = scored.length - wins;
+
+  return {
+    signals,
+    poiLevels,
+    stats: {
+      total: signals.length,
+      wins,
+      losses,
+      pending: signals.length - scored.length,
+      winRate: scored.length ? Math.round((wins / scored.length) * 100) : null,
+      minConfidence,
+      expiryBars,
+    },
+  };
+}
+
 function buildChartPatternsSignals(candles, config = {}) {
   const pivotLen = Math.max(2, config.pivotLen ?? 3);
   const toleranceMult = config.toleranceMult ?? 0.45;
@@ -4890,6 +5637,304 @@ function calculateConfidence({ trendStrength, wickStrength, candleStrength, leve
   return Math.round(clamp(score, 0, 1) * 100);
 }
 
+function getTopDownCacheKey(symbol, timeframeSeconds) {
+  return `${symbol || ""}|${Number(timeframeSeconds) || 0}`;
+}
+
+function setCachedCandles(symbol, timeframeSeconds, candles) {
+  if (!symbol || !Number.isFinite(Number(timeframeSeconds)) || !Array.isArray(candles) || !candles.length) return;
+  topDownCandleCache.set(getTopDownCacheKey(symbol, timeframeSeconds), {
+    candles: candles.slice(-MAX_CANDLES),
+    updatedAt: Date.now(),
+  });
+}
+
+function getCachedCandles(symbol, timeframeSeconds, options = {}) {
+  if (!symbol || !Number.isFinite(Number(timeframeSeconds))) return [];
+  const entry = topDownCandleCache.get(getTopDownCacheKey(symbol, timeframeSeconds));
+  if (!entry?.candles?.length) return [];
+  const maxAgeMs = Number(options.maxAgeMs ?? TOP_DOWN_CACHE_MAX_AGE_MS);
+  if (options.freshOnly && Date.now() - Number(entry.updatedAt || 0) > maxAgeMs) return [];
+  return entry.candles;
+}
+
+function buildCandlesFromTickSeries(prices, times, timeframeSeconds = 30) {
+  const builder = new CandleBuilder(timeframeSeconds);
+  const len = Math.min(Array.isArray(prices) ? prices.length : 0, Array.isArray(times) ? times.length : 0);
+  for (let i = 0; i < len; i += 1) {
+    builder.update({ epoch: Number(times[i]), quote: Number(prices[i]) });
+  }
+  return builder.currentCandle
+    ? [...builder.candles, builder.currentCandle]
+    : builder.candles;
+}
+
+async function loadAggregatedTickHistoryForGranularity(symbol, timeframeSeconds = 30, maxCandles = MAX_CANDLES) {
+  let end = "latest";
+  let prices = [];
+  let times = [];
+
+  for (let batch = 0; batch < MAX_TICK_HISTORY_BATCHES; batch += 1) {
+    const res = await wsRequest({
+      ticks_history: symbol,
+      end,
+      style: "ticks",
+      count: MAX_TICK_HISTORY_BATCH,
+    });
+
+    const history = res.history || {};
+    const batchPrices = Array.isArray(history.prices) ? history.prices : [];
+    const batchTimes = Array.isArray(history.times) ? history.times : [];
+    if (!batchPrices.length || !batchTimes.length) break;
+
+    prices = [...batchPrices, ...prices];
+    times = [...batchTimes, ...times];
+
+    const built = buildCandlesFromTickSeries(prices, times, timeframeSeconds);
+    if (built.length >= maxCandles) {
+      return built.slice(-maxCandles);
+    }
+
+    const earliestBatchTime = Number(batchTimes[0]);
+    if (!Number.isFinite(earliestBatchTime)) break;
+    end = earliestBatchTime - 1;
+
+    if (batchPrices.length < MAX_TICK_HISTORY_BATCH) break;
+  }
+
+  return buildCandlesFromTickSeries(prices, times, timeframeSeconds).slice(-maxCandles);
+}
+
+async function fetchCandlesForGranularity(symbol, timeframeSeconds = 60, count = MAX_CANDLES) {
+  if (timeframeSeconds < 60) {
+    return loadAggregatedTickHistoryForGranularity(symbol, timeframeSeconds, count);
+  }
+  return fetchHistoricalCandles(symbol, timeframeSeconds, count);
+}
+
+function getAvailableTopDownSourceCandles(symbol, timeframeSeconds, fallbackCandles, fallbackSeconds) {
+  const sourceCandidates = [];
+  const currentSeconds = getChartTimeframeSeconds();
+  const currentCandles = currentSymbol === symbol ? getBuiltCandles() : [];
+
+  if (Array.isArray(currentCandles) && currentCandles.length) {
+    sourceCandidates.push({ seconds: currentSeconds, candles: currentCandles });
+  }
+  if (Array.isArray(fallbackCandles) && fallbackCandles.length) {
+    sourceCandidates.push({ seconds: fallbackSeconds, candles: fallbackCandles });
+  }
+
+  [...TOP_DOWN_STACK_TIMEFRAMES, timeframeSeconds].forEach((seconds) => {
+    const cached = getCachedCandles(symbol, seconds);
+    if (cached.length) {
+      sourceCandidates.push({ seconds, candles: cached });
+    }
+  });
+
+  const unique = new Map();
+  sourceCandidates.forEach((candidate) => {
+    if (!candidate?.candles?.length || !Number.isFinite(candidate.seconds)) return;
+    if (!unique.has(candidate.seconds) || candidate.candles.length > unique.get(candidate.seconds).candles.length) {
+      unique.set(candidate.seconds, candidate);
+    }
+  });
+  return Array.from(unique.values()).sort((a, b) => a.seconds - b.seconds);
+}
+
+function resolveTopDownCandles(symbol, timeframeSeconds, fallbackCandles = [], fallbackSeconds = getChartTimeframeSeconds()) {
+  const targetSeconds = Math.max(1, Number(timeframeSeconds) || fallbackSeconds || DEFAULT_TIMEFRAME_SEC);
+  const exactCurrent = currentSymbol === symbol && targetSeconds === getChartTimeframeSeconds() ? getBuiltCandles() : [];
+  if (exactCurrent.length) return exactCurrent;
+
+  const exactCached = getCachedCandles(symbol, targetSeconds);
+  if (exactCached.length) return exactCached;
+
+  const candidates = getAvailableTopDownSourceCandles(symbol, targetSeconds, fallbackCandles, fallbackSeconds);
+  const aggregateSource = candidates.find((candidate) => candidate.seconds < targetSeconds && targetSeconds % candidate.seconds === 0);
+  if (aggregateSource?.candles?.length) {
+    return aggregateCandlesToTimeframe(aggregateSource.candles, aggregateSource.seconds, targetSeconds);
+  }
+
+  if (targetSeconds === fallbackSeconds && Array.isArray(fallbackCandles) && fallbackCandles.length) {
+    return fallbackCandles;
+  }
+
+  return [];
+}
+
+function maybePrimeTopDownTimeframeCache(symbol, baseSeconds = getChartTimeframeSeconds(), options = {}) {
+  if (!symbol) return;
+  const force = Boolean(options.force);
+  const refreshKey = `${symbol}|${Number(baseSeconds) || 0}`;
+  if (topDownCacheLoadState.get(refreshKey)) return;
+  const required = Array.from(new Set([...TOP_DOWN_STACK_TIMEFRAMES, Math.max(1, Number(baseSeconds) || DEFAULT_TIMEFRAME_SEC)]));
+  const missing = required.some((seconds) => !getCachedCandles(symbol, seconds, { freshOnly: !force }).length);
+  if (!force && !missing) return;
+
+  topDownCacheLoadState.set(refreshKey, true);
+  Promise.all(required.map(async (seconds) => {
+    try {
+      const candles = await fetchCandlesForGranularity(symbol, seconds, Math.min(MAX_CANDLES, 240));
+      if (candles.length) setCachedCandles(symbol, seconds, candles);
+    } catch {}
+  }))
+    .finally(() => {
+      topDownCacheLoadState.delete(refreshKey);
+    });
+}
+
+function getTopDownTimeframeTargets(baseSeconds = getChartTimeframeSeconds()) {
+  const sourceSeconds = Math.max(1, Number(baseSeconds) || 60);
+  if (sourceSeconds <= 300) {
+    return { sourceSeconds, entrySeconds: 30, alignSeconds: 60, mainSeconds: 300 };
+  }
+  return { sourceSeconds, entrySeconds: 60, alignSeconds: 300, mainSeconds: sourceSeconds };
+}
+
+function aggregateCandlesToTimeframe(candles, sourceSeconds = 60, targetSeconds = 300) {
+  const source = Math.max(1, Number(sourceSeconds) || 60);
+  const target = Math.max(source, Number(targetSeconds) || source);
+  const step = Math.max(1, Math.round(target / source));
+  if (!Array.isArray(candles) || candles.length < step) return [];
+  const grouped = [];
+  for (let i = 0; i < candles.length; i += step) {
+    const slice = candles.slice(i, i + step);
+    if (slice.length < step) continue;
+    grouped.push({
+      time: slice[0].time,
+      open: slice[0].open,
+      high: Math.max(...slice.map((c) => c.high)),
+      low: Math.min(...slice.map((c) => c.low)),
+      close: slice[slice.length - 1].close,
+    });
+  }
+  return grouped;
+}
+
+function assessEntryTrigger(candles, direction, referenceLevel = null) {
+  const recent = Array.isArray(candles) ? candles.slice(-6) : [];
+  if (!direction || direction === "SIDEWAYS" || recent.length < 4) {
+    return { ready: false, score: 0, reason: "waiting for entry candles" };
+  }
+
+  const current = recent[recent.length - 1];
+  const previous = recent[recent.length - 2];
+  const continuation = assessCandleContinuation(recent);
+  const closeStructure = assessCloseStructure(recent);
+  const sweepState = detectLiquiditySweepState(recent);
+  const avgRange = averageRange(recent, recent.length) || Math.max(Math.abs(current.close) * 0.001, currentPip || 0.0001);
+  const recentHigh = Math.max(...recent.slice(0, -1).map((candle) => candle.high));
+  const recentLow = Math.min(...recent.slice(0, -1).map((candle) => candle.low));
+  const tolerance = Math.max(avgRange * 0.15, currentPip || 0.0001);
+  let score = 0;
+  const reasons = [];
+
+  if (direction === "UP") {
+    if (closeStructure.bias === "UP") {
+      score += 1.6;
+      reasons.push("entry closes bullish");
+    }
+    if (continuation.bullScore >= 2) {
+      score += 1.2;
+      reasons.push("recent candles continue up");
+    }
+    if (current.close > previous.high - tolerance) {
+      score += 1.2;
+      reasons.push("last candle closed through prior high");
+    }
+    if (Number.isFinite(referenceLevel) && current.close >= referenceLevel) {
+      score += 0.9;
+      reasons.push("holding above setup level");
+    }
+    if (
+      sweepState.sweepType === "BUY" &&
+      sweepState.rejection?.strongBuyRejection &&
+      sweepState.rejection?.bullishConfirm
+    ) {
+      score += 1.1;
+      reasons.push("micro sweep confirmed");
+    }
+    if (current.close >= recentHigh - tolerance) {
+      score += 0.8;
+      reasons.push("near range high expansion");
+    }
+  } else if (direction === "DOWN") {
+    if (closeStructure.bias === "DOWN") {
+      score += 1.6;
+      reasons.push("entry closes bearish");
+    }
+    if (continuation.bearScore >= 2) {
+      score += 1.2;
+      reasons.push("recent candles continue down");
+    }
+    if (current.close < previous.low + tolerance) {
+      score += 1.2;
+      reasons.push("last candle closed through prior low");
+    }
+    if (Number.isFinite(referenceLevel) && current.close <= referenceLevel) {
+      score += 0.9;
+      reasons.push("holding below setup level");
+    }
+    if (
+      sweepState.sweepType === "SELL" &&
+      sweepState.rejection?.strongSellRejection &&
+      sweepState.rejection?.bearishConfirm
+    ) {
+      score += 1.1;
+      reasons.push("micro sweep confirmed");
+    }
+    if (current.close <= recentLow + tolerance) {
+      score += 0.8;
+      reasons.push("near range low expansion");
+    }
+  }
+
+  return {
+    ready: score >= 3.3,
+    score,
+    reason: reasons.join(" + ") || "waiting for entry candles",
+    closeStructure,
+    continuation,
+    sweepState,
+  };
+}
+
+function buildTopDownAnalysis(candles, baseSeconds = getChartTimeframeSeconds()) {
+  const targets = getTopDownTimeframeTargets(baseSeconds);
+  maybePrimeTopDownTimeframeCache(currentSymbol, baseSeconds);
+  const entryCandles = resolveTopDownCandles(currentSymbol, targets.entrySeconds, candles, targets.sourceSeconds);
+  const alignCandles = resolveTopDownCandles(currentSymbol, targets.alignSeconds, candles, targets.sourceSeconds);
+  const mainCandles = resolveTopDownCandles(currentSymbol, targets.mainSeconds, candles, targets.sourceSeconds);
+  const mainTrendState = detectTrend(mainCandles);
+  const alignTrendState = detectTrend(alignCandles);
+  const alignCloseStructure = assessCloseStructure(alignCandles);
+  const entryCloseStructure = assessCloseStructure(entryCandles);
+  const mainDirection = mainTrendState.trend === "UP" || mainTrendState.trend === "DOWN" ? mainTrendState.trend : null;
+  const alignmentDirection = alignTrendState.trend === "UP" || alignTrendState.trend === "DOWN"
+    ? alignTrendState.trend
+    : alignCloseStructure.bias === "UP" || alignCloseStructure.bias === "DOWN"
+      ? alignCloseStructure.bias
+      : null;
+  const aligned = Boolean(mainDirection && alignmentDirection && mainDirection === alignmentDirection);
+  const entryTrigger = assessEntryTrigger(entryCandles.length ? entryCandles : candles, mainDirection);
+
+  return {
+    ...targets,
+    entryCandles,
+    alignCandles,
+    mainCandles,
+    mainTrendState,
+    alignTrendState,
+    alignCloseStructure,
+    entryCloseStructure,
+    mainDirection,
+    alignmentDirection,
+    aligned,
+    entryTrigger,
+    summary: `${getTimeframeLabel(targets.mainSeconds)} ${mainTrendState.trend} -> ${getTimeframeLabel(targets.alignSeconds)} ${alignmentDirection || "MIXED"} -> ${getTimeframeLabel(targets.entrySeconds)} ${entryTrigger.ready ? "entry ready" : "wait"}`,
+  };
+}
+
 function getSignalState(candles) {
   const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
   if (hasAlgoBehaviorEngine) {
@@ -4988,6 +6033,8 @@ function getSignalState(candles) {
   const obv = calculateOBV(candles);
   const divergence = detectDivergence(candles, obv);
   const sweepState = detectLiquiditySweepState(candles);
+  const closeStructure = assessCloseStructure(candles);
+  const topDown = buildTopDownAnalysis(candles, getChartTimeframeSeconds());
   const current = candles[candles.length - 1];
   let confidence = calculateConfidence({
     trendStrength: trendState.trendStrength,
@@ -4998,21 +6045,44 @@ function getSignalState(candles) {
   if (divergence && divergence === sweepState.sweepType) {
     confidence = Math.min(100, confidence + 15);
   }
+  if (sweepState.sweepType === "BUY") {
+    if (closeStructure.bias === "UP") confidence = Math.min(100, confidence + 12);
+    else confidence = Math.max(0, confidence - 18);
+  } else if (sweepState.sweepType === "SELL") {
+    if (closeStructure.bias === "DOWN") confidence = Math.min(100, confidence + 12);
+    else confidence = Math.max(0, confidence - 18);
+  }
+  if (topDown.aligned) confidence = Math.min(100, confidence + 14);
+  else if (topDown.mainDirection) confidence = Math.max(0, confidence - 20);
+  if (topDown.entryTrigger.ready) confidence = Math.min(100, confidence + 10);
+  else if (topDown.mainDirection) confidence = Math.max(0, confidence - 8);
   const allowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
 
   let signal = "--";
   let tradeDirection = null;
   const rejection = sweepState.rejection;
   const buyReady =
+    topDown.mainDirection === "UP" &&
+    topDown.aligned &&
+    topDown.entryTrigger.ready &&
     trendState.trend === "UP" &&
     sweepState.sweepType === "BUY" &&
     rejection?.strongBuyRejection &&
-    rejection?.bullishConfirm;
+    rejection?.bullishConfirm &&
+    closeStructure.bias === "UP" &&
+    closeStructure.reclaimedLevel &&
+    current.close > (sweepState.referenceLevel ?? current.close);
   const sellReady =
+    topDown.mainDirection === "DOWN" &&
+    topDown.aligned &&
+    topDown.entryTrigger.ready &&
     trendState.trend === "DOWN" &&
     sweepState.sweepType === "SELL" &&
     rejection?.strongSellRejection &&
-    rejection?.bearishConfirm;
+    rejection?.bearishConfirm &&
+    closeStructure.bias === "DOWN" &&
+    closeStructure.lostLevel &&
+    current.close < (sweepState.referenceLevel ?? current.close);
 
   if (buyReady) {
     signal = allowEntry ? "ENTER NOW BUY" : "WAIT BUY";
@@ -5025,14 +6095,15 @@ function getSignalState(candles) {
   const setup = currentTrendMode === "SMC"
     ? detectSmcSetupState(candles, trendState)
     : trendState.modeLabel ? `${trendState.modeLabel} active` : "--";
+  const setupWithCloseStructure = `${setup} | ${topDown.summary} | entry ${topDown.entryTrigger.reason}`;
 
   return {
-    trend: trendState.trend,
+    trend: topDown.mainDirection ? `${topDown.mainTrendState.trend} / ${topDown.alignmentDirection || "MIXED"}` : trendState.trend,
     divergence: divergence || "--",
     sweep: sweepState.sweepType ? `${sweepState.sweepLabel} ${sweepState.rejectionLabel}` : "--",
     confidence,
     signal,
-    setup,
+    setup: setupWithCloseStructure,
     time: Date.now(),
     allowEntry,
     tradeDirection,
@@ -5098,24 +6169,53 @@ function getLiquidityPanelState(candles) {
 
   const trendState = detectTrend(candles);
   const sweepState = detectLiquiditySweepState(candles);
-  const confidence = calculateConfidence({
+  const closeStructure = assessCloseStructure(candles);
+  const topDown = buildTopDownAnalysis(candles, getChartTimeframeSeconds());
+  let confidence = calculateConfidence({
     trendStrength: trendState.trendStrength,
     wickStrength: sweepState.wickStrength,
     candleStrength: sweepState.candleStrength,
     levelStrength: sweepState.levelStrength,
   });
+  if (sweepState.sweepType === "BUY") {
+    confidence = closeStructure.bias === "UP" ? Math.min(100, confidence + 12) : Math.max(0, confidence - 18);
+  } else if (sweepState.sweepType === "SELL") {
+    confidence = closeStructure.bias === "DOWN" ? Math.min(100, confidence + 12) : Math.max(0, confidence - 18);
+  }
+  if (topDown.aligned) confidence = Math.min(100, confidence + 14);
+  else if (topDown.mainDirection) confidence = Math.max(0, confidence - 20);
+  if (topDown.entryTrigger.ready) confidence = Math.min(100, confidence + 10);
+  else if (topDown.mainDirection) confidence = Math.max(0, confidence - 8);
   const level = sweepState.referenceLevel != null ? formatPrice(sweepState.referenceLevel, currentPip) : "--";
   let entry = "WAIT";
-  if (sweepState.sweepType === "BUY" && sweepState.rejection?.strongBuyRejection && sweepState.rejection?.bullishConfirm) {
+  if (
+    topDown.mainDirection === "UP" &&
+    topDown.aligned &&
+    topDown.entryTrigger.ready &&
+    sweepState.sweepType === "BUY" &&
+    sweepState.rejection?.strongBuyRejection &&
+    sweepState.rejection?.bullishConfirm &&
+    closeStructure.bias === "UP" &&
+    closeStructure.reclaimedLevel
+  ) {
     entry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND ? "ENTER NOW BUY" : "WAIT BUY";
-  } else if (sweepState.sweepType === "SELL" && sweepState.rejection?.strongSellRejection && sweepState.rejection?.bearishConfirm) {
+  } else if (
+    topDown.mainDirection === "DOWN" &&
+    topDown.aligned &&
+    topDown.entryTrigger.ready &&
+    sweepState.sweepType === "SELL" &&
+    sweepState.rejection?.strongSellRejection &&
+    sweepState.rejection?.bearishConfirm &&
+    closeStructure.bias === "DOWN" &&
+    closeStructure.lostLevel
+  ) {
     entry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND ? "ENTER NOW SELL" : "WAIT SELL";
   }
 
   return {
-    trend: trendState.trend,
+    trend: topDown.mainDirection ? `${topDown.mainTrendState.trend} / ${topDown.alignmentDirection || "MIXED"}` : trendState.trend,
     sweep: sweepState.sweepLabel,
-    rejection: sweepState.rejectionLabel,
+    rejection: `${sweepState.rejectionLabel} | ${topDown.entryTrigger.reason}`,
     confidence,
     entry,
     level,
@@ -5342,6 +6442,8 @@ function renderMiniChart(candles) {
   const hasICTFib = activeChartIndicators.has("ICT_FIB");
   const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY");
   const hasAnyICT = hasICTKillzones || hasICTFVG || hasICTBPR || hasICTOB || hasICTStructure || hasICTFib || hasICTLiquidity;
+  const hasInstitutionalExecutionModel = activeChartIndicators.has("INST_EXECUTION_MODEL");
+  const hasInstitutionalLevelBehavior = activeChartIndicators.has("INST_LEVEL_BEHAVIOR");
   const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
   const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT");
   const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB");
@@ -5815,6 +6917,195 @@ function renderMiniChart(candles) {
     const bodyH = Math.max(2, Math.abs(closeY - openY));
     ctx.fillRect(x, bodyY, candleW, bodyH);
   });
+
+  if (hasInstitutionalExecutionModel) {
+    const iem = buildInstitutionalExecutionModel(candles, {});
+
+    iem.poiLevels.slice(0, 6).forEach((level) => {
+      const y = toY(level.price);
+      if (!Number.isFinite(y)) return;
+      ctx.save();
+      ctx.strokeStyle = "rgba(242, 201, 76, 0.54)";
+      ctx.fillStyle = "rgba(242, 201, 76, 0.10)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4, 3]);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, y);
+      ctx.lineTo(width - rightPad, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = "#f2c94c";
+      const sourceLabel = level.source?.includes("1m") && level.source?.includes("5m")
+        ? "M1+M5"
+        : level.source === "1m"
+          ? "M1"
+          : "M5";
+      ctx.fillText(`${sourceLabel} POI ${level.strength}`, width - rightPad - 4, y - 2);
+      ctx.restore();
+    });
+
+    iem.signals.forEach((signal) => {
+      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+      const candle = candles[signal.entryIndex];
+      if (!candle) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isBuy = signal.direction === "BUY";
+      const anchorY = isBuy ? toY(candle.low) + 16 : toY(candle.high) - 16;
+      const color = isBuy ? "#18d89f" : "#ff6a4d";
+      const resultText = signal.result === "WIN" ? "W" : signal.result === "LOSS" ? "L" : "";
+
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "#0f1218";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, anchorY - 10);
+        ctx.lineTo(x - 7, anchorY + 4);
+        ctx.lineTo(x + 7, anchorY + 4);
+      } else {
+        ctx.moveTo(x, anchorY + 10);
+        ctx.lineTo(x - 7, anchorY - 4);
+        ctx.lineTo(x + 7, anchorY - 4);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      ctx.font = "bold 8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(isBuy ? "BUY" : "SELL", x, isBuy ? anchorY + 7 : anchorY - 7);
+      if (resultText) {
+        ctx.fillStyle = signal.result === "WIN" ? "#7dff88" : "#ff8a8a";
+        ctx.fillText(resultText, x + 12, isBuy ? anchorY + 7 : anchorY - 7);
+      }
+      ctx.restore();
+    });
+
+    const statLines = [
+      `IEM ${iem.stats.winRate == null ? "--" : `${iem.stats.winRate}%`} ${baseMinutes}m`,
+      `${iem.stats.wins}W/${iem.stats.losses}L`,
+      `Min ${iem.stats.minConfidence}% 15m ${iem.trend15}`,
+    ];
+    const boxW = 112;
+    const boxH = 42;
+    const boxX = leftPad + 4;
+    const boxY = topPad + 4;
+    ctx.save();
+    ctx.fillStyle = "rgba(12, 16, 22, 0.78)";
+    ctx.strokeStyle = "rgba(242, 201, 76, 0.42)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#f2c94c";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    statLines.forEach((line, index) => {
+      ctx.fillText(line, boxX + 7, boxY + 6 + (index * 12));
+    });
+    ctx.restore();
+  }
+
+  if (hasInstitutionalLevelBehavior) {
+    const ilb = buildInstitutionalLevelBehaviorModel(candles, {});
+
+    ilb.poiLevels.slice(0, 6).forEach((level) => {
+      const y = toY(level.price);
+      if (!Number.isFinite(y)) return;
+      ctx.save();
+      ctx.strokeStyle = "rgba(80, 210, 255, 0.52)";
+      ctx.lineWidth = 1;
+      ctx.setLineDash([6, 3]);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, y);
+      ctx.lineTo(width - rightPad, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "top";
+      ctx.fillStyle = "#50d2ff";
+      const sourceLabel = level.source?.includes("1m") && level.source?.includes("5m")
+        ? "M1+M5"
+        : level.source === "1m"
+          ? "M1"
+          : "M5";
+      ctx.fillText(`${sourceLabel} LB ${level.strength}`, width - rightPad - 4, y + 2);
+      ctx.restore();
+    });
+
+    ilb.signals.forEach((signal) => {
+      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+      const candle = candles[signal.entryIndex];
+      if (!candle) return;
+      const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
+      const isBuy = signal.direction === "BUY";
+      const isBreakout = signal.behavior === "MULTI_TOUCH_BREAKOUT";
+      const anchorY = isBuy ? toY(candle.low) + 18 : toY(candle.high) - 18;
+      const color = isBreakout ? "#50d2ff" : isBuy ? "#7dff88" : "#ff8a4c";
+      const tag = isBreakout ? "BRK" : signal.behavior === "FAKE_BREAK_REVERSAL" ? "FK" : `T${Math.min(9, signal.touches)}`;
+      const resultText = signal.result === "WIN" ? "W" : signal.result === "LOSS" ? "L" : "";
+
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "#0f1218";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, anchorY - 11);
+        ctx.lineTo(x - 8, anchorY + 5);
+        ctx.lineTo(x + 8, anchorY + 5);
+      } else {
+        ctx.moveTo(x, anchorY + 11);
+        ctx.lineTo(x - 8, anchorY - 5);
+        ctx.lineTo(x + 8, anchorY - 5);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      ctx.font = "bold 8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(`${isBuy ? "BUY" : "SELL"} ${tag}`, x, isBuy ? anchorY + 8 : anchorY - 8);
+      if (resultText) {
+        ctx.fillStyle = signal.result === "WIN" ? "#7dff88" : "#ff8a8a";
+        ctx.fillText(resultText, x + 16, isBuy ? anchorY + 8 : anchorY - 8);
+      }
+      ctx.restore();
+    });
+
+    const statLines = [
+      `ILB ${ilb.stats.winRate == null ? "--" : `${ilb.stats.winRate}%`} ${baseMinutes}m`,
+      `${ilb.stats.wins}W/${ilb.stats.losses}L`,
+      `Min ${ilb.stats.minConfidence}% touch logic`,
+    ];
+    const boxW = 126;
+    const boxH = 42;
+    const boxX = leftPad + 4;
+    const boxY = hasInstitutionalExecutionModel ? topPad + 52 : topPad + 4;
+    ctx.save();
+    ctx.fillStyle = "rgba(12, 16, 22, 0.78)";
+    ctx.strokeStyle = "rgba(80, 210, 255, 0.42)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#50d2ff";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    statLines.forEach((line, index) => {
+      ctx.fillText(line, boxX + 7, boxY + 6 + (index * 12));
+    });
+    ctx.restore();
+  }
 
   if (activeChartIndicators.has("EMA")) {
     const emaValues = calculateChartEMA(points, 9);
@@ -7293,6 +8584,7 @@ function updateCrosshairToggleUI() {
   if (!toggleCrosshairBtn) return;
   toggleCrosshairBtn.classList.toggle("active", chartCrosshairEnabled);
   toggleCrosshairBtn.setAttribute("aria-pressed", chartCrosshairEnabled ? "true" : "false");
+  syncChart2MobileToolbar();
 }
 
 function ensureCrosshairVisible() {
@@ -7617,6 +8909,16 @@ function buildIndicatorSignalAlerts(candles) {
     });
   }
 
+  if (activeChartIndicators.has("INST_EXECUTION_MODEL")) {
+    const iem = buildInstitutionalExecutionModel(candles, {});
+    iem.signals.forEach((signal) => addAlert("INST_EXECUTION_MODEL", signal.entryIndex, signal.direction, signal.result.toLowerCase()));
+  }
+
+  if (activeChartIndicators.has("INST_LEVEL_BEHAVIOR")) {
+    const ilb = buildInstitutionalLevelBehaviorModel(candles, {});
+    ilb.signals.forEach((signal) => addAlert("INST_LEVEL_BEHAVIOR", signal.entryIndex, signal.direction, signal.behavior));
+  }
+
   if (activeChartIndicators.has("SMC_PRO_COMBO")) {
     const smc = buildSMCProCombo(candles, {
       leftLen: 5,
@@ -7785,6 +9087,7 @@ function updateTimeframeUI() {
   const label = getTimeframeLabel(candleBuilder.timeframe);
   if (chartTfLabelEl) chartTfLabelEl.textContent = label;
   if (chartTfSelectEl) chartTfSelectEl.value = String(candleBuilder.timeframe);
+  syncChart2MobileToolbar();
 }
 
 function hideTimeframePicker() {
@@ -7840,22 +9143,99 @@ function renderChartIndicatorList() {
 }
 
 function populateIndicatorOptions() {
-  if (!indicatorSelectEl) return;
+  if (indicatorSelectEl) {
+    const groups = CHART_INDICATOR_GROUPS
+      .map((group) => {
+        const options = group.items
+          .map((value) => `<option value="${value}">${getChartIndicatorLabel(value)}</option>`)
+          .join("");
+        const category = group.category ? `${group.category} - ` : "";
+        return `<optgroup label="${category}${group.label}">${options}</optgroup>`;
+      })
+      .join("");
+    indicatorSelectEl.innerHTML = `<option value="">Indicators</option>${groups}`;
+  }
+  renderIndicatorMenu();
+}
+
+function renderIndicatorMenu() {
+  if (!indicatorMenuEl) return;
+  const categories = [
+    { value: "ANALYSIS", label: "Analysis" },
+    { value: "SIGNALS", label: "Signals" },
+  ];
   const groups = CHART_INDICATOR_GROUPS
+    .filter((group) => group.category === activeIndicatorMenuCategory)
     .map((group) => {
-      const options = group.items
-        .map((value) => `<option value="${value}">${getChartIndicatorLabel(value)}</option>`)
+      const items = group.items
+        .map((value) => {
+          const active = activeChartIndicators.has(value);
+          return `<button class="indicator-menu-item ${active ? "active" : ""}" type="button" data-indicator-value="${value}">
+            <span>${getChartIndicatorLabel(value)}</span>
+            ${active ? "<span class=\"indicator-menu-check\">Added</span>" : ""}
+          </button>`;
+        })
         .join("");
-      return `<optgroup label="${group.label}">${options}</optgroup>`;
+      return `<div class="indicator-menu-group">
+        <div class="indicator-menu-group-title">${group.label}</div>
+        <div class="indicator-menu-items">${items}</div>
+      </div>`;
     })
     .join("");
-  indicatorSelectEl.innerHTML = `<option value="">Indicators</option>${groups}`;
+  indicatorMenuEl.innerHTML = `
+    <div class="indicator-menu-tabs" role="tablist" aria-label="Indicator type">
+      ${categories.map((category) => (
+        `<button class="indicator-menu-tab ${activeIndicatorMenuCategory === category.value ? "active" : ""}" type="button" role="tab" aria-selected="${activeIndicatorMenuCategory === category.value}" data-indicator-category="${category.value}">
+          ${category.label}
+        </button>`
+      )).join("")}
+    </div>
+    <div class="indicator-menu-content">
+      ${groups || "<div class=\"indicator-menu-empty\">No indicators</div>"}
+    </div>
+  `;
+}
+
+function setIndicatorMenuOpen(open) {
+  if (!indicatorMenuEl || !indicatorMenuButtonEl) return;
+  indicatorMenuEl.classList.toggle("hidden", !open);
+  indicatorMenuButtonEl.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
+function syncChart2MobileToolbar() {
+  if (!chart2MobileToolbarEl) return;
+  const tfBtn = chart2MobileToolbarEl.querySelector("[data-chart2-tool='timeframe']");
+  if (tfBtn) tfBtn.textContent = getTimeframeLabel(candleBuilder.timeframe).toUpperCase();
+  chart2MobileToolbarEl.querySelector("[data-chart2-tool='crosshair']")?.classList.toggle("active", chartCrosshairEnabled);
+  chart2MobileToolbarEl.querySelector("[data-chart2-tool='drawing']")?.classList.toggle("active", chartDrawingTool !== "SELECT");
+}
+
+function renderChart2DrawingMenu() {
+  if (!chart2DrawingMenuEl) return;
+  const labels = {
+    SELECT: "Select",
+    TRENDLINE: "Trendline",
+    HLINE: "Horizontal",
+    HRAY: "Ray",
+    RECT: "Rectangle",
+    FIB: "Fib",
+  };
+  chart2DrawingMenuEl.innerHTML = DRAWING_TOOL_OPTIONS
+    .map((tool) => `<button class="chart2-drawing-item ${chartDrawingTool === tool ? "active" : ""}" type="button" data-chart2-drawing-tool="${tool}">${labels[tool] || tool}</button>`)
+    .join("");
+}
+
+function setChart2DrawingMenuOpen(open) {
+  if (!chart2DrawingMenuEl) return;
+  if (open) renderChart2DrawingMenu();
+  chart2DrawingMenuEl.classList.toggle("hidden", !open);
 }
 
 function addChartIndicator(value) {
   if (!value) return;
   activeChartIndicators.add(value);
   renderChartIndicatorList();
+  renderIndicatorMenu();
   renderMiniChart(getBuiltCandles());
 }
 
@@ -7863,6 +9243,7 @@ function removeChartIndicator(value) {
   if (!value) return;
   activeChartIndicators.delete(value);
   renderChartIndicatorList();
+  renderIndicatorMenu();
   renderMiniChart(getBuiltCandles());
 }
 
@@ -8016,13 +9397,13 @@ function onMessage(event) {
     tickStreamId = data.tick.id || tickStreamId;
     scheduleProposalRefresh();
 
-    const { candles } = candleBuilder.update(data.tick);
+    const { candles, newCandleFormed } = candleBuilder.update(data.tick);
     const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
+    if (currentSymbol) setCachedCandles(currentSymbol, candleBuilder.timeframe, allCandles);
+    if (newCandleFormed && currentSymbol) maybePrimeTopDownTimeframeCache(currentSymbol, candleBuilder.timeframe);
     updateSignalFromCandles(allCandles, { live: true });
     if (backtestSignalArmed && backtestSignalTargetSymbol === currentSymbol) {
-      updateBacktestSignalMonitor(allCandles, Number(price)).catch((err) => {
-        if (backtestStatusEl) backtestStatusEl.textContent = `Backtest monitor failed: ${err?.message || "unknown error"}`;
-      });
+      scheduleBacktestSignalMonitor(allCandles, Number(price), { immediate: Boolean(newCandleFormed) });
     }
   }
   if (data.msg_type === "balance" && data.balance) {
@@ -8031,6 +9412,54 @@ function onMessage(event) {
   if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
     handleOpenContractUpdate(data.proposal_open_contract, data.subscription?.id);
   }
+}
+
+function clearBacktestMonitorQueue() {
+  if (backtestMonitorTimer) {
+    clearTimeout(backtestMonitorTimer);
+    backtestMonitorTimer = null;
+  }
+  backtestMonitorRunning = false;
+  backtestMonitorQueued = false;
+  backtestMonitorQueuedCandles = null;
+  backtestMonitorQueuedPrice = null;
+  backtestMonitorLastRunAt = 0;
+}
+
+function scheduleBacktestSignalMonitor(candles, currentPriceOverride = null, options = {}) {
+  backtestMonitorQueuedCandles = candles;
+  backtestMonitorQueuedPrice = currentPriceOverride;
+  backtestMonitorQueued = true;
+
+  const immediate = Boolean(options.immediate);
+  const startRun = () => {
+    if (!backtestSignalArmed || !backtestMonitorQueued || backtestMonitorRunning) return;
+    const queuedCandles = backtestMonitorQueuedCandles;
+    const queuedPrice = backtestMonitorQueuedPrice;
+    backtestMonitorQueued = false;
+    backtestMonitorRunning = true;
+    backtestMonitorLastRunAt = Date.now();
+    updateBacktestSignalMonitor(queuedCandles, queuedPrice)
+      .catch((err) => {
+        if (backtestStatusEl) backtestStatusEl.textContent = `Backtest monitor failed: ${err?.message || "unknown error"}`;
+      })
+      .finally(() => {
+        backtestMonitorRunning = false;
+        if (backtestMonitorQueued) {
+          scheduleBacktestSignalMonitor(backtestMonitorQueuedCandles, backtestMonitorQueuedPrice, { immediate: false });
+        }
+      });
+  };
+
+  if (backtestMonitorRunning) return;
+
+  const elapsed = Date.now() - backtestMonitorLastRunAt;
+  const waitMs = immediate ? 0 : Math.max(0, BACKTEST_MONITOR_MIN_INTERVAL_MS - elapsed);
+  if (backtestMonitorTimer) clearTimeout(backtestMonitorTimer);
+  backtestMonitorTimer = setTimeout(() => {
+    backtestMonitorTimer = null;
+    startRun();
+  }, waitMs);
 }
 
 function formatPrice(value, pip) {
@@ -8353,11 +9782,13 @@ function buildCompositeBacktestSignal(candles, options = {}) {
   };
 }
 
-function runCompositeBacktest(candles) {
+async function runCompositeBacktest(candles, options = {}) {
   if (!Array.isArray(candles) || candles.length < 70) {
     return { tested: 0, wins: 0, losses: 0, flats: 0, winRate: 0 };
   }
   const startIndex = Math.max(45, candles.length - 60);
+  const chunkSize = Math.max(4, Number(options.chunkSize) || 8);
+  const onProgress = typeof options.onProgress === "function" ? options.onProgress : null;
   let tested = 0;
   let wins = 0;
   let losses = 0;
@@ -8375,6 +9806,20 @@ function runCompositeBacktest(candles) {
     }
     if (actual === signal.direction) wins += 1;
     else losses += 1;
+
+    if (((targetIndex - startIndex + 1) % chunkSize) === 0) {
+      if (onProgress) {
+        onProgress({
+          completed: targetIndex - startIndex + 1,
+          total: candles.length - startIndex,
+          tested,
+          wins,
+          losses,
+          flats,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
   }
 
   return {
@@ -8848,22 +10293,7 @@ function computeBacktestSignalSchedule() {
 }
 
 function aggregateCandlesBySeconds(candles, targetSeconds = 300) {
-  const sourceSeconds = 60;
-  const step = Math.max(1, Math.round(targetSeconds / sourceSeconds));
-  if (!Array.isArray(candles) || candles.length < step) return [];
-  const grouped = [];
-  for (let i = 0; i < candles.length; i += step) {
-    const slice = candles.slice(i, i + step);
-    if (slice.length < step) continue;
-    grouped.push({
-      time: slice[0].time,
-      open: slice[0].open,
-      high: Math.max(...slice.map((c) => c.high)),
-      low: Math.min(...slice.map((c) => c.low)),
-      close: slice[slice.length - 1].close,
-    });
-  }
-  return grouped;
+  return aggregateCandlesToTimeframe(candles, 60, targetSeconds);
 }
 
 function buildBacktestMicroConfirmation(candles, referencePrice) {
@@ -9092,6 +10522,7 @@ function stopBacktestSignalMonitor() {
   backtestCommittedSignal = null;
   backtestEntryDecision = null;
   stopBacktestCountdown();
+  clearBacktestMonitorQueue();
 }
 
 function resetBacktestPanel(reason = "Ready.") {
@@ -9302,7 +10733,14 @@ async function runBacktestNow() {
   if (backtestStatusEl) backtestStatusEl.textContent = "Running last 1h 1m backtest...";
   try {
     const candles = await fetchHistoricalCandles(symbol, 60, 180);
-    const score = runCompositeBacktest(candles);
+    const score = await runCompositeBacktest(candles, {
+      chunkSize: 8,
+      onProgress: ({ completed, total }) => {
+        if (backtestStatusEl) {
+          backtestStatusEl.textContent = `Running backtest... ${completed}/${total}`;
+        }
+      },
+    });
     if (backtestWinRateEl) backtestWinRateEl.textContent = `${score.winRate.toFixed(1)}%`;
     if (backtestTradeCountEl) backtestTradeCountEl.textContent = String(score.tested);
     if (backtestWinsLossesEl) backtestWinsLossesEl.textContent = `${score.wins} / ${score.losses}`;
@@ -9417,6 +10855,7 @@ function updateSidebarToggleUI() {
     toggleSignalSidebarBtn.textContent = collapsed ? "Show Signals" : "Hide Signals";
     toggleSignalSidebarBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
   }
+  chart2BackBtn?.classList.toggle("visible", currentAppTab === "chart_2");
 }
 
 function setActiveAppTab(tabName) {
@@ -9739,6 +11178,7 @@ function onSymbolChange() {
   symbolPrice.textContent = "--";
   currentSymbol = symbol;
   currentPip = pip;
+  maybePrimeTopDownTimeframeCache(symbol, candleBuilder.timeframe, { force: true });
   resetBacktestPanel(`Ready for ${display}.`);
   if (defaultBarrier != null) {
     if (barrierInput) barrierInput.value = defaultBarrier;
@@ -9775,6 +11215,8 @@ async function loadTickHistory(symbol) {
       built = await loadCandleHistory(symbol);
     }
 
+    setCachedCandles(symbol, candleBuilder.timeframe, built);
+    maybePrimeTopDownTimeframeCache(symbol, candleBuilder.timeframe);
     updateSignalFromCandles(built);
   } catch (err) {
     setStatus(err?.message || "History load failed", true);
@@ -9809,49 +11251,23 @@ async function loadCandleHistory(symbol) {
 
   if (candleHistory.length) {
     candleBuilder.setHistory(candleHistory);
-    return candleBuilder.currentCandle
+    const built = candleBuilder.currentCandle
       ? [...candleBuilder.candles, candleBuilder.currentCandle]
       : candleBuilder.candles;
+    setCachedCandles(symbol, candleBuilder.timeframe, built);
+    return built;
   }
 
   const history = res.history || {};
-  return rebuildCandlesFromHistory(history.prices || [], history.times || []);
+  const built = rebuildCandlesFromHistory(history.prices || [], history.times || []);
+  setCachedCandles(symbol, candleBuilder.timeframe, built);
+  return built;
 }
 
 async function loadAggregatedTickHistory(symbol) {
-  let end = "latest";
-  let prices = [];
-  let times = [];
-
-  for (let batch = 0; batch < MAX_TICK_HISTORY_BATCHES; batch += 1) {
-    const res = await wsRequest({
-      ticks_history: symbol,
-      end,
-      style: "ticks",
-      count: MAX_TICK_HISTORY_BATCH,
-    });
-
-    const history = res.history || {};
-    const batchPrices = Array.isArray(history.prices) ? history.prices : [];
-    const batchTimes = Array.isArray(history.times) ? history.times : [];
-    if (!batchPrices.length || !batchTimes.length) break;
-
-    prices = [...batchPrices, ...prices];
-    times = [...batchTimes, ...times];
-
-    const built = rebuildCandlesFromHistory(prices, times);
-    if (built.length >= MAX_CANDLES) {
-      return built.slice(-MAX_CANDLES);
-    }
-
-    const earliestBatchTime = Number(batchTimes[0]);
-    if (!Number.isFinite(earliestBatchTime)) break;
-    end = earliestBatchTime - 1;
-
-    if (batchPrices.length < MAX_TICK_HISTORY_BATCH) break;
-  }
-
-  return rebuildCandlesFromHistory(prices, times).slice(-MAX_CANDLES);
+  const built = await loadAggregatedTickHistoryForGranularity(symbol, candleBuilder.timeframe);
+  setCachedCandles(symbol, candleBuilder.timeframe, built);
+  return built;
 }
 
 function parseDurationToSeconds(value) {
@@ -10293,6 +11709,7 @@ function init() {
   desktopSidebarExtraEl = document.getElementById("desktopSidebarExtra");
   toggleSidebarBtn = document.getElementById("toggleSidebar");
   toggleSignalSidebarBtn = document.getElementById("toggleSignalSidebar");
+  chart2BackBtn = document.getElementById("chart2BackBtn");
   desktopTradeTypeCardEl = document.getElementById("desktopTradeTypeCard");
   desktopTradeTypeSelectEl = document.getElementById("desktopTradeTypeSelect");
   ensureSignalToastLayer();
@@ -10345,7 +11762,12 @@ function init() {
   chartTfLabelEl = document.getElementById("chartTfLabel");
   chartTfPickerEl = document.getElementById("chartTfPicker");
   chartTfSelectEl = document.getElementById("chartTfSelect");
+  chart2MobileToolbarEl = document.getElementById("chart2MobileToolbar");
+  chart2DrawingMenuEl = document.getElementById("chart2DrawingMenu");
   indicatorSelectEl = document.getElementById("indicatorSelect");
+  indicatorPickerEl = document.getElementById("indicatorPicker");
+  indicatorMenuButtonEl = document.getElementById("indicatorMenuButton");
+  indicatorMenuEl = document.getElementById("indicatorMenu");
   chartIndicatorListEl = document.getElementById("chartIndicatorList");
   trendModeSelectEl = document.getElementById("trendModeSelect");
   drawingToolSelectEl = document.getElementById("drawingToolSelect");
@@ -10552,6 +11974,55 @@ function init() {
     phoneEl?.classList.toggle("signal-sidebar-collapsed");
     updateSidebarToggleUI();
     scheduleChartResize();
+  });
+
+  chart2BackBtn?.addEventListener("click", () => {
+    setActiveAppTab("chart");
+  });
+
+  chart2MobileToolbarEl?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const button = target.closest("[data-chart2-tool]");
+    if (!(button instanceof HTMLElement)) return;
+    const action = button.getAttribute("data-chart2-tool");
+    if (action === "timeframe") {
+      setChart2DrawingMenuOpen(false);
+      openTimeframePicker();
+    } else if (action === "indicator") {
+      setChart2DrawingMenuOpen(false);
+      activeIndicatorMenuCategory = "ANALYSIS";
+      renderIndicatorMenu();
+      setIndicatorMenuOpen(true);
+    } else if (action === "drawing") {
+      setIndicatorMenuOpen(false);
+      setChart2DrawingMenuOpen(chart2DrawingMenuEl?.classList.contains("hidden"));
+    } else if (action === "crosshair") {
+      setCrosshairEnabled(!chartCrosshairEnabled);
+    } else if (action === "reset") {
+      resetChartView();
+    } else if (action === "zoom-in") {
+      chartPoints = Math.max(10, chartPoints - 10);
+      const built = getBuiltCandles();
+      const { min, max } = getChartOffsetBounds(built);
+      chartOffset = clamp(chartOffset, min, max);
+      renderMiniChart(built);
+    } else if (action === "zoom-out") {
+      chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
+      const built = getBuiltCandles();
+      const { min, max } = getChartOffsetBounds(built);
+      chartOffset = clamp(chartOffset, min, max);
+      renderMiniChart(built);
+    }
+  });
+
+  chart2DrawingMenuEl?.addEventListener("click", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const button = target.closest("[data-chart2-drawing-tool]");
+    if (!(button instanceof HTMLElement)) return;
+    setDrawingTool(button.getAttribute("data-chart2-drawing-tool"));
+    setChart2DrawingMenuOpen(false);
   });
 
   document.addEventListener("pointerdown", (event) => {
@@ -10875,6 +12346,42 @@ function init() {
     if (!value) return;
     addChartIndicator(value);
     indicatorSelectEl.value = "";
+  });
+
+  indicatorMenuButtonEl?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const isOpen = !indicatorMenuEl?.classList.contains("hidden");
+    setIndicatorMenuOpen(!isOpen);
+  });
+
+  indicatorMenuEl?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const target = event.target;
+    if (!(target instanceof HTMLElement)) return;
+    const categoryBtn = target.closest("[data-indicator-category]");
+    if (categoryBtn instanceof HTMLElement) {
+      activeIndicatorMenuCategory = categoryBtn.getAttribute("data-indicator-category") === "SIGNALS" ? "SIGNALS" : "ANALYSIS";
+      renderIndicatorMenu();
+      return;
+    }
+    const itemBtn = target.closest("[data-indicator-value]");
+    if (itemBtn instanceof HTMLElement) {
+      const value = itemBtn.getAttribute("data-indicator-value");
+      if (value) addChartIndicator(value);
+      setIndicatorMenuOpen(false);
+    }
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!indicatorPickerEl || !(event.target instanceof Node)) return;
+    if (chart2MobileToolbarEl?.contains(event.target) || indicatorMenuEl?.contains(event.target)) return;
+    if (!indicatorPickerEl.contains(event.target)) setIndicatorMenuOpen(false);
+  });
+
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (chart2MobileToolbarEl?.contains(event.target) || chart2DrawingMenuEl?.contains(event.target)) return;
+    setChart2DrawingMenuOpen(false);
   });
 
   chartIndicatorListEl?.addEventListener("click", (event) => {

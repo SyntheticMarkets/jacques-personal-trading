@@ -109,6 +109,19 @@ body {
   display: none;
 }
 
+.chart2-back-btn {
+  display: none;
+}
+
+.chart2-mobile-toolbar,
+.chart2-drawing-menu {
+  display: none;
+}
+
+.phone.chart2-mode .chart2-back-btn.visible {
+  display: inline-flex;
+}
+
 .account-summary {
   display: inline-flex;
   align-items: center;
@@ -908,6 +921,138 @@ button.small {
   font-weight: 700;
 }
 
+.chart-indicator-picker {
+  position: relative;
+}
+
+button.chart-indicator-select {
+  width: 160px !important;
+  text-align: left;
+  cursor: pointer;
+}
+
+.indicator-menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 8px);
+  z-index: 20;
+  width: min(360px, calc(100vw - 36px));
+  max-height: 460px;
+  overflow: hidden;
+  border: 1px solid #2f3a4d;
+  border-radius: 8px;
+  background: #0f141c;
+  box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
+}
+
+.indicator-menu-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 4px;
+  padding: 8px;
+  border-bottom: 1px solid #253043;
+  background: #111824;
+}
+
+.indicator-menu-tab {
+  min-height: 32px;
+  border: 1px solid #253043;
+  border-radius: 6px;
+  background: #0c1119;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.indicator-menu-tab.active {
+  border-color: #3c5f93;
+  background: #172235;
+  color: var(--text);
+}
+
+.indicator-menu-content {
+  max-height: 398px;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.indicator-menu-group + .indicator-menu-group {
+  margin-top: 10px;
+}
+
+.indicator-menu-group-title {
+  margin: 0 0 4px;
+  color: #d7e1ee;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+
+.indicator-menu-items {
+  display: grid;
+  gap: 3px;
+}
+
+.indicator-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  min-height: 32px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  font-size: 12px;
+  text-align: left;
+}
+
+.indicator-menu-item:hover,
+.indicator-menu-item.active {
+  border-color: #253043;
+  background: #151d2a;
+}
+
+.indicator-menu-check {
+  color: #7dff88;
+  font-size: 10px;
+  font-weight: 800;
+}
+
+.indicator-menu-empty {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 12px;
+}
+
+@media (max-width: 720px) {
+  .chart-indicator-picker {
+    position: static;
+  }
+
+  .indicator-menu {
+    position: fixed;
+    left: 50%;
+    right: auto;
+    bottom: 84px;
+    width: min(440px, calc(100vw - 32px));
+    max-height: min(58vh, 420px);
+    transform: translateX(-50%);
+  }
+
+  .indicator-menu-content {
+    max-height: calc(min(58vh, 420px) - 50px);
+  }
+
+  .indicator-menu-tab,
+  .indicator-menu-item {
+    min-height: 38px;
+    font-size: 13px;
+  }
+}
+
 .chart-indicator-list {
   display: flex;
   flex-wrap: wrap;
@@ -1509,5 +1654,239 @@ button.small {
   .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
     flex: 0 0 auto !important;
     width: 100% !important;
+  }
+}
+
+@media (max-width: 720px) {
+  .phone.chart2-mode {
+    width: 100vw !important;
+    max-width: 100vw !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+  }
+
+  .phone.chart2-mode .topbar {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    right: 8px;
+    z-index: 35;
+    margin: 0;
+    pointer-events: none;
+  }
+
+  .phone.chart2-mode .topbar-actions {
+    width: 100%;
+    justify-content: space-between;
+    pointer-events: none;
+  }
+
+  .phone.chart2-mode .chart2-back-btn.visible,
+  .phone.chart2-mode .status {
+    pointer-events: auto;
+    background: rgba(15, 20, 28, 0.86);
+    backdrop-filter: blur(8px);
+  }
+
+  .phone.chart2-mode #accountSummary,
+  .phone.chart2-mode #toggleSidebar,
+  .phone.chart2-mode #toggleSignalSidebar {
+    display: none !important;
+  }
+
+  .phone.chart2-mode .desktop-sidebar {
+    position: fixed !important;
+    top: 46px !important;
+    left: 8px !important;
+    right: 8px !important;
+    z-index: 34 !important;
+    display: block !important;
+    width: auto !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    opacity: 1 !important;
+    pointer-events: auto !important;
+  }
+
+  .phone.chart2-mode .desktop-sidebar .app-tabs {
+    display: grid !important;
+    grid-template-columns: repeat(6, minmax(0, 1fr)) !important;
+    gap: 4px !important;
+    margin: 0 !important;
+    padding: 6px !important;
+    border: 1px solid #243143;
+    border-radius: 12px;
+    background: rgba(18, 24, 34, 0.88);
+    backdrop-filter: blur(8px);
+  }
+
+  .phone.chart2-mode .desktop-sidebar .app-tab {
+    display: inline-flex !important;
+    align-items: center;
+    justify-content: center;
+    min-width: 0 !important;
+    width: 100% !important;
+    min-height: 34px !important;
+    padding: 4px 2px !important;
+    border-radius: 8px !important;
+    font-size: 10px !important;
+    line-height: 1.05 !important;
+    text-align: center !important;
+  }
+
+  .phone.chart2-mode .desktop-sidebar-extra {
+    display: none !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] > .trade-section:first-child,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-body {
+    position: fixed;
+    inset: 0;
+    width: 100vw !important;
+    height: 100dvh !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: 0 !important;
+    border-radius: 0 !important;
+    background: #0f141c !important;
+    overflow: hidden !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .signal-chart-head {
+    display: none !important;
+  }
+
+  .phone.chart2-mode .chart2-mobile-toolbar {
+    position: fixed;
+    left: 10px;
+    top: 116px;
+    z-index: 32;
+    display: grid;
+    gap: 8px;
+    width: 52px;
+    padding: 8px;
+    border: 1px solid #243143;
+    border-radius: 12px;
+    background: rgba(18, 24, 34, 0.9);
+    backdrop-filter: blur(8px);
+  }
+
+  .phone.chart2-mode .chart2-tool {
+    width: 36px;
+    height: 36px;
+    min-width: 36px;
+    min-height: 36px;
+    padding: 0;
+    border: 1px solid #263246;
+    border-radius: 8px;
+    background: #0f141c;
+    color: #d9e4f1;
+    font-size: 16px;
+    font-weight: 800;
+    line-height: 1;
+  }
+
+  .phone.chart2-mode .chart2-tool-timeframe {
+    font-size: 11px;
+  }
+
+  .phone.chart2-mode .chart2-tool.active {
+    border-color: #3c5f93;
+    background: #172235;
+    color: #ffffff;
+  }
+
+  .phone.chart2-mode .chart2-drawing-menu {
+    position: fixed;
+    left: 72px;
+    top: 166px;
+    z-index: 44;
+    display: grid;
+    gap: 4px;
+    width: 132px;
+    padding: 8px;
+    border: 1px solid #243143;
+    border-radius: 10px;
+    background: rgba(18, 24, 34, 0.94);
+    backdrop-filter: blur(8px);
+  }
+
+  .phone.chart2-mode .chart2-drawing-menu.hidden {
+    display: none;
+  }
+
+  .phone.chart2-mode .chart2-drawing-item {
+    min-height: 30px;
+    padding: 4px 8px;
+    border: 1px solid transparent;
+    border-radius: 7px;
+    background: transparent;
+    color: var(--text);
+    font-size: 11px;
+    text-align: left;
+  }
+
+  .phone.chart2-mode .chart2-drawing-item.active,
+  .phone.chart2-mode .chart2-drawing-item:hover {
+    border-color: #3c5f93;
+    background: #172235;
+  }
+
+  .phone.chart2-mode .chart-tf-picker {
+    position: fixed;
+    left: 72px;
+    top: 116px;
+    z-index: 44;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] #miniChart {
+    width: 100vw !important;
+    height: 100dvh !important;
+    min-height: 100dvh !important;
+    max-height: none !important;
+    flex: 1 1 auto !important;
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-footer {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 10px;
+    z-index: 30;
+    width: auto !important;
+    padding: 8px;
+    border: 1px solid #243143;
+    border-radius: 12px;
+    background: rgba(18, 24, 34, 0.88);
+    backdrop-filter: blur(8px);
+  }
+
+  .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
+    position: fixed;
+    left: 8px;
+    right: 8px;
+    bottom: 68px;
+    z-index: 30;
+    width: auto !important;
+    max-height: 52px;
+    overflow: auto;
+    margin: 0;
+  }
+
+  .phone.chart2-mode .indicator-menu {
+    left: 72px;
+    right: 8px;
+    bottom: 86px;
+    width: auto;
+    transform: none;
+    z-index: 80;
   }
 }
