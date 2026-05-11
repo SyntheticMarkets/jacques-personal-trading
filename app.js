@@ -64,12 +64,14 @@ let currentDirection = "CALL";
 let calcInFlight = false;
 let lastCalcAt = 0;
 let lastSpot = null;
+let lastTickAt = 0;
 let proposalExpiries = [];
 let proposals = [];
 let countdownTimer = null;
 let lastProposalError = null;
 let rateLimitUntil = 0;
 let pingTimer = null;
+let tickWatchdogTimer = null;
 const PING_INTERVAL_MS = 30000;
 const RATE_LIMIT_COOLDOWN_MS = 15000;
 const MIN_REFRESH_MS = 5000;
@@ -96,6 +98,8 @@ let sigEntryEl;
 let sigLevelEl;
 let sigBlueEl;
 let sigWhiteEl;
+let generateMainSignalBtn;
+let mainSignalStatusEl;
 let signalBodyEl;
 let signalSectionTitleEl;
 let toggleSignalBtn;
@@ -179,6 +183,12 @@ let backtestMonitorQueuedCandles = null;
 let backtestMonitorQueuedPrice = null;
 let backtestMonitorLastRunAt = 0;
 let backtestMonitorTimer = null;
+let mainSignalTimer = null;
+let mainSignalCountdownTimer = null;
+let mainSignalInFlight = false;
+let mainSignalSchedule = null;
+let mainSignalLockedState = null;
+let mainSignalTargetSymbol = null;
 let topDownCandleCache = new Map();
 let topDownCacheLoadState = new Map();
 
@@ -6266,6 +6276,12 @@ function updateSignalFromCandles(candles, { live = false } = {}) {
     };
   }
 
+  if (mainSignalLockedState && mainSignalSchedule && Date.now() <= mainSignalSchedule.entryAt + 10000) {
+    lastSignalState = mainSignalLockedState;
+  } else if (mainSignalLockedState && mainSignalSchedule && Date.now() > mainSignalSchedule.entryAt + 10000) {
+    mainSignalLockedState = null;
+  }
+
   updateSignalUI(lastSignalState);
   updateFrameSignalUI(lastSignalState);
   lastSweepState = getLiquidityPanelState(allCandles);
@@ -9346,17 +9362,26 @@ function connectWS() {
   ws.addEventListener("open", () => {
     setStatus(`Connected (${new URL(url).host})`);
     startPing();
+    startTickWatchdog();
+    subscribeToCurrentSymbol();
+    if (activeToken) {
+      authorizeWithToken(activeToken).catch(() => {});
+    }
   });
 
   ws.addEventListener("close", () => {
     setStatus("Disconnected. Retrying...", true);
     stopPing();
+    stopTickWatchdog();
+    tickStreamId = null;
     scheduleReconnect();
   });
 
   ws.addEventListener("error", () => {
     setStatus("WebSocket error. Retrying...", true);
     stopPing();
+    stopTickWatchdog();
+    tickStreamId = null;
     scheduleReconnect(true);
   });
 
@@ -9375,6 +9400,25 @@ function stopPing() {
   if (pingTimer) {
     clearInterval(pingTimer);
     pingTimer = null;
+  }
+}
+
+function startTickWatchdog() {
+  stopTickWatchdog();
+  tickWatchdogTimer = setInterval(() => {
+    if (!currentSymbol || !ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!lastTickAt) return;
+    const staleFor = Date.now() - lastTickAt;
+    if (staleFor < 25000) return;
+    setStatus("Market stream stalled. Resubscribing...", true);
+    subscribeToCurrentSymbol({ force: true });
+  }, 10000);
+}
+
+function stopTickWatchdog() {
+  if (tickWatchdogTimer) {
+    clearInterval(tickWatchdogTimer);
+    tickWatchdogTimer = null;
   }
 }
 
@@ -9400,7 +9444,12 @@ function wsRequest(payload) {
     payload.req_id = reqId;
 
     const handler = (event) => {
-      const data = JSON.parse(event.data);
+      let data;
+      try {
+        data = JSON.parse(event.data);
+      } catch (err) {
+        return;
+      }
       if (data.req_id !== reqId) return;
       ws.removeEventListener("message", handler);
       if (data.error) reject(new Error(data.error.message || "API error"));
@@ -9413,22 +9462,36 @@ function wsRequest(payload) {
 }
 
 function onMessage(event) {
-  const data = JSON.parse(event.data);
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch (err) {
+    return;
+  }
+  if (data.error) {
+    setStatus(data.error.message || "Deriv API error", true);
+    return;
+  }
   if (data.msg_type === "tick" && data.tick) {
     if (data.tick.symbol !== currentSymbol) return;
-    const price = data.tick.quote;
-    lastSpot = price;
-    if (symbolPrice) symbolPrice.textContent = formatPrice(price, currentPip);
-    tickStreamId = data.tick.id || tickStreamId;
-    scheduleProposalRefresh();
+    try {
+      const price = data.tick.quote;
+      lastTickAt = Date.now();
+      lastSpot = price;
+      if (symbolPrice) symbolPrice.textContent = formatPrice(price, currentPip);
+      tickStreamId = data.tick.id || tickStreamId;
+      scheduleProposalRefresh();
 
-    const { candles, newCandleFormed } = candleBuilder.update(data.tick);
-    const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
-    if (currentSymbol) setCachedCandles(currentSymbol, candleBuilder.timeframe, allCandles);
-    if (newCandleFormed && currentSymbol) maybePrimeTopDownTimeframeCache(currentSymbol, candleBuilder.timeframe);
-    updateSignalFromCandles(allCandles, { live: true });
-    if (backtestSignalArmed && backtestSignalTargetSymbol === currentSymbol) {
-      scheduleBacktestSignalMonitor(allCandles, Number(price), { immediate: Boolean(newCandleFormed) });
+      const { candles, newCandleFormed } = candleBuilder.update(data.tick);
+      const allCandles = candleBuilder.currentCandle ? [...candles, candleBuilder.currentCandle] : candles;
+      if (currentSymbol) setCachedCandles(currentSymbol, candleBuilder.timeframe, allCandles);
+      if (newCandleFormed && currentSymbol) maybePrimeTopDownTimeframeCache(currentSymbol, candleBuilder.timeframe);
+      updateSignalFromCandles(allCandles, { live: true });
+      if (backtestSignalArmed && backtestSignalTargetSymbol === currentSymbol) {
+        scheduleBacktestSignalMonitor(allCandles, Number(price), { immediate: Boolean(newCandleFormed) });
+      }
+    } catch (err) {
+      setStatus(`Market update error: ${err?.message || "unknown error"}`, true);
     }
   }
   if (data.msg_type === "balance" && data.balance) {
@@ -9805,6 +9868,679 @@ function buildCompositeBacktestSignal(candles, options = {}) {
     winningVotes,
     referencePrice: Number.isFinite(referencePrice) ? referencePrice : null,
   };
+}
+
+function computeMainSignalSchedule() {
+  const candleMs = 60000;
+  const now = Date.now();
+  const scanStartAt = Math.ceil(now / candleMs) * candleMs;
+  return {
+    now,
+    scanStartAt,
+    signalAt: scanStartAt + 50000,
+    entryAt: scanStartAt + candleMs,
+  };
+}
+
+function formatMainSignalCountdown(targetMs) {
+  if (!Number.isFinite(targetMs)) return "--";
+  const diffMs = Math.max(0, targetMs - Date.now());
+  const totalSec = Math.ceil(diffMs / 1000);
+  return `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, "0")}`;
+}
+
+function setMainSignalStatus(text, state = "armed") {
+  if (mainSignalStatusEl) mainSignalStatusEl.textContent = text || "--";
+  if (!generateMainSignalBtn) return;
+  generateMainSignalBtn.classList.toggle("armed", state === "armed");
+  generateMainSignalBtn.classList.toggle("ready", state === "ready");
+}
+
+function stopMainSignalCountdown() {
+  if (mainSignalCountdownTimer) clearInterval(mainSignalCountdownTimer);
+  mainSignalCountdownTimer = null;
+}
+
+function stopMainSignalTimer() {
+  if (mainSignalTimer) clearTimeout(mainSignalTimer);
+  mainSignalTimer = null;
+  stopMainSignalCountdown();
+  mainSignalSchedule = null;
+  mainSignalLockedState = null;
+  mainSignalTargetSymbol = null;
+  mainSignalInFlight = false;
+  if (generateMainSignalBtn) {
+    generateMainSignalBtn.disabled = false;
+    generateMainSignalBtn.textContent = "Generate signal";
+    generateMainSignalBtn.classList.remove("armed", "ready");
+  }
+}
+
+function renderMainSignalCountdown() {
+  if (!mainSignalSchedule || !mainSignalStatusEl) return;
+  const now = Date.now();
+  if (now > mainSignalSchedule.entryAt + 10000) {
+    stopMainSignalCountdown();
+    mainSignalSchedule = null;
+    mainSignalTargetSymbol = null;
+    if (generateMainSignalBtn) generateMainSignalBtn.classList.remove("armed", "ready");
+    return;
+  }
+  if (now < mainSignalSchedule.scanStartAt) {
+    setMainSignalStatus(`Waiting for 1m close. Scan starts in ${formatMainSignalCountdown(mainSignalSchedule.scanStartAt)}.`, "armed");
+    return;
+  }
+  if (now < mainSignalSchedule.signalAt) {
+    setMainSignalStatus(`Scanning M15 / M5 / M1. Signal locks in ${formatMainSignalCountdown(mainSignalSchedule.signalAt)}.`, "armed");
+    return;
+  }
+  setMainSignalStatus(`Signal locked. Entry candle opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, "ready");
+}
+
+function addMainSignalFrameVote(votes, frame, prediction, frameWeight) {
+  if (!prediction?.direction || !Number.isFinite(prediction.confidence) || prediction.confidence < 54) return;
+  const weight = frameWeight * Math.max(0.25, prediction.confidence / 100) * Math.max(1, Number(prediction.systemsChecked || 1));
+  votes.push({
+    direction: prediction.direction,
+    weight,
+    system: frame,
+    price: Number.isFinite(prediction.entryPrice) ? prediction.entryPrice : prediction.referencePrice,
+    reason: `${prediction.confidence}% from ${prediction.systemsChecked || 0} checks`,
+  });
+  prediction.reasons?.slice(0, 2).forEach((reason) => {
+    votes.push({
+      direction: reason.direction,
+      weight: Math.max(0.4, Number(reason.weight || 0)) * frameWeight * 0.35,
+      system: `${frame} ${reason.system}`,
+      price: reason.price,
+      reason: reason.reason,
+    });
+  });
+}
+
+function pushMainIndicatorVote(votes, { direction, weight, indicator, frame, price = null, reason = "", index = null, candleCount = null, isSetup = true }) {
+  const tradeDirection = direction === "BUY" || direction === "CALL"
+    ? "CALL"
+    : direction === "SELL" || direction === "PUT"
+      ? "PUT"
+      : null;
+  if (!tradeDirection || !Number.isFinite(weight) || weight <= 0) return;
+  const recency = Number.isInteger(index) && Number.isInteger(candleCount)
+    ? clamp(1 - ((candleCount - 1 - index) / 12), 0.25, 1)
+    : 0.85;
+  votes.push({
+    direction: tradeDirection,
+    weight: weight * recency,
+    system: `${frame} ${getChartIndicatorLabel(indicator)}`,
+    price: Number.isFinite(price) ? price : null,
+    reason,
+    indicator,
+    frame,
+    isSetup: Boolean(isSetup),
+  });
+}
+
+function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
+  const votes = [];
+  const count = Array.isArray(candles) ? candles.length : 0;
+  if (count < 30) return votes;
+  const recentMin = Math.max(0, count - 5);
+  const latestByIndex = (items = [], getIndex = (item) => item?.entryIndex) => {
+    return items
+      .filter((item) => Number.isInteger(getIndex(item)) && getIndex(item) >= recentMin)
+      .sort((a, b) => getIndex(b) - getIndex(a))[0] || null;
+  };
+
+  try {
+    if (indicator === "INST_EXECUTION_MODEL") {
+      const model = buildInstitutionalExecutionModel(candles, {});
+      const latest = latestByIndex(model.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * Math.max(2, latest.confidence / 12),
+        indicator,
+        frame,
+        price: latest.price,
+        reason: `${latest.confidence}% POI ${formatPrice(latest.poi, currentPip)}`,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "INST_LEVEL_BEHAVIOR") {
+      const model = buildInstitutionalLevelBehaviorModel(candles, {});
+      const latest = latestByIndex(model.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * Math.max(2, latest.confidence / 12),
+        indicator,
+        frame,
+        price: latest.price,
+        reason: `${latest.behavior} T${latest.touches} ${latest.confidence}%`,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "ALGO_BEHAVIOR_ENGINE") {
+      const abe = buildAlgoBehaviorEngine(candles, {});
+      const latest = latestByIndex(abe.signals);
+      if (latest) {
+        pushMainIndicatorVote(votes, {
+          direction: latest.direction,
+          weight: frameWeight * Math.max(1.5, latest.score || 2),
+          indicator,
+          frame,
+          price: latest.price,
+          reason: `signal score ${latest.score || "--"}`,
+          index: latest.entryIndex,
+          candleCount: count,
+        });
+      } else if (abe.activeSetup?.direction) {
+        pushMainIndicatorVote(votes, {
+          direction: abe.activeSetup.direction,
+          weight: frameWeight * 3.5,
+          indicator,
+          frame,
+          price: abe.entryPrice ?? abe.focusPrice,
+          reason: abe.setupText,
+        });
+      } else if (abe.trend === "UP" || abe.trend === "DOWN") {
+        pushMainIndicatorVote(votes, {
+          direction: abe.trend === "UP" ? "BUY" : "SELL",
+          weight: frameWeight * Math.max(0.8, (abe.confidence || 45) / 35),
+          indicator,
+          frame,
+          price: abe.focusPrice,
+          reason: `${abe.trend} ${abe.regime}`,
+          isSetup: false,
+        });
+      }
+    } else if (indicator === "PRICE_ACTION_TOOLKIT") {
+      const pa = buildPriceActionToolkit(candles, {});
+      const latest = latestByIndex(pa.actionableSignals);
+      if (latest) {
+        pushMainIndicatorVote(votes, {
+          direction: latest.direction,
+          weight: frameWeight * 3,
+          indicator,
+          frame,
+          price: latest.price,
+          reason: latest.kind || pa.setupText,
+          index: latest.entryIndex,
+          candleCount: count,
+        });
+      } else if (pa.bias === "BULLISH" || pa.bias === "BEARISH") {
+        pushMainIndicatorVote(votes, {
+          direction: pa.bias === "BULLISH" ? "BUY" : "SELL",
+          weight: frameWeight * 1.2,
+          indicator,
+          frame,
+          price: pa.fib?.levels?.find((level) => level.label === "0.705")?.price,
+          reason: pa.setupText,
+          isSetup: false,
+        });
+      }
+    } else if (indicator === "LIQ_SWEEP_OB") {
+      const lq = buildLiquiditySweepOrderBlockSystem(candles, { pivotLen: 3, sweepLookahead: 10, pullbackLookahead: 12 });
+      const latest = latestByIndex(lq.setups);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 3.2,
+        indicator,
+        frame,
+        price: latest.entryPrice,
+        reason: `${latest.liquidityKind} -> ${latest.structureEvent?.type ?? "shift"}`,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "LDMSS") {
+      const ldmss = buildLiquidityDrivenMarketStructureSystem(candles, { pivotLen: 3, sweepLookahead: 10, pullbackLookahead: 12 });
+      const latest = latestByIndex(ldmss.setups?.filter((setup) => setup.sessionAllowed));
+      if (latest) {
+        pushMainIndicatorVote(votes, {
+          direction: latest.direction,
+          weight: frameWeight * 3.5,
+          indicator,
+          frame,
+          price: latest.entryPrice,
+          reason: latest.liquidityKind,
+          index: latest.entryIndex,
+          candleCount: count,
+        });
+      } else if (ldmss.trend === "UP" || ldmss.trend === "DOWN") {
+        pushMainIndicatorVote(votes, {
+          direction: ldmss.trend === "UP" ? "BUY" : "SELL",
+          weight: frameWeight * Math.max(1, (ldmss.confidence || 40) / 35),
+          indicator,
+          frame,
+          price: ldmss.latestSweep?.level,
+          reason: ldmss.setupText,
+          isSetup: false,
+        });
+      }
+    } else if (indicator === "SMC_SETUP_08") {
+      const smc = buildSMCSetup08(candles, 5);
+      const all = [
+        ...smc.bullish.map((setup) => ({ ...setup, direction: "BUY", entryIndex: setup.triggerIndex != null ? setup.triggerIndex + 1 : null })),
+        ...smc.bearish.map((setup) => ({ ...setup, direction: "SELL", entryIndex: setup.triggerIndex != null ? setup.triggerIndex + 1 : null })),
+      ];
+      const latest = latestByIndex(all);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 2.4,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: "SMC setup",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "SMC_PRO_COMBO") {
+      const smc = buildSMCProCombo(candles, {
+        leftLen: 5,
+        rightLen: 5,
+        atrLen: 14,
+        atrMult: 0.1,
+        volLen: 20,
+        minBodyPct: 55,
+        useAtrBuffer: true,
+        useBodyFilter: true,
+      });
+      const latest = latestByIndex(smc.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.type?.includes("BUY") ? "BUY" : "SELL",
+        weight: frameWeight * 2.6,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: latest.type,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "ADX_VOL_WAVES") {
+      const waves = buildADXVolatilityWaves(candles, {
+        bbLength: 20,
+        bbMult: 1.5,
+        adxLength: 14,
+        adxSmooth: 14,
+        adxInfluence: 0.8,
+        zoneOffset: 1,
+        zoneExpansion: 1,
+        smoothLength: 50,
+        signalCooldown: 20,
+      });
+      const latest = latestByIndex(waves.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.type,
+        weight: frameWeight * 2.2,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: "ADX volatility wave",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "BREAKOUT_TARGETS") {
+      const breakout = buildBreakoutTargets(candles, { len: 99, preventOverlap: true, atrPeriod: 14, slMultiplier: 5, tp1Multiplier: 0.5, tp2Multiplier: 1, tp3Multiplier: 1.5 });
+      const latest = latestByIndex(breakout.breakouts);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction === "UP" ? "BUY" : "SELL",
+        weight: frameWeight * 2.2,
+        indicator,
+        frame,
+        price: latest.entryPrice ?? latest.price,
+        reason: "breakout target",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "DYNAMIC_Z_DIVERGENCE") {
+      const dzd = buildDynamicZDivergence(candles, {});
+      const all = [
+        ...dzd.buySignals.map((signal) => ({ ...signal, direction: "BUY" })),
+        ...dzd.sellSignals.map((signal) => ({ ...signal, direction: "SELL" })),
+      ];
+      const latest = latestByIndex(all);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 1.9,
+        indicator,
+        frame,
+        price: latest.value,
+        reason: "z-score divergence",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "LIQUIDITY_TRENDLINE") {
+      const lt = buildLiquidityTrendlineSignals(candles, { len: 5, space: 2, colorUp: "#0044ff", colorDown: "#ff2b00" });
+      const latest = latestByIndex(lt.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.type === "UP" ? "BUY" : "SELL",
+        weight: frameWeight * 2,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: "trendline break",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "SR_SIGNALS_MTF") {
+      const sr = buildSupportResistanceSignalsMTF(candles, { length: 6, zoneAtrMult: 0.5, securityAtrMult: 0, manipulationMult: 1.3, maxActive: 5, showBroken: true, extendActive: true });
+      const latest = latestByIndex(sr.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 2.1,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: latest.kind,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "STRUCTURE_PULLBACK") {
+      const spc = buildStructurePullbackContinuation(candles, { pivotLen: 4, pullbackLookback: 4, weakBodyRatio: 0.4, rejectionWickRatio: 0.45, maxTrendFlips: 4, flipLookback: 30 });
+      const latest = latestByIndex(spc.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 2.4,
+        indicator,
+        frame,
+        price: latest.entryPrice,
+        reason: latest.reason,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "TICK_REJECTION") {
+      const rejection = buildTickRejectionMicrostructure(candles, { ticksLookback: 5, minRejectionRatio: 0.5, minRange: Math.max(currentPip || 0.0001, 0.0001) });
+      const latest = latestByIndex(rejection.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.type === "lower" ? "BUY" : "SELL",
+        weight: frameWeight * 1.8,
+        indicator,
+        frame,
+        price: latest.price,
+        reason: "tick rejection",
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "CHART_PATTERNS") {
+      const cp = buildChartPatternsSignals(candles, { pivotLen: 3, toleranceMult: 0.45, maxPatternAge: 60 });
+      const latest = latestByIndex(cp.signals);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction,
+        weight: frameWeight * 2,
+        indicator,
+        frame,
+        price: latest.entryPrice ?? latest.neckline,
+        reason: latest.label,
+        index: latest.entryIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "ICT_STRUCTURE") {
+      const structure = buildICTStructureAnalysis(candles, 3);
+      const latest = latestByIndex(structure.events, (event) => event?.breakIndex);
+      if (latest) pushMainIndicatorVote(votes, {
+        direction: latest.direction === "UP" ? "BUY" : "SELL",
+        weight: frameWeight * (latest.type === "MSS" ? 1.8 : 1.4),
+        indicator,
+        frame,
+        price: latest.breakPrice,
+        reason: `${latest.type} ${latest.direction}`,
+        index: latest.breakIndex,
+        candleCount: count,
+      });
+    } else if (indicator === "TREND_VOLUME_ACCUM") {
+      const tva = buildTrendVolumeAccumulation(candles, {});
+      const lastDirection = tva.direction?.[tva.direction.length - 1] || 0;
+      const lastBarCount = tva.barCount?.[tva.barCount.length - 1] || 0;
+      if (lastDirection !== 0) {
+        pushMainIndicatorVote(votes, {
+          direction: lastDirection > 0 ? "BUY" : "SELL",
+          weight: frameWeight * Math.min(1.6, 0.8 + Math.abs(lastBarCount) * 0.12),
+          indicator,
+          frame,
+          price: candles[count - 1]?.close,
+          reason: `volume accumulation ${lastDirection > 0 ? "up" : "down"} ${Math.abs(lastBarCount)} bars`,
+          isSetup: false,
+        });
+      }
+    } else if (indicator === "EMA") {
+      const ema = calculateChartEMA(candles, 9);
+      const lastEma = ema[ema.length - 1];
+      const lastClose = candles[count - 1]?.close;
+      if (Number.isFinite(lastEma) && Number.isFinite(lastClose)) {
+        pushMainIndicatorVote(votes, {
+          direction: lastClose >= lastEma ? "BUY" : "SELL",
+          weight: frameWeight * 0.8,
+          indicator,
+          frame,
+          price: lastClose,
+          reason: `close ${lastClose >= lastEma ? "above" : "below"} EMA 9`,
+          isSetup: false,
+        });
+      }
+    }
+  } catch (err) {}
+
+  return votes;
+}
+
+function scanAllMainSignalIndicators(candles, frame, frameWeight) {
+  const signalIndicators = [
+    "INST_EXECUTION_MODEL",
+    "INST_LEVEL_BEHAVIOR",
+    "ALGO_BEHAVIOR_ENGINE",
+    "PRICE_ACTION_TOOLKIT",
+    "ICT_STRUCTURE",
+    "LIQ_SWEEP_OB",
+    "LDMSS",
+    "SMC_SETUP_08",
+    "SMC_PRO_COMBO",
+    "ADX_VOL_WAVES",
+    "BREAKOUT_TARGETS",
+    "DYNAMIC_Z_DIVERGENCE",
+    "LIQUIDITY_TRENDLINE",
+    "SR_SIGNALS_MTF",
+    "STRUCTURE_PULLBACK",
+    "TICK_REJECTION",
+    "CHART_PATTERNS",
+    "TREND_VOLUME_ACCUM",
+    "EMA",
+  ];
+  return signalIndicators.flatMap((indicator) => scanMainSignalIndicator(indicator, candles, frame, frameWeight));
+}
+
+function summarizeMainSignalVotes(votes) {
+  const setupVotes = votes.filter((vote) => vote.isSetup);
+  const sumDirection = (items, direction) => items
+    .filter((vote) => vote.direction === direction)
+    .reduce((sum, vote) => sum + vote.weight, 0);
+  const byFrame = (frame) => setupVotes.filter((vote) => vote.frame === frame);
+  const frameDirection = (frame) => {
+    const frameVotes = byFrame(frame);
+    const call = sumDirection(frameVotes, "CALL");
+    const put = sumDirection(frameVotes, "PUT");
+    if (call === put) return null;
+    return call > put ? "CALL" : "PUT";
+  };
+  const distinctSetupIndicators = new Set(setupVotes.map((vote) => vote.indicator)).size;
+  return {
+    setupVotes,
+    distinctSetupIndicators,
+    m15Direction: frameDirection("M15"),
+    m5Direction: frameDirection("M5"),
+    m1Direction: frameDirection("M1"),
+    m15Count: byFrame("M15").length,
+    m5Count: byFrame("M5").length,
+    m1Count: byFrame("M1").length,
+  };
+}
+
+function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
+  const candles = Array.isArray(oneMinuteCandles) ? oneMinuteCandles.filter(Boolean) : [];
+  if (candles.length < 90) {
+    return {
+      direction: null,
+      confidence: 0,
+      trend: "BUILDING",
+      setup: "Need more 1m history for top-down scan",
+      reasons: [],
+      callWeight: 0,
+      putWeight: 0,
+    };
+  }
+
+  const refPrice = Number.isFinite(referencePrice)
+    ? Number(referencePrice)
+    : Number(candles[candles.length - 1]?.close);
+  const m15 = aggregateCandlesToTimeframe(candles, 60, 900);
+  const m5 = aggregateCandlesToTimeframe(candles, 60, 300);
+  const m1 = candles;
+  const votes = [
+    ...scanAllMainSignalIndicators(m15, "M15", 1.35),
+    ...scanAllMainSignalIndicators(m5, "M5", 1.6),
+    ...scanAllMainSignalIndicators(m1, "M1", 2.0),
+  ];
+
+  const callWeight = votes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
+  const putWeight = votes.filter((vote) => vote.direction === "PUT").reduce((sum, vote) => sum + vote.weight, 0);
+  const totalWeight = callWeight + putWeight;
+  const direction = totalWeight > 0 && callWeight !== putWeight ? (callWeight > putWeight ? "CALL" : "PUT") : null;
+  const confidence = totalWeight > 0 ? Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100) : 0;
+  const margin = totalWeight > 0 ? Math.abs(callWeight - putWeight) / totalWeight : 0;
+  const voteSummary = summarizeMainSignalVotes(votes);
+  const htfDirection = voteSummary.m5Direction || voteSummary.m15Direction;
+  const htfAligned = Boolean(htfDirection && htfDirection === direction);
+  const entryAligned = Boolean(voteSummary.m1Direction && voteSummary.m1Direction === direction);
+  const enoughSetups =
+    voteSummary.distinctSetupIndicators >= 3 &&
+    voteSummary.m1Count >= 2 &&
+    (voteSummary.m5Count + voteSummary.m15Count) >= 1;
+  const canSignal =
+    confidence >= 65 &&
+    margin >= 0.25 &&
+    enoughSetups &&
+    htfAligned &&
+    entryAligned;
+  const trend15 = getInstitutionalTrend(m15);
+  const trend5 = getInstitutionalTrend(m5);
+  const trend1 = getInstitutionalTrend(m1);
+  const winningVotes = votes
+    .filter((vote) => vote.direction === direction)
+    .sort((a, b) => b.weight - a.weight);
+  return {
+    direction: canSignal ? direction : null,
+    rawDirection: direction,
+    confidence,
+    trend: `${trend15} / ${trend5} / ${trend1}`,
+    setup: winningVotes.length
+      ? `${canSignal ? "PASS" : "WAIT"} ${Math.round(margin * 100)}% edge, ${voteSummary.distinctSetupIndicators} setup systems | ${winningVotes.slice(0, 4).map((vote) => `${vote.system}: ${vote.reason || "aligned"}`).join(" | ")}`
+      : "No aligned top-down edge",
+    reasons: winningVotes,
+    callWeight,
+    putWeight,
+    systemsChecked: votes.length,
+    setupSystems: voteSummary.distinctSetupIndicators,
+    gate: {
+      confidence,
+      margin,
+      htfAligned,
+      entryAligned,
+      enoughSetups,
+      m15Direction: voteSummary.m15Direction,
+      m5Direction: voteSummary.m5Direction,
+      m1Direction: voteSummary.m1Direction,
+    },
+    entryPrice: Number.isFinite(refPrice) ? refPrice : null,
+  };
+}
+
+async function getMainSignalCandles(symbol) {
+  const live = currentSymbol === symbol ? getBuiltCandles() : [];
+  const historical = live.length >= 700 ? [] : await fetchHistoricalCandles(symbol, 60, 900);
+  const combined = [...historical, ...live];
+  const byTime = new Map();
+  combined.forEach((candle) => {
+    const normalized = normalizeHistoryCandle(candle);
+    if (normalized) byTime.set(normalized.time, normalized);
+  });
+  return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-900);
+}
+
+async function lockMainSignal() {
+  const symbol = mainSignalTargetSymbol || currentSymbol;
+  if (!mainSignalSchedule || !symbol) return;
+  if (generateMainSignalBtn) generateMainSignalBtn.textContent = "Scanning...";
+  setMainSignalStatus("Running final top-down scan...", "armed");
+  try {
+    const candles = await getMainSignalCandles(symbol);
+    const referencePrice = currentSymbol === symbol && Number.isFinite(lastSpot) ? Number(lastSpot) : Number(candles[candles.length - 1]?.close);
+    const result = buildTopDownMainSignal(candles, referencePrice);
+    const tradeDirection = result.direction;
+    const signalText = tradeDirection === "CALL"
+      ? "BUY NEXT 1M"
+      : tradeDirection === "PUT"
+        ? "SELL NEXT 1M"
+        : "WAIT";
+    lastSignalState = {
+      trend: result.trend,
+      divergence: `Bull ${result.callWeight.toFixed(1)} / Bear ${result.putWeight.toFixed(1)}`,
+      sweep: result.reasons[0]?.system || "--",
+      confidence: result.direction ? result.confidence : null,
+      signal: signalText,
+      setup: `${formatClockTime(mainSignalSchedule.entryAt)} entry | scanned ${result.systemsChecked || 0} votes / ${result.setupSystems || 0} setup systems | ${result.setup}`,
+      time: Date.now(),
+      allowEntry: Boolean(result.direction),
+      tradeDirection,
+    };
+    mainSignalLockedState = lastSignalState;
+    updateSignalUI(lastSignalState);
+    updateFrameSignalUI(lastSignalState);
+    if (sigRejectEl) sigRejectEl.textContent = result.reasons[0]?.reason || "--";
+    if (sigEntryEl) sigEntryEl.textContent = result.direction ? `Prepare ${result.direction === "CALL" ? "BUY" : "SELL"} before ${formatClockTime(mainSignalSchedule.entryAt)}` : "WAIT";
+    if (sigLevelEl) sigLevelEl.textContent = Number.isFinite(result.entryPrice) ? formatPrice(result.entryPrice, currentPip) : "--";
+    if (result.direction) {
+      setDirection(result.direction, { refresh: true });
+      showSignalToast({
+        title: `Main signal: ${result.direction === "CALL" ? "BUY" : "SELL"}`,
+        body: `${result.confidence}% confidence. Entry candle ${formatClockTime(mainSignalSchedule.entryAt)}.`,
+        tone: result.direction === "CALL" ? "buy" : "sell",
+      });
+    }
+    const gateText = result.direction
+      ? `${signalText}. ${result.setupSystems || 0} setup systems aligned.`
+      : `WAIT. Gate failed: ${result.gate?.htfAligned ? "" : "HTF "} ${result.gate?.entryAligned ? "" : "M1 "} ${result.gate?.enoughSetups ? "" : "setups "}`.replace(/\s+/g, " ").trim();
+    setMainSignalStatus(`${gateText} Entry candle opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, result.direction ? "ready" : "armed");
+  } catch (err) {
+    setMainSignalStatus(`Signal scan failed: ${err?.message || "unknown error"}`, "armed");
+  } finally {
+    mainSignalInFlight = false;
+    if (generateMainSignalBtn) {
+      generateMainSignalBtn.disabled = false;
+      generateMainSignalBtn.textContent = "Generate signal";
+    }
+  }
+}
+
+function handleGenerateMainSignalClick() {
+  if (mainSignalInFlight) return;
+  if (!currentSymbol) {
+    setMainSignalStatus("Select a market first.", "armed");
+    return;
+  }
+  if (mainSignalTimer) clearTimeout(mainSignalTimer);
+  stopMainSignalCountdown();
+  mainSignalInFlight = true;
+  mainSignalSchedule = computeMainSignalSchedule();
+  mainSignalLockedState = null;
+  mainSignalTargetSymbol = currentSymbol;
+  if (generateMainSignalBtn) {
+    generateMainSignalBtn.disabled = true;
+    generateMainSignalBtn.textContent = "Armed";
+  }
+  renderMainSignalCountdown();
+  mainSignalCountdownTimer = setInterval(renderMainSignalCountdown, 1000);
+  const delayMs = Math.max(0, mainSignalSchedule.signalAt - Date.now());
+  mainSignalTimer = setTimeout(() => {
+    mainSignalTimer = null;
+    lockMainSignal();
+  }, delayMs);
 }
 
 async function runCompositeBacktest(candles, options = {}) {
@@ -11193,6 +11929,21 @@ function updateSymbols() {
   onSymbolChange();
 }
 
+function subscribeToCurrentSymbol({ force = false } = {}) {
+  const symbol = currentSymbol || symbolSelect?.value;
+  if (!symbol || !ws || ws.readyState !== WebSocket.OPEN) return;
+
+  if (tickStreamId) {
+    ws.send(JSON.stringify({ forget: tickStreamId }));
+    tickStreamId = null;
+  } else if (!force && lastTickAt && Date.now() - lastTickAt < 1500) {
+    return;
+  }
+
+  lastTickAt = 0;
+  ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
+}
+
 function onSymbolChange() {
   const symbol = symbolSelect.value;
   const display = symbolSelect.selectedOptions[0]?.textContent || "--";
@@ -11211,14 +11962,7 @@ function onSymbolChange() {
     syncBarrierControls();
   }
 
-  if (tickStreamId && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ forget: tickStreamId }));
-    tickStreamId = null;
-  }
-
-  if (symbol && ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
-  }
+  subscribeToCurrentSymbol({ force: true });
 
   candleBuilder.reset();
   chartOffset = 0;
@@ -11779,6 +12523,8 @@ function init() {
   sigLevelEl = document.getElementById("sigLevel");
   sigBlueEl = document.getElementById("sigBlue");
   sigWhiteEl = document.getElementById("sigWhite");
+  generateMainSignalBtn = document.getElementById("generateMainSignal");
+  mainSignalStatusEl = document.getElementById("mainSignalStatus");
   signalBodyEl = document.getElementById("signalBody");
   signalSectionTitleEl = document.getElementById("signalSectionTitle");
   toggleSignalBtn = document.getElementById("toggleSignal");
@@ -12554,6 +13300,7 @@ function init() {
   });
   generateBacktestSignalBtn?.addEventListener("click", handleGenerateBacktestSignalClick);
   runBacktestNowBtn?.addEventListener("click", handleRunBacktestNowClick);
+  generateMainSignalBtn?.addEventListener("click", handleGenerateMainSignalClick);
 
   window.__generateBacktestSignalNow = handleGenerateBacktestSignalClick;
   window.__runBacktestNow = handleRunBacktestNowClick;

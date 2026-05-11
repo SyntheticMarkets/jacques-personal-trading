@@ -572,6 +572,40 @@ button.small {
   opacity: 0;
 }
 
+.main-signal-actions {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.55fr) 1fr;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 10px;
+}
+
+.main-signal-btn {
+  min-height: 38px;
+  font-weight: 700;
+}
+
+.main-signal-btn.armed {
+  border-color: rgba(242, 201, 76, 0.6);
+  color: #f2c94c;
+}
+
+.main-signal-btn.ready {
+  border-color: rgba(24, 216, 159, 0.6);
+  color: #18d89f;
+}
+
+.main-signal-status {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+  background: #10151e;
+  border: 1px solid #202a3a;
+  border-radius: 10px;
+  padding: 8px 10px;
+  min-height: 38px;
+}
+
 .signal-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1028,6 +1062,10 @@ button.chart-indicator-select {
 }
 
 @media (max-width: 720px) {
+  .main-signal-actions {
+    grid-template-columns: 1fr;
+  }
+
   .chart-indicator-picker {
     position: static;
   }
