@@ -470,6 +470,7 @@ let autoTradeSessionCount = 0;
 let currentTrendMode = "EMA";
 let signalToastTimer = null;
 let institutionalExecutionModelCache = null;
+let institutionalLevelBehaviorModelCache = null;
 let institutionalPoiDisplayState = null;
 const shownIndicatorSignalKeys = new Set();
 let lastSignalState = {
@@ -3905,28 +3906,49 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
 
 function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
   const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
+  const last = confirmedCandles[confirmedCandles.length - 1] || null;
+  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
+  const cacheKey = [
+    currentSymbol || "symbol",
+    executionTf,
+    currentPip || 0,
+    baseMinutes || 1,
+    config.minConfidence ?? 65,
+    config.lookbackBars ?? 420,
+    confirmedCandles.length,
+    last?.time ?? 0,
+    last?.open ?? 0,
+    last?.high ?? 0,
+    last?.low ?? 0,
+    last?.close ?? 0,
+  ].join("|");
+  if (!config.noCache && institutionalLevelBehaviorModelCache?.key === cacheKey) {
+    return institutionalLevelBehaviorModelCache.value;
+  }
   const minCandles = Math.max(80, config.minCandles ?? 90);
   if (confirmedCandles.length < minCandles) {
-    return {
+    const empty = {
       signals: [],
       poiLevels: [],
       stats: { total: 0, wins: 0, losses: 0, pending: 0, winRate: null, minConfidence: 65 },
     };
+    institutionalLevelBehaviorModelCache = { key: cacheKey, value: empty };
+    return empty;
   }
 
-  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
   const fiveMinuteSec = 300;
   const fifteenMinuteSec = 900;
   const expiryBars = Math.max(1, Math.round(((config.expirySeconds ?? (baseMinutes * 60)) || 60) / Math.max(1, executionTf)));
   const minConfidence = Math.max(0, Math.min(100, config.minConfidence ?? 65));
+  const structureLookbackBars = Math.max(180, config.lookbackBars ?? 420);
   const signals = [];
   const seenSignalKeys = new Set();
   let lastSignalIndex = -10;
 
   for (let i = minCandles; i < confirmedCandles.length; i += 1) {
-    const history = confirmedCandles.slice(0, i + 1);
-    const current = history[i];
-    const prev = history[i - 1];
+    const current = confirmedCandles[i];
+    const historyStart = Math.max(0, i - structureLookbackBars + 1);
+    const history = confirmedCandles.slice(historyStart, i + 1);
     const fifteenMinute = aggregateCandlesByTimeframe(history, fifteenMinuteSec);
     const trend15 = getInstitutionalTrend(fifteenMinute);
     const pool = buildInstitutionalPoiCandidatePool(history, fiveMinuteSec);
@@ -3939,7 +3961,7 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
     if (!level) continue;
     if (i - lastSignalIndex < Math.max(4, config.cooldownBars ?? 8)) continue;
 
-    const touchState = countInstitutionalLevelTouches(history.slice(Math.max(0, i - 180), i + 1), level, atLevelTolerance);
+    const touchState = countInstitutionalLevelTouches(history.slice(-180), level, atLevelTolerance);
     const touches = Math.max(touchState.touches, 1);
     const fakeBreakDirection = getInstitutionalFakeBreakDirection(current, level, atLevelTolerance);
     const strongBreakDirection = getInstitutionalStrongBreakDirection(current, level, atLevelTolerance);
@@ -4014,7 +4036,7 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
     });
   }
 
-  const latestPool = buildInstitutionalPoiCandidatePool(confirmedCandles, fiveMinuteSec);
+  const latestPool = buildInstitutionalPoiCandidatePool(confirmedCandles.slice(-structureLookbackBars), fiveMinuteSec);
   const latestCurrent = confirmedCandles[confirmedCandles.length - 1] || null;
   const poiLevels = resolveStableInstitutionalPoiLevels({
     candidates: latestPool.candidates,
@@ -4028,7 +4050,7 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
   const wins = scored.filter((signal) => signal.result === "WIN").length;
   const losses = scored.length - wins;
 
-  return {
+  const result = {
     signals,
     poiLevels,
     stats: {
@@ -4041,6 +4063,8 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
       expiryBars,
     },
   };
+  if (!config.noCache) institutionalLevelBehaviorModelCache = { key: cacheKey, value: result };
+  return result;
 }
 
 function buildChartPatternsSignals(candles, config = {}) {
@@ -7040,10 +7064,11 @@ function renderMiniChart(candles) {
       ctx.restore();
     });
 
-    ilb.signals.forEach((signal) => {
-      if (signal.entryIndex < start || signal.entryIndex >= end) return;
+    for (const signal of ilb.signals) {
+      if (signal.entryIndex < start) continue;
+      if (signal.entryIndex >= end) break;
       const candle = candles[signal.entryIndex];
-      if (!candle) return;
+      if (!candle) continue;
       const x = leftPad + ((signal.entryIndex - start) * slotW) + (slotW / 2);
       const isBuy = signal.direction === "BUY";
       const isBreakout = signal.behavior === "MULTI_TOUCH_BREAKOUT";
@@ -7078,7 +7103,7 @@ function renderMiniChart(candles) {
         ctx.fillText(resultText, x + 16, isBuy ? anchorY + 8 : anchorY - 8);
       }
       ctx.restore();
-    });
+    }
 
     const statLines = [
       `ILB ${ilb.stats.winRate == null ? "--" : `${ilb.stats.winRate}%`} ${baseMinutes}m`,
