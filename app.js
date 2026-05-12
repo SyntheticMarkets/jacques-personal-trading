@@ -53,6 +53,10 @@ let ws;
 let wsIndex = 0;
 let activeSymbols = [];
 let symbolsByMarket = new Map();
+let symbolsByTradeMode = {
+  rise_fall: new Map(),
+  higher_lower: new Map(),
+};
 let tickStreamId = null;
 let currentSymbol = null;
 let currentPip = null;
@@ -11560,6 +11564,7 @@ function setActiveTab(tabName) {
   proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
   syncTradeTypeControls(tabName);
+  rebuildSymbolsForTradeMode();
   updateProposalDirectionButtons();
   updateTradeProfitSummary();
   renderTradeList();
@@ -11871,44 +11876,116 @@ function isAllowedSymbol(symbol) {
   return name.includes("volatility") || name.includes("bull") || name.includes("bear");
 }
 
+function isTradableActiveSymbol(symbol) {
+  if (!symbol?.symbol) return false;
+  const exchangeIsOpen = symbol.exchange_is_open;
+  if (exchangeIsOpen === 0 || exchangeIsOpen === false) return false;
+  if (symbol.is_trading_suspended === 1 || symbol.is_trading_suspended === true) return false;
+  return true;
+}
+
+function isRiseFallEligibleSymbol(symbol) {
+  if (!symbol?.symbol) return false;
+  const text = [
+    symbol.symbol,
+    symbol.display_name,
+    symbol.market_display_name,
+    symbol.submarket_display_name,
+  ].filter(Boolean).join(" ").toLowerCase();
+
+  // Boom/Crash-style instruments are multiplier-only in this app's workflow.
+  if (/\bboom\b|\bcrash\b/.test(text)) return false;
+  return true;
+}
+
+function buildSymbolsByMarket(symbols, fallbackDisplay = "Markets") {
+  const grouped = new Map();
+  symbols.forEach((s) => {
+    const key = s.market || s.market_display_name || "markets";
+    if (!grouped.has(key)) {
+      grouped.set(key, {
+        market: key,
+        display: s.market_display_name || fallbackDisplay,
+        symbols: [],
+      });
+    }
+    grouped.get(key).symbols.push(s);
+  });
+  return grouped;
+}
+
+function rebuildSymbolsForTradeMode({ preserveSelection = true } = {}) {
+  if (!marketSelect || !symbolSelect) return;
+  const mode = getActiveTradeMode();
+  const nextSymbolsByMarket = symbolsByTradeMode[mode] || new Map();
+  const previousMarket = preserveSelection ? marketSelect.value : "";
+  const previousSymbol = preserveSelection ? symbolSelect.value : "";
+
+  symbolsByMarket = nextSymbolsByMarket;
+  marketSelect.innerHTML = "";
+  const entries = Array.from(symbolsByMarket.values()).sort((a, b) => a.display.localeCompare(b.display));
+  entries.forEach((entry) => {
+    const opt = document.createElement("option");
+    opt.value = entry.market;
+    opt.textContent = entry.display;
+    marketSelect.appendChild(opt);
+  });
+
+  if (previousMarket && symbolsByMarket.has(previousMarket)) {
+    marketSelect.value = previousMarket;
+  } else if (previousSymbol) {
+    const matchingEntry = entries.find((entry) => entry.symbols.some((symbol) => symbol.symbol === previousSymbol));
+    if (matchingEntry) marketSelect.value = matchingEntry.market;
+  }
+
+  updateSymbols({ preferredSymbol: previousSymbol });
+}
+
+async function fetchAllActiveSymbols() {
+  const requests = [
+    { active_symbols: "full", product_type: "basic" },
+    { active_symbols: "full" },
+  ];
+  const bySymbol = new Map();
+  let lastError = null;
+
+  for (const payload of requests) {
+    try {
+      const res = await wsRequest({ ...payload });
+      (res.active_symbols || []).forEach((symbol) => {
+        if (symbol?.symbol) bySymbol.set(symbol.symbol, { ...bySymbol.get(symbol.symbol), ...symbol });
+      });
+    } catch (err) {
+      lastError = err;
+    }
+  }
+
+  if (!bySymbol.size && lastError) throw lastError;
+  return [...bySymbol.values()];
+}
+
 async function loadActiveSymbols() {
   setStatus("Loading markets...");
   try {
-    const res = await wsRequest({ active_symbols: "full", product_type: "basic" });
-    activeSymbols = res.active_symbols || [];
+    activeSymbols = await fetchAllActiveSymbols();
   } catch (err) {
     setStatus(`Load failed: ${err.message}`, true);
     return;
   }
 
-  const derivedSymbols = activeSymbols.filter(isDerivedMarket).filter(isAllowedSymbol);
+  const tradeableSymbols = activeSymbols.filter(isTradableActiveSymbol);
+  const riseFallSymbols = activeSymbols.filter(isRiseFallEligibleSymbol);
+  const derivedSymbols = tradeableSymbols.filter(isDerivedMarket).filter(isAllowedSymbol);
+  symbolsByTradeMode = {
+    rise_fall: buildSymbolsByMarket(riseFallSymbols, "Markets"),
+    higher_lower: buildSymbolsByMarket(derivedSymbols, "Derived"),
+  };
 
-  symbolsByMarket = new Map();
-  for (const s of derivedSymbols) {
-    const key = s.market || "derived";
-    if (!symbolsByMarket.has(key)) {
-      symbolsByMarket.set(key, {
-        market: key,
-        display: s.market_display_name || "Derived",
-        symbols: [],
-      });
-    }
-    symbolsByMarket.get(key).symbols.push(s);
-  }
-
-  marketSelect.innerHTML = "";
-  for (const entry of Array.from(symbolsByMarket.values()).sort((a, b) => a.display.localeCompare(b.display))) {
-    const opt = document.createElement("option");
-    opt.value = entry.market;
-    opt.textContent = entry.display;
-    marketSelect.appendChild(opt);
-  }
-
-  updateSymbols();
-  setStatus("Markets loaded");
+  rebuildSymbolsForTradeMode({ preserveSelection: false });
+  setStatus(`Markets loaded (${riseFallSymbols.length} Rise/Fall symbols)`);
 }
 
-function updateSymbols() {
+function updateSymbols({ preferredSymbol = "" } = {}) {
   const market = marketSelect.value;
   const entry = symbolsByMarket.get(market);
   symbolSelect.innerHTML = "";
@@ -11924,6 +12001,10 @@ function updateSymbols() {
     opt.textContent = s.display_name;
     opt.dataset.pip = s.pip ?? s.pip_size ?? "";
     symbolSelect.appendChild(opt);
+  }
+
+  if (preferredSymbol && symbols.some((s) => s.symbol === preferredSymbol)) {
+    symbolSelect.value = preferredSymbol;
   }
 
   onSymbolChange();
@@ -12156,14 +12237,55 @@ async function refreshProposals() {
     quickDirectionQuotes = { CALL: null, PUT: null };
 
     if (isRiseFall) {
+      const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
       proposals = [];
-      if (primaryExpiry && stake) {
-        const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
+      if (expiryChoice.mode === "candle_end") {
+        for (const expiry of proposalExpiries) {
+          const nowSec = Math.floor(Date.now() / 1000);
+          const durationSec = Math.max(minDurationSec, expiry - nowSec);
+          for (const direction of ["CALL", "PUT"]) {
+            if (!stake || durationSec <= 0) {
+              proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel: "Candle end" });
+              continue;
+            }
+            try {
+              const proposal = await getProposal({
+                symbol: currentSymbol,
+                contractType: direction,
+                barrier: null,
+                stake,
+                durationSec,
+                durationUnit: "s",
+              });
+              const payout = proposal.payout;
+              const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
+              const item = {
+                expiry,
+                direction,
+                payout,
+                profitPct: stake ? ((payout - stake) / stake) * 100 : null,
+                proposalId: proposal.id,
+                askPrice,
+                barrier: null,
+                offset: null,
+                expiryLabel: "Candle end",
+              };
+              proposals.push(item);
+              if (expiry === primaryExpiry) quickDirectionQuotes[direction] = item;
+              ok += 1;
+            } catch (err) {
+              lastProposalError = err?.message || "Proposal error";
+              if (lastProposalError.toLowerCase().includes("rate limit")) {
+                rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+              }
+              proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel: "Candle end" });
+            }
+          }
+        }
+      } else if (primaryExpiry && stake) {
         const nowSec = Math.floor(Date.now() / 1000);
-        const durationSec = expiryChoice.mode === "candle_end"
-          ? Math.max(minDurationSec, primaryExpiry - nowSec)
-          : Math.max(1, expiryChoice.duration);
-        const durationUnit = expiryChoice.mode === "candle_end" ? "s" : expiryChoice.unit;
+        const durationSec = Math.max(1, expiryChoice.duration);
+        const durationUnit = expiryChoice.unit;
         for (const direction of ["CALL", "PUT"]) {
           try {
             const proposal = await getProposal({
@@ -12185,6 +12307,10 @@ async function refreshProposals() {
               expiry: primaryExpiry,
               expiryLabel: expiryChoice.label,
             };
+            proposals.push({
+              ...quickDirectionQuotes[direction],
+              direction,
+            });
             ok += 1;
           } catch (err) {
             lastProposalError = err?.message || "Proposal error";
@@ -12254,7 +12380,10 @@ async function refreshProposals() {
     proposalLoadingDirection = null;
     renderTradeList();
     if (proposalExpiries.length) {
-      const totalExpected = isRiseFall ? 2 : proposalExpiries.length;
+      const riseFallChoice = isRiseFall ? parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value) : null;
+      const totalExpected = isRiseFall
+        ? riseFallChoice?.mode === "candle_end" ? proposalExpiries.length * 2 : 2
+        : proposalExpiries.length;
       if (ok === 0 && lastProposalError) {
         setStatus(`Proposals: 0/${totalExpected} (${lastProposalError})`, true);
       } else {
@@ -12353,11 +12482,6 @@ function renderTradeList() {
   updateTradeProfitSummary();
   const isRiseFall = getActiveTradeMode() === "rise_fall";
 
-  if (isDesktopLayout() && currentAppTab === "chart" && isRiseFall) {
-    tradeListEl.innerHTML = "";
-    return;
-  }
-
   if (!isRiseFall && calcInFlight && proposalLoadingDirection === currentDirection && !proposals.length) {
     tradeListEl.innerHTML = `<div class="trade-meta">Loading ${getDirectionLabel(currentDirection)} proposals...</div>`;
     return;
@@ -12373,9 +12497,21 @@ function renderTradeList() {
   const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
-  tradeListEl.innerHTML = errorBanner + proposalExpiries.map((expiry, idx) => {
-    const item = proposals[idx] || {};
-    const countdown = formatCountdown(expiry);
+  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value) : null;
+  const listItems = isRiseFall
+    ? proposals
+    : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
+
+  if (isRiseFall && calcInFlight && !listItems.length) {
+    tradeListEl.innerHTML = `<div class="trade-meta">Loading Rise/Fall proposals...</div>`;
+    return;
+  }
+
+  tradeListEl.innerHTML = errorBanner + listItems.map((item) => {
+    const itemDirection = item.direction || currentDirection;
+    const itemDirectionLabel = getDirectionLabel(itemDirection);
+    const itemDirClass = itemDirection === "CALL" ? "higher" : "lower";
+    const countdown = item.expiry ? formatCountdown(item.expiry) : item.expiryLabel || "--";
     const barrierText = item.barrier == null ? "--" : formatPrice(item.barrier, currentPip);
     const offsetText = item.offset == null ? "--" : formatOffset(item.offset, currentPip);
     const profit = item.payout == null || !stake ? null : item.payout - stake;
@@ -12383,14 +12519,18 @@ function renderTradeList() {
     const pctText = item.profitPct == null ? "--" : item.profitPct.toFixed(1);
     const proposalId = item.proposalId ? `data-proposal=\"${item.proposalId}\"` : "";
     const priceAttr = item.askPrice != null ? `data-price=\"${item.askPrice}\"` : "";
+    const directionAttr = itemDirection ? `data-direction=\"${itemDirection}\"` : "";
+    const metaText = isRiseFall
+      ? `Expiry: ${item.expiryLabel || "Candle end"}${item.expiry ? ` (${countdown})` : ""}`
+      : `Barrier: ${barrierText} (offset ${offsetText})`;
     return `
       <div class="trade-row">
-        <button class="trade-btn ${dirClass}" data-expiry="${expiry}" ${proposalId} ${priceAttr}>
-          <div class="trade-title"><span class="trade-tag">${directionLabel}</span> • ends in ${countdown}</div>
+        <button class="trade-btn ${itemDirClass}" data-expiry="${item.expiry || ""}" ${directionAttr} ${proposalId} ${priceAttr}>
+          <div class="trade-title"><span class="trade-tag">${itemDirectionLabel}</span> • ends in ${countdown}</div>
           <div class="trade-meta">Profit: ${profitText} (${pctText}%)</div>
-          <div class="trade-meta">Barrier: ${barrierText} (offset ${offsetText})</div>
+          <div class="trade-meta">${metaText}</div>
         </button>
-        <button class="buy-btn" data-expiry="${expiry}" ${proposalId} ${priceAttr}>Buy</button>
+        <button class="buy-btn" data-expiry="${item.expiry || ""}" ${directionAttr} ${proposalId} ${priceAttr}>Buy</button>
       </div>
     `;
   }).join("");
@@ -12622,7 +12762,8 @@ function init() {
       return;
     }
     const price = priceStr ? Number(priceStr) : Number(stakeInput?.value || "0");
-    executeProposalBuy(proposalId, price, currentDirection);
+    const rowDirection = target.getAttribute("data-direction");
+    executeProposalBuy(proposalId, price, rowDirection === "PUT" ? "PUT" : rowDirection === "CALL" ? "CALL" : currentDirection);
   });
 
   tabs.forEach((tab) => {
@@ -12644,10 +12785,10 @@ function init() {
     });
   }
 
-  if (toggleProposalsBtn && proposalsBodyEl) {
+  if (toggleProposalsBtn && tradeListEl) {
     toggleProposalsBtn.addEventListener("click", () => {
-      const isCollapsed = proposalsBodyEl.classList.toggle("collapsed");
-      toggleProposalsBtn.textContent = isCollapsed ? "Expand" : "Collapse";
+      const isCollapsed = tradeListEl.classList.toggle("collapsed");
+      toggleProposalsBtn.textContent = isCollapsed ? "Show" : "Hide";
       toggleProposalsBtn.setAttribute("aria-expanded", isCollapsed ? "false" : "true");
       scheduleChartResize();
     });
@@ -13325,8 +13466,8 @@ function init() {
   // Default collapsed state for sections
   tradeBody?.classList.add("collapsed");
   toggleTradeBtn && (toggleTradeBtn.textContent = "Expand", toggleTradeBtn.setAttribute("aria-expanded", "false"));
-  proposalsBodyEl?.classList.add("collapsed");
-  toggleProposalsBtn && (toggleProposalsBtn.textContent = "Expand", toggleProposalsBtn.setAttribute("aria-expanded", "false"));
+  tradeListEl?.classList.add("collapsed");
+  toggleProposalsBtn && (toggleProposalsBtn.textContent = "Show", toggleProposalsBtn.setAttribute("aria-expanded", "false"));
   tradeResultsEl?.classList.add("collapsed");
   toggleResultsBtn && (toggleResultsBtn.textContent = "Expand", toggleResultsBtn.setAttribute("aria-expanded", "false"));
   signalBodyEl?.classList.add("collapsed");
