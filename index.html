@@ -90,6 +90,20 @@
             <div class="field-label">Stake</div>
             <input id="stakeInput" class="field-input" type="number" min="0.35" step="0.01" value="1" />
           </div>
+
+          <div id="mainRiseFallExpiryField" class="field">
+            <div class="field-label">Expiry</div>
+            <select id="mainRiseFallExpirySelect" class="field-input" aria-label="Rise or fall expiry">
+              <option value="candle_end">Candle end</option>
+              <option value="5t">5 ticks</option>
+              <option value="10t">10 ticks</option>
+              <option value="30s">30 seconds</option>
+              <option value="60s">1 minute</option>
+              <option value="300s">5 minutes</option>
+              <option value="3600s">1 hour</option>
+              <option value="86400s">1 day</option>
+            </select>
+          </div>
         </div>
       </section>
       </section>

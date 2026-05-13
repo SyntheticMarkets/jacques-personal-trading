@@ -42,6 +42,8 @@ let proposalsBodyEl;
 let sidebarTradeTypeSelectEl;
 let riseFallExpiryFieldEl;
 let riseFallExpirySelectEl;
+let mainRiseFallExpiryFieldEl;
+let mainRiseFallExpirySelectEl;
 let sidebarStakeInputEl;
 let sidebarBarrierInputEl;
 let tradeProfitSummaryEl;
@@ -79,6 +81,23 @@ let tickWatchdogTimer = null;
 const PING_INTERVAL_MS = 30000;
 const RATE_LIMIT_COOLDOWN_MS = 15000;
 const MIN_REFRESH_MS = 5000;
+const RISE_FALL_EXPIRY_OPTIONS = [
+  { value: "candle_end", label: "Candle end" },
+  { value: "5t", label: "5 ticks" },
+  { value: "10t", label: "10 ticks" },
+  { value: "30s", label: "30 seconds" },
+  { value: "60s", label: "1 minute" },
+  { value: "300s", label: "5 minutes" },
+  ...Array.from({ length: 11 }, (_, index) => {
+    const minutes = 10 + (index * 5);
+    return { value: `${minutes * 60}s`, label: `${minutes} minutes` };
+  }),
+  ...Array.from({ length: 22 }, (_, index) => {
+    const hours = index + 2;
+    return { value: `${hours * 3600}s`, label: `${hours} hours` };
+  }),
+  { value: "86400s", label: "1 day" },
+];
 let proposalLoadingDirection = null;
 let storedAccounts = [];
 let activeToken = null;
@@ -9484,6 +9503,21 @@ function populateTimeframeOptions() {
   updateTimeframeUI();
 }
 
+function populateRiseFallExpiryOptions() {
+  const selected = getRiseFallExpiryValue();
+  const html = RISE_FALL_EXPIRY_OPTIONS
+    .map((option) => `<option value="${option.value}">${option.label}</option>`)
+    .join("");
+  [mainRiseFallExpirySelectEl, riseFallExpirySelectEl].forEach((select) => {
+    if (!select) return;
+    select.innerHTML = html;
+    select.value = RISE_FALL_EXPIRY_OPTIONS.some((option) => option.value === selected)
+      ? selected
+      : "candle_end";
+  });
+  syncRiseFallExpiryControls();
+}
+
 function renderChartIndicatorList() {
   if (!chartIndicatorListEl) return;
   if (!activeChartIndicators.size) {
@@ -9894,6 +9928,83 @@ function getQuoteForDirection(direction) {
   return direction === "PUT" ? quickDirectionQuotes.PUT : quickDirectionQuotes.CALL;
 }
 
+function getRiseFallExpiryValue() {
+  return mainRiseFallExpirySelectEl?.value || riseFallExpirySelectEl?.value || "candle_end";
+}
+
+function syncRiseFallExpiryControls(sourceEl = null) {
+  const value = sourceEl?.value || getRiseFallExpiryValue();
+  if (mainRiseFallExpirySelectEl && mainRiseFallExpirySelectEl !== sourceEl && mainRiseFallExpirySelectEl.value !== value) {
+    mainRiseFallExpirySelectEl.value = value;
+  }
+  if (riseFallExpirySelectEl && riseFallExpirySelectEl !== sourceEl && riseFallExpirySelectEl.value !== value) {
+    riseFallExpirySelectEl.value = value;
+  }
+}
+
+async function executeDirectionQuote(direction) {
+  const tradeDirection = direction === "PUT" ? "PUT" : "CALL";
+  setDirection(tradeDirection, { refresh: false });
+  if (!currentSymbol || !lastSpot) {
+    setStatus("Market price not ready yet", true);
+    return false;
+  }
+  const stake = Number(stakeInput?.value || sidebarStakeInputEl?.value || "0");
+  if (!stake) {
+    setStatus("Enter a valid stake first", true);
+    return false;
+  }
+  const expiryChoice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
+  let durationSec;
+  let durationUnit = "s";
+  let expiry = proposalExpiries[0];
+  if (expiryChoice.mode === "candle_end") {
+    if (!expiry) buildExpiries();
+    expiry = proposalExpiries[0];
+    const nowSec = Math.floor(Date.now() / 1000);
+    durationSec = Math.max(minDurationSec, (expiry || nowSec + minDurationSec) - nowSec);
+  } else {
+    const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
+    durationSec = effectiveExpiry.seconds;
+    durationUnit = effectiveExpiry.unit;
+  }
+
+  setStatus(`Getting ${getDirectionLabel(tradeDirection)} proposal...`);
+  try {
+    const proposal = await getProposal({
+      symbol: currentSymbol,
+      contractType: tradeDirection,
+      barrier: null,
+      stake,
+      durationSec,
+      durationUnit,
+    });
+    const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
+    const quote = {
+      payout: proposal.payout,
+      profitPct: stake ? ((proposal.payout - stake) / stake) * 100 : null,
+      proposalId: proposal.id,
+      askPrice,
+      barrier: null,
+      offset: null,
+      expiry,
+      expiryLabel: durationUnit === "t" ? expiryChoice.label : formatDurationLabel(durationSec),
+    };
+    quickDirectionQuotes[tradeDirection] = quote;
+    updateProposalDirectionButtons();
+    updateTradeProfitSummary();
+    return executeProposalBuy(proposal.id, askPrice, tradeDirection);
+  } catch (err) {
+    lastProposalError = err?.message || "Proposal error";
+    if (lastProposalError.toLowerCase().includes("rate limit")) {
+      rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+    }
+    setStatus(`Proposal failed: ${lastProposalError}`, true);
+    scheduleProposalRefresh(true);
+    return false;
+  }
+}
+
 function parseRiseFallExpiryChoice(value) {
   if (!value || value === "candle_end") {
     return { mode: "candle_end", duration: null, unit: null, label: "Candle end" };
@@ -9912,6 +10023,59 @@ function parseRiseFallExpiryChoice(value) {
     d: `${duration} day${duration === 1 ? "" : "s"}`,
   };
   return { mode: "fixed", duration, unit, label: labelMap[unit] || value };
+}
+
+function durationChoiceToSeconds(choice) {
+  if (!choice || choice.mode !== "fixed") return null;
+  const unit = choice.unit;
+  const multiplier = unit === "t" ? 1
+    : unit === "s" ? 1
+      : unit === "m" ? 60
+        : unit === "h" ? 3600
+          : unit === "d" ? 86400
+            : null;
+  return multiplier ? choice.duration * multiplier : null;
+}
+
+function formatDurationLabel(seconds) {
+  const value = Math.max(1, Math.round(Number(seconds) || 0));
+  if (value % 86400 === 0) {
+    const days = value / 86400;
+    return `${days} day${days === 1 ? "" : "s"}`;
+  }
+  if (value % 3600 === 0) {
+    const hours = value / 3600;
+    return `${hours} hour${hours === 1 ? "" : "s"}`;
+  }
+  if (value % 60 === 0) {
+    const minutes = value / 60;
+    return `${minutes} minute${minutes === 1 ? "" : "s"}`;
+  }
+  return `${value} second${value === 1 ? "" : "s"}`;
+}
+
+function getEffectiveRiseFallSignalExpiry() {
+  const choice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
+  if (choice.mode === "fixed") {
+    const chosenSeconds = durationChoiceToSeconds(choice);
+    if (choice.unit === "t") {
+      return { seconds: Math.max(1, choice.duration), unit: "t", label: choice.label };
+    }
+    const seconds = Math.max(minDurationSec, chosenSeconds || minDurationSec);
+    return {
+      seconds,
+      unit: "s",
+      label: seconds === chosenSeconds ? choice.label : formatDurationLabel(seconds),
+    };
+  }
+  const nowSec = Math.floor(Date.now() / 1000);
+  const nextExpiry = proposalExpiries[0] || nowSec + minDurationSec;
+  const seconds = Math.max(minDurationSec, nextExpiry - nowSec);
+  return {
+    seconds,
+    unit: "s",
+    label: `Candle end (${formatDurationLabel(seconds)})`,
+  };
 }
 
 function syncTradeTypeControls(tabName) {
@@ -10191,11 +10355,17 @@ function computeMainSignalSchedule() {
   const candleMs = 60000;
   const now = Date.now();
   const scanStartAt = Math.ceil(now / candleMs) * candleMs;
+  const expiry = getActiveTradeMode() === "rise_fall"
+    ? getEffectiveRiseFallSignalExpiry()
+    : { seconds: Math.max(60, baseMinutes * 60), unit: "s", label: `${baseMinutes} minute${baseMinutes === 1 ? "" : "s"}` };
   return {
     now,
     scanStartAt,
     signalAt: scanStartAt + 50000,
     entryAt: scanStartAt + candleMs,
+    expirySeconds: expiry.seconds,
+    expiryUnit: expiry.unit,
+    expiryLabel: expiry.label,
   };
 }
 
@@ -10244,14 +10414,14 @@ function renderMainSignalCountdown() {
     return;
   }
   if (now < mainSignalSchedule.scanStartAt) {
-    setMainSignalStatus(`Waiting for 1m close. Scan starts in ${formatMainSignalCountdown(mainSignalSchedule.scanStartAt)}.`, "armed");
+    setMainSignalStatus(`Waiting for 1m close. ${mainSignalSchedule.expiryLabel} expiry scan starts in ${formatMainSignalCountdown(mainSignalSchedule.scanStartAt)}.`, "armed");
     return;
   }
   if (now < mainSignalSchedule.signalAt) {
-    setMainSignalStatus(`Scanning M15 / M5 / M1. Signal locks in ${formatMainSignalCountdown(mainSignalSchedule.signalAt)}.`, "armed");
+    setMainSignalStatus(`Scanning M15 / M5 / M1 for ${mainSignalSchedule.expiryLabel} expiry. Signal locks in ${formatMainSignalCountdown(mainSignalSchedule.signalAt)}.`, "armed");
     return;
   }
-  setMainSignalStatus(`Signal locked. Entry candle opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, "ready");
+  setMainSignalStatus(`Signal locked for ${mainSignalSchedule.expiryLabel} expiry. Entry opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, "ready");
 }
 
 function addMainSignalFrameVote(votes, frame, prediction, frameWeight) {
@@ -10819,10 +10989,11 @@ async function lockMainSignal() {
     const referencePrice = currentSymbol === symbol && Number.isFinite(lastSpot) ? Number(lastSpot) : Number(candles[candles.length - 1]?.close);
     const result = buildTopDownMainSignal(candles, referencePrice);
     const tradeDirection = result.direction;
+    const expiryLabel = mainSignalSchedule.expiryLabel || "1 minute";
     const signalText = tradeDirection === "CALL"
-      ? "BUY NEXT 1M"
+      ? `BUY ${expiryLabel.toUpperCase()}`
       : tradeDirection === "PUT"
-        ? "SELL NEXT 1M"
+        ? `SELL ${expiryLabel.toUpperCase()}`
         : "WAIT";
     lastSignalState = {
       trend: result.trend,
@@ -10830,7 +11001,7 @@ async function lockMainSignal() {
       sweep: result.reasons[0]?.system || "--",
       confidence: result.direction ? result.confidence : null,
       signal: signalText,
-      setup: `${formatClockTime(mainSignalSchedule.entryAt)} entry | scanned ${result.systemsChecked || 0} votes / ${result.setupSystems || 0} setup systems | ${result.setup}`,
+      setup: `${formatClockTime(mainSignalSchedule.entryAt)} entry | ${expiryLabel} expiry | scanned ${result.systemsChecked || 0} votes / ${result.setupSystems || 0} setup systems | ${result.setup}`,
       time: Date.now(),
       allowEntry: Boolean(result.direction),
       tradeDirection,
@@ -10839,20 +11010,20 @@ async function lockMainSignal() {
     updateSignalUI(lastSignalState);
     updateFrameSignalUI(lastSignalState);
     if (sigRejectEl) sigRejectEl.textContent = result.reasons[0]?.reason || "--";
-    if (sigEntryEl) sigEntryEl.textContent = result.direction ? `Prepare ${result.direction === "CALL" ? "BUY" : "SELL"} before ${formatClockTime(mainSignalSchedule.entryAt)}` : "WAIT";
+    if (sigEntryEl) sigEntryEl.textContent = result.direction ? `Prepare ${result.direction === "CALL" ? "BUY" : "SELL"} before ${formatClockTime(mainSignalSchedule.entryAt)} (${expiryLabel})` : "WAIT";
     if (sigLevelEl) sigLevelEl.textContent = Number.isFinite(result.entryPrice) ? formatPrice(result.entryPrice, currentPip) : "--";
     if (result.direction) {
       setDirection(result.direction, { refresh: true });
       showSignalToast({
         title: `Main signal: ${result.direction === "CALL" ? "BUY" : "SELL"}`,
-        body: `${result.confidence}% confidence. Entry candle ${formatClockTime(mainSignalSchedule.entryAt)}.`,
+        body: `${result.confidence}% confidence. Entry ${formatClockTime(mainSignalSchedule.entryAt)}, expiry ${expiryLabel}.`,
         tone: result.direction === "CALL" ? "buy" : "sell",
       });
     }
     const gateText = result.direction
       ? `${signalText}. ${result.setupSystems || 0} setup systems aligned.`
       : `WAIT. Gate failed: ${result.gate?.htfAligned ? "" : "HTF "} ${result.gate?.entryAligned ? "" : "M1 "} ${result.gate?.enoughSetups ? "" : "setups "}`.replace(/\s+/g, " ").trim();
-    setMainSignalStatus(`${gateText} Entry candle opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, result.direction ? "ready" : "armed");
+    setMainSignalStatus(`${gateText} ${expiryLabel} expiry. Entry opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, result.direction ? "ready" : "armed");
   } catch (err) {
     setMainSignalStatus(`Signal scan failed: ${err?.message || "unknown error"}`, "armed");
   } finally {
@@ -11903,6 +12074,8 @@ function setActiveTab(tabName) {
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
   if (sidebarBarrierFieldEl) sidebarBarrierFieldEl.style.display = isHL ? "block" : "none";
   if (riseFallExpiryFieldEl) riseFallExpiryFieldEl.style.display = isRiseFall ? "block" : "none";
+  if (mainRiseFallExpiryFieldEl) mainRiseFallExpiryFieldEl.style.display = isRiseFall ? "block" : "none";
+  syncRiseFallExpiryControls();
   proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
   syncTradeTypeControls(tabName);
@@ -12579,7 +12752,7 @@ async function refreshProposals() {
     quickDirectionQuotes = { CALL: null, PUT: null };
 
     if (isRiseFall) {
-      const expiryChoice = parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value);
+      const expiryChoice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
       proposals = [];
       if (expiryChoice.mode === "candle_end") {
         for (const expiry of proposalExpiries) {
@@ -12626,8 +12799,9 @@ async function refreshProposals() {
         }
       } else if (primaryExpiry && stake) {
         const nowSec = Math.floor(Date.now() / 1000);
-        const durationSec = Math.max(1, expiryChoice.duration);
-        const durationUnit = expiryChoice.unit;
+        const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
+        const durationSec = effectiveExpiry.seconds;
+        const durationUnit = effectiveExpiry.unit;
         for (const direction of ["CALL", "PUT"]) {
           try {
             const proposal = await getProposal({
@@ -12647,7 +12821,7 @@ async function refreshProposals() {
               barrier: null,
               offset: null,
               expiry: primaryExpiry,
-              expiryLabel: expiryChoice.label,
+              expiryLabel: durationUnit === "t" ? expiryChoice.label : formatDurationLabel(durationSec),
             };
             proposals.push({
               ...quickDirectionQuotes[direction],
@@ -12722,7 +12896,7 @@ async function refreshProposals() {
     proposalLoadingDirection = null;
     renderTradeList();
     if (proposalExpiries.length) {
-      const riseFallChoice = isRiseFall ? parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value) : null;
+      const riseFallChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
       const totalExpected = isRiseFall
         ? riseFallChoice?.mode === "candle_end" ? proposalExpiries.length * 2 : 2
         : proposalExpiries.length;
@@ -12839,13 +13013,18 @@ function renderTradeList() {
   const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
-  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(riseFallExpirySelectEl?.value) : null;
+  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
   const listItems = isRiseFall
     ? proposals
     : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
 
   if (isRiseFall && calcInFlight && !listItems.length) {
-    tradeListEl.innerHTML = `<div class="trade-meta">Loading Rise/Fall proposals...</div>`;
+    tradeListEl.innerHTML = "";
+    return;
+  }
+
+  if (isRiseFall) {
+    tradeListEl.innerHTML = errorBanner;
     return;
   }
 
@@ -12986,6 +13165,8 @@ function init() {
   sidebarTradeTypeSelectEl = document.getElementById("sidebarTradeTypeSelect");
   riseFallExpiryFieldEl = document.getElementById("riseFallExpiryField");
   riseFallExpirySelectEl = document.getElementById("riseFallExpirySelect");
+  mainRiseFallExpiryFieldEl = document.getElementById("mainRiseFallExpiryField");
+  mainRiseFallExpirySelectEl = document.getElementById("mainRiseFallExpirySelect");
   sidebarStakeInputEl = document.getElementById("sidebarStakeInput");
   sidebarBarrierInputEl = document.getElementById("sidebarBarrierInput");
   tradeProfitSummaryEl = document.getElementById("tradeProfitSummary");
@@ -13076,6 +13257,7 @@ function init() {
 
   marketSelect.addEventListener("change", updateSymbols);
   symbolSelect.addEventListener("change", onSymbolChange);
+  populateRiseFallExpiryOptions();
   populateTimeframeOptions();
   populateTrendModeOptions();
   chartDrawingStore = loadChartDrawingStore();
@@ -13088,9 +13270,11 @@ function init() {
   syncDesktopSidebarContent();
   updateSidebarToggleUI();
   tradeListEl?.addEventListener("click", (event) => {
-    const target = event.target;
+    const target = event.target instanceof HTMLElement
+      ? event.target.closest(".buy-btn, .trade-btn")
+      : null;
     if (!(target instanceof HTMLElement)) return;
-    if (!target.classList.contains("buy-btn")) return;
+    if (!target.classList.contains("buy-btn") && !target.classList.contains("trade-btn")) return;
 
     const proposalId = target.getAttribute("data-proposal");
     const priceStr = target.getAttribute("data-price");
@@ -13745,6 +13929,10 @@ function init() {
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       const direction = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
+      if (getActiveTradeMode() === "rise_fall") {
+        executeDirectionQuote(direction);
+        return;
+      }
       setDirection(direction);
     });
   });
@@ -13778,6 +13966,12 @@ function init() {
     scheduleProposalRefresh(true);
   });
   riseFallExpirySelectEl?.addEventListener("change", () => {
+    syncRiseFallExpiryControls(riseFallExpirySelectEl);
+    if (getActiveTradeMode() !== "rise_fall") return;
+    scheduleProposalRefresh(true);
+  });
+  mainRiseFallExpirySelectEl?.addEventListener("change", () => {
+    syncRiseFallExpiryControls(mainRiseFallExpirySelectEl);
     if (getActiveTradeMode() !== "rise_fall") return;
     scheduleProposalRefresh(true);
   });
