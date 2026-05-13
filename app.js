@@ -244,6 +244,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "TICK_REJECTION", label: "Tick Rejection Microstructure" },
   { value: "TREND_VOLUME_ACCUM", label: "Trend Volume Accumulation" },
   { value: "CHART_PATTERNS", label: "Chart Patterns Signals" },
+  { value: "CHANNELS_PATTERNS", label: "Channels With Patterns" },
   { value: "EMA", label: "EMA 9" },
 ];
 const CHART_INDICATOR_GROUPS = [
@@ -263,7 +264,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "PA",
     label: "Price Action",
     category: "SIGNALS",
-    items: ["PRICE_ACTION_TOOLKIT"],
+    items: ["PRICE_ACTION_TOOLKIT", "CHANNELS_PATTERNS"],
   },
   {
     key: "LIQ",
@@ -4448,6 +4449,205 @@ function buildChartPatternsSignals(candles, config = {}) {
   };
 }
 
+function buildChannelsWithPatterns(candles, config = {}) {
+  const settings = {
+    style: config.style || "Wick",
+    breakStyle: Boolean(config.breakStyle),
+    instant: config.instant ?? true,
+    offset: config.offset ?? 0.625,
+    atrLength: Math.max(1, config.atrLength ?? 10),
+    atrMultiplier: config.atrMultiplier ?? 4,
+    padding: config.padding ?? 50,
+    pivotLen: Math.max(1, config.pivotLen ?? 10),
+    lookForward: Math.max(1, config.lookForward ?? 15),
+    avgLength: Math.max(1, config.avgLength ?? 18),
+    history: Math.max(1, config.history ?? 5),
+  };
+  if (!Array.isArray(candles) || candles.length < settings.pivotLen + settings.lookForward + settings.avgLength + 5) {
+    return { channels: [], labels: [], breaks: [] };
+  }
+
+  const pickTop = candles.map((c) => settings.style === "Body" ? Math.max(c.open, c.close) : c.high);
+  const pickBottom = candles.map((c) => settings.style === "Body" ? Math.min(c.open, c.close) : c.low);
+  const pivotHighSource = pickTop.map((high) => ({ high }));
+  const pivotLowSource = pickBottom.map((low) => ({ low }));
+  const highsAvg = simpleMovingAverage(pickTop, settings.avgLength);
+  const lowsAvg = simpleMovingAverage(pickBottom, settings.avgLength);
+  const trueRanges = candles.map((c, i) => {
+    const prevClose = candles[i - 1]?.close ?? c.close;
+    return Math.max(c.high - c.low, Math.abs(c.high - prevClose), Math.abs(c.low - prevClose));
+  });
+  const atrValues = rmaSeries(trueRanges, settings.atrLength);
+  const catrValues = emaSeries(trueRanges, Math.max(2, settings.atrLength)).map((value) => Number.isFinite(value) ? value / 8.71875 : null);
+  const bodyRanges = candles.map((c) => Math.abs(c.close - c.open));
+  const topWicks = candles.map((c) => c.high - Math.max(c.open, c.close));
+  const bottomWicks = candles.map((c) => Math.min(c.open, c.close) - c.low);
+  const avgBodies = emaSeries(bodyRanges, 14);
+  const avgTopWicks = emaSeries(topWicks, 14);
+  const avgBottomWicks = emaSeries(bottomWicks, 14);
+  const channels = [];
+  const labels = [];
+  const breaks = [];
+  let active = null;
+  let lastPolarity = null;
+  let lastHighPivot = null;
+  let lastLowPivot = null;
+
+  const candlePatternAt = (i) => {
+    const c = candles[i];
+    const prev = candles[i - 1];
+    if (!c || !prev) return {};
+    const bodyTop = Math.max(c.open, c.close);
+    const bodyBottom = Math.min(c.open, c.close);
+    const prevBodyTop = Math.max(prev.open, prev.close);
+    const prevBodyBottom = Math.min(prev.open, prev.close);
+    const body = bodyTop - bodyBottom;
+    const upper = c.high - bodyTop;
+    const lower = bodyBottom - c.low;
+    const polarity = c.open < c.close;
+    const prevPolarity = prev.open < prev.close;
+    const aboveBody = Number.isFinite(avgBodies[i]) && body > avgBodies[i];
+    const prevAboveBody = Number.isFinite(avgBodies[i - 1]) && Math.abs(prev.close - prev.open) > avgBodies[i - 1];
+    const aboveTopWick = Number.isFinite(avgTopWicks[i]) && upper > avgTopWicks[i];
+    const aboveBottomWick = Number.isFinite(avgBottomWicks[i]) && lower > avgBottomWicks[i];
+    const hl2 = (c.high + c.low) / 2;
+    const safeBody = Math.max(body, currentPip || Math.abs(c.close) * 0.000001 || 0.0000001);
+    return {
+      hammer: bodyTop >= hl2 && upper <= safeBody * 0.08 && lower / safeBody >= 2 && !aboveBody && aboveBottomWick,
+      ihammer: bodyTop <= hl2 && lower <= safeBody * 0.08 && upper / safeBody >= 2 && !aboveBody && aboveTopWick,
+      bullishEngulfing: polarity && !prevPolarity && bodyTop > prevBodyTop && bodyBottom <= prevBodyBottom && aboveBody && !prevAboveBody && !aboveBottomWick,
+      bearishEngulfing: !polarity && prevPolarity && bodyTop >= prevBodyTop && bodyBottom < prevBodyBottom && aboveBody && !prevAboveBody && !aboveTopWick,
+    };
+  };
+
+  const channelValue = (channel, key, index) => {
+    const dx = Math.max(1, channel.end - channel.start);
+    return channel[`${key}1`] + (((channel[`${key}2`] - channel[`${key}1`]) / dx) * (index - channel.start));
+  };
+
+  const makeChannel = (i, polarity, pivot) => {
+    const atr = (atrValues[i] || averageRange(candles.slice(Math.max(0, i - settings.atrLength), i + 1), settings.atrLength) || Math.abs(candles[i].close) * 0.001) * settings.atrMultiplier;
+    const buffer = atr / 7;
+    const offset = (atrValues[i] || 0) * 4 / 7 * settings.offset;
+    const padding = settings.padding / 100 * 4;
+    const avgH = highsAvg[i];
+    const avgL = lowsAvg[i];
+    const catr = catrValues[i] || 0;
+    if (!Number.isFinite(atr) || !Number.isFinite(avgH) || !Number.isFinite(avgL)) return null;
+    let top1;
+    let top2;
+    let bottom1;
+    let bottom2;
+    let delta;
+    if (polarity) {
+      top1 = pivot.price + atr + buffer - offset;
+      top2 = avgL - catr + atr + buffer - offset;
+      bottom1 = pivot.price - buffer - offset;
+      bottom2 = avgL - catr - buffer - offset;
+      delta = (avgL - catr - pivot.price) / Math.max(1, settings.lookForward + (i - pivot.confirmIndex));
+    } else {
+      top1 = pivot.price + buffer + offset;
+      top2 = avgH + catr + buffer + offset;
+      bottom1 = pivot.price - atr - buffer + offset;
+      bottom2 = avgH + catr - atr - buffer + offset;
+      delta = (avgH + catr - pivot.price) / Math.max(1, settings.lookForward + (i - pivot.confirmIndex));
+    }
+    const midTop1 = top1 - buffer * padding;
+    const midTop2 = top2 - buffer * padding;
+    const center1 = (top1 + bottom1) / 2;
+    const center2 = (top2 + bottom2) / 2;
+    const midBottom1 = bottom1 + buffer * padding;
+    const midBottom2 = bottom2 + buffer * padding;
+    return {
+      polarity,
+      start: pivot.index,
+      end: i,
+      top1,
+      top2,
+      midTop1,
+      midTop2,
+      center1,
+      center2,
+      midBottom1,
+      midBottom2,
+      bottom1,
+      bottom2,
+      delta: Number.isFinite(delta) ? delta : 0,
+      breakIndex: null,
+      breakDirection: null,
+    };
+  };
+
+  for (let i = 0; i < candles.length; i += 1) {
+    const pivotIndex = i - settings.lookForward;
+    if (pivotIndex >= settings.pivotLen && pivotIndex < candles.length - settings.lookForward) {
+      if (isPivotLowLR(pivotLowSource, pivotIndex, settings.pivotLen, settings.lookForward)) {
+        lastLowPivot = { index: pivotIndex, confirmIndex: i, price: pickBottom[pivotIndex] };
+      }
+      if (isPivotHighLR(pivotHighSource, pivotIndex, settings.pivotLen, settings.lookForward)) {
+        lastHighPivot = { index: pivotIndex, confirmIndex: i, price: pickTop[pivotIndex] };
+      }
+    }
+
+    if (!active) {
+      const goingUp = lastLowPivot && lastLowPivot.price < candles[i].low;
+      const goingDown = lastHighPivot && lastHighPivot.price > candles[i].high;
+      const newUp = lastLowPivot?.confirmIndex === i;
+      const newDown = lastHighPivot?.confirmIndex === i;
+      const instantUp = settings.instant && lastLowPivot && lastHighPivot && lastLowPivot.index > lastHighPivot.index && lastPolarity === false;
+      const instantDown = settings.instant && lastLowPivot && lastHighPivot && lastLowPivot.index < lastHighPivot.index && lastPolarity === true;
+      if ((newUp || instantUp) && goingUp) {
+        active = makeChannel(i, true, lastLowPivot);
+        if (active) {
+          channels.push(active);
+          lastPolarity = true;
+        }
+      } else if ((newDown || instantDown) && goingDown) {
+        active = makeChannel(i, false, lastHighPivot);
+        if (active) {
+          channels.push(active);
+          lastPolarity = false;
+        }
+      }
+    } else {
+      if (i > active.end) {
+        active.top2 += active.delta;
+        active.midTop2 += active.delta;
+        active.center2 += active.delta;
+        active.midBottom2 += active.delta;
+        active.bottom2 += active.delta;
+        active.end = i;
+      }
+      const top = channelValue(active, "top", i);
+      const midTop = channelValue(active, "midTop", i);
+      const center = channelValue(active, "center", i);
+      const midBottom = channelValue(active, "midBottom", i);
+      const bottom = channelValue(active, "bottom", i);
+      const breakUpSource = settings.breakStyle ? candles[i].close : candles[i].low;
+      const breakDownSource = settings.breakStyle ? candles[i].close : candles[i].high;
+      const highCondition = candles[i].high >= midTop && candles[i].low >= center && ((candles[i].high + candles[i].low) / 2) <= top;
+      const lowCondition = candles[i].low <= midBottom && candles[i].high <= center && ((candles[i].high + candles[i].low) / 2) >= bottom;
+      const patterns = candlePatternAt(i);
+      if (highCondition && patterns.ihammer) labels.push({ index: i, price: candles[i].high, side: "top", text: "iH", kind: "ihammer" });
+      if (highCondition && patterns.bearishEngulfing) labels.push({ index: i, price: candles[i].high, side: "top", text: "EG", kind: "bearish_engulfing" });
+      if (lowCondition && patterns.hammer) labels.push({ index: i, price: candles[i].low, side: "bottom", text: "H", kind: "hammer" });
+      if (lowCondition && patterns.bullishEngulfing) labels.push({ index: i, price: candles[i].low, side: "bottom", text: "EG", kind: "bullish_engulfing" });
+      if (breakUpSource > top || breakDownSource < bottom) {
+        active.breakIndex = i;
+        active.breakDirection = breakUpSource > top ? "UP" : "DOWN";
+        breaks.push({ index: i, direction: active.breakDirection, price: active.breakDirection === "UP" ? candles[i].low : candles[i].high });
+        active = null;
+      }
+    }
+  }
+
+  return {
+    channels: channels.slice(-settings.history),
+    labels: labels.slice(-80),
+    breaks: breaks.slice(-40),
+  };
+}
+
 function buildLiquiditySweepOrderBlockSystem(candles, config = {}) {
   const pivotLen = Math.max(2, config.pivotLen ?? 3);
   const sweepLookahead = Math.max(4, config.sweepLookahead ?? 10);
@@ -6504,6 +6704,7 @@ function renderMiniChart(candles) {
   const hasTickRejection = activeChartIndicators.has("TICK_REJECTION");
   const hasTrendVolumeAccum = activeChartIndicators.has("TREND_VOLUME_ACCUM");
   const hasChartPatterns = activeChartIndicators.has("CHART_PATTERNS");
+  const hasChannelsPatterns = activeChartIndicators.has("CHANNELS_PATTERNS");
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -8473,6 +8674,108 @@ function renderMiniChart(candles) {
     });
   }
 
+  if (hasChannelsPatterns) {
+    const cwp = buildChannelsWithPatterns(candles, {});
+    const xForIndex = (index) => leftPad + ((index - start) * slotW) + (slotW / 2);
+    const channelY = (channel, key, index) => {
+      const dx = Math.max(1, channel.end - channel.start);
+      const value = channel[`${key}1`] + (((channel[`${key}2`] - channel[`${key}1`]) / dx) * (index - channel.start));
+      return toY(value);
+    };
+    const strokeChannelLine = (channel, key, color, widthValue = 1, dash = []) => {
+      const visibleStart = Math.max(start, channel.start);
+      const visibleEnd = Math.min(end - 1, channel.end);
+      if (visibleEnd <= visibleStart) return;
+      const x1 = xForIndex(visibleStart);
+      const x2 = xForIndex(visibleEnd);
+      const y1 = channelY(channel, key, visibleStart);
+      const y2 = channelY(channel, key, visibleEnd);
+      if (!Number.isFinite(y1) || !Number.isFinite(y2)) return;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = widthValue;
+      ctx.setLineDash(dash);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.restore();
+    };
+    const fillChannelBand = (channel, upperKey, lowerKey, color) => {
+      const visibleStart = Math.max(start, channel.start);
+      const visibleEnd = Math.min(end - 1, channel.end);
+      if (visibleEnd <= visibleStart) return;
+      const x1 = xForIndex(visibleStart);
+      const x2 = xForIndex(visibleEnd);
+      const upperY1 = channelY(channel, upperKey, visibleStart);
+      const upperY2 = channelY(channel, upperKey, visibleEnd);
+      const lowerY1 = channelY(channel, lowerKey, visibleStart);
+      const lowerY2 = channelY(channel, lowerKey, visibleEnd);
+      if (![upperY1, upperY2, lowerY1, lowerY2].every(Number.isFinite)) return;
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(x1, upperY1);
+      ctx.lineTo(x2, upperY2);
+      ctx.lineTo(x2, lowerY2);
+      ctx.lineTo(x1, lowerY1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    };
+
+    cwp.channels.forEach((channel) => {
+      fillChannelBand(channel, "top", "midTop", "rgba(51, 124, 79, 0.18)");
+      fillChannelBand(channel, "midBottom", "bottom", "rgba(165, 45, 45, 0.18)");
+      strokeChannelLine(channel, "top", "rgba(51, 124, 79, 0.88)", 1.1);
+      strokeChannelLine(channel, "midTop", "rgba(51, 124, 79, 0.62)", 1);
+      strokeChannelLine(channel, "center", "rgba(185, 190, 200, 0.72)", 1, [5, 4]);
+      strokeChannelLine(channel, "midBottom", "rgba(165, 45, 45, 0.62)", 1);
+      strokeChannelLine(channel, "bottom", "rgba(165, 45, 45, 0.88)", 1.1);
+    });
+
+    cwp.breaks.forEach((signal) => {
+      if (signal.index < start || signal.index >= end) return;
+      const x = xForIndex(signal.index);
+      const isUp = signal.direction === "UP";
+      const y = isUp ? toY(candles[signal.index].low) + 12 : toY(candles[signal.index].high) - 12;
+      ctx.save();
+      ctx.fillStyle = isUp ? "#337c4f" : "#a52d2d";
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isUp ? "top" : "bottom";
+      ctx.fillText(isUp ? "Break Up" : "Break Down", x, y);
+      ctx.restore();
+    });
+
+    cwp.labels.forEach((label) => {
+      if (label.index < start || label.index >= end) return;
+      const x = xForIndex(label.index);
+      const isBottom = label.side === "bottom";
+      const y = isBottom ? toY(candles[label.index].low) + 12 : toY(candles[label.index].high) - 12;
+      const color = label.kind === "ihammer"
+        ? "rgba(45, 63, 165, 0.88)"
+        : isBottom
+          ? "rgba(51, 124, 79, 0.88)"
+          : "rgba(165, 45, 45, 0.88)";
+      const boxW = Math.max(16, ctx.measureText(label.text).width + 8);
+      const boxH = 14;
+      const boxX = x - (boxW / 2);
+      const boxY = isBottom ? y : y - boxH;
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 4);
+      ctx.fill();
+      ctx.fillStyle = "#efefef";
+      ctx.font = "8px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label.text, x, boxY + (boxH / 2));
+      ctx.restore();
+    });
+  }
+
   renderChartDrawings(ctx, chartViewportState);
 
   // Current price dot and right-side labels
@@ -9065,6 +9368,16 @@ function buildIndicatorSignalAlerts(candles) {
       maxPatternAge: 60,
     });
     cp.signals.forEach((signal) => addAlert("CHART_PATTERNS", signal.entryIndex, signal.direction, signal.label));
+  }
+
+  if (activeChartIndicators.has("CHANNELS_PATTERNS")) {
+    const cwp = buildChannelsWithPatterns(candles, {});
+    cwp.labels.forEach((label) => {
+      addAlert("CHANNELS_PATTERNS", label.index, label.side === "bottom" ? "BUY" : "SELL", label.kind);
+    });
+    cwp.breaks.forEach((signal) => {
+      addAlert("CHANNELS_PATTERNS", signal.index, signal.direction === "UP" ? "BUY" : "SELL", "channel break");
+    });
   }
 
   if (activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE")) {
@@ -10276,6 +10589,34 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
         index: latest.entryIndex,
         candleCount: count,
       });
+    } else if (indicator === "CHANNELS_PATTERNS") {
+      const cwp = buildChannelsWithPatterns(candles, {});
+      const latestLabel = latestByIndex(cwp.labels, (label) => label?.index);
+      const latestBreak = latestByIndex(cwp.breaks, (signal) => signal?.index);
+      if (latestLabel) {
+        pushMainIndicatorVote(votes, {
+          direction: latestLabel.side === "bottom" ? "BUY" : "SELL",
+          weight: frameWeight * 2.2,
+          indicator,
+          frame,
+          price: latestLabel.price,
+          reason: latestLabel.kind,
+          index: latestLabel.index,
+          candleCount: count,
+        });
+      }
+      if (latestBreak) {
+        pushMainIndicatorVote(votes, {
+          direction: latestBreak.direction === "UP" ? "BUY" : "SELL",
+          weight: frameWeight * 1.8,
+          indicator,
+          frame,
+          price: latestBreak.price,
+          reason: `channel break ${latestBreak.direction}`,
+          index: latestBreak.index,
+          candleCount: count,
+        });
+      }
     } else if (indicator === "ICT_STRUCTURE") {
       const structure = buildICTStructureAnalysis(candles, 3);
       const latest = latestByIndex(structure.events, (event) => event?.breakIndex);
@@ -10344,6 +10685,7 @@ function scanAllMainSignalIndicators(candles, frame, frameWeight) {
     "STRUCTURE_PULLBACK",
     "TICK_REJECTION",
     "CHART_PATTERNS",
+    "CHANNELS_PATTERNS",
     "TREND_VOLUME_ACCUM",
     "EMA",
   ];
