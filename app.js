@@ -14442,23 +14442,6 @@ function init() {
   window.__generateBacktestSignalNow = handleGenerateBacktestSignalClick;
   window.__runBacktestNow = handleRunBacktestNowClick;
 
-  setActiveTab("higher_lower");
-  setActiveAppTab("chart");
-  connectWS();
-  loadActiveSymbols();
-  setExpiryMinutes(1);
-  startCountdowns();
-
-  parseOAuthTokens();
-  loadStoredAccounts();
-  renderAccountList();
-  if (activeToken) {
-    authorizeWithToken(activeToken).catch(() => {});
-  }
-  renderTradeResults();
-  renderAutoTradeResults();
-  updateFrameSignalUI(lastSignalState);
-
   // Default collapsed state for sections
   tradeBody?.classList.add("collapsed");
   toggleTradeBtn && (toggleTradeBtn.textContent = "Expand", toggleTradeBtn.setAttribute("aria-expanded", "false"));
@@ -14477,6 +14460,23 @@ function init() {
   toggleAutoConfigBtn && (toggleAutoConfigBtn.textContent = "Expand", toggleAutoConfigBtn.setAttribute("aria-expanded", "false"));
   autoResultsEl?.classList.add("collapsed");
   toggleAutoResultsBtn && (toggleAutoResultsBtn.textContent = "Expand", toggleAutoResultsBtn.setAttribute("aria-expanded", "false"));
+
+  setActiveTab("higher_lower");
+  setActiveAppTab("chart");
+  connectWS();
+  loadActiveSymbols();
+  setExpiryMinutes(1);
+  startCountdowns();
+
+  parseOAuthTokens();
+  loadStoredAccounts();
+  renderAccountList();
+  if (activeToken) {
+    authorizeWithToken(activeToken).catch(() => {});
+  }
+  renderTradeResults();
+  renderAutoTradeResults();
+  updateFrameSignalUI(lastSignalState);
 }
 
 window.addEventListener("DOMContentLoaded", init);

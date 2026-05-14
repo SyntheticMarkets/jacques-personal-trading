@@ -883,6 +883,10 @@ button.small {
   display: none;
 }
 
+.signal-panel-scroll {
+  min-height: 0;
+}
+
 .hl-buttons {
   display: grid;
   grid-template-columns: 1fr 1fr;
@@ -1782,7 +1786,7 @@ button.chart-indicator-select {
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 330px;
-    grid-template-rows: auto auto auto auto 1fr;
+    grid-template-rows: minmax(0, 1fr);
     gap: 12px 14px;
     min-height: 0;
     height: 100%;
@@ -1792,9 +1796,21 @@ button.chart-indicator-select {
     overflow: hidden;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child {
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll {
     grid-column: 2;
     grid-row: 1;
+    display: block;
+    height: 100%;
+    max-height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    overflow-x: hidden;
+    overscroll-behavior: contain;
+    scrollbar-width: thin;
+    -webkit-overflow-scrolling: touch;
+  }
+
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .card-head:first-child {
     margin-bottom: 0;
     padding: 14px 14px 10px;
     border: 1px solid #243143;
@@ -1803,9 +1819,7 @@ button.chart-indicator-select {
     background: #10151d;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .main-signal-actions {
-    grid-column: 2;
-    grid-row: 2;
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .main-signal-actions {
     margin-bottom: 0;
     padding: 0 14px;
     border-left: 1px solid #243143;
@@ -1815,22 +1829,17 @@ button.chart-indicator-select {
     overflow: visible;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .market-scanner {
-    grid-column: 2;
-    grid-row: 3;
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .market-scanner {
     margin-bottom: 0;
     padding: 0 14px 4px;
     border-left: 1px solid #243143;
     border-right: 1px solid #243143;
     background: #10151d;
     min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    overflow: visible;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-trend-mode {
-    grid-column: 2;
-    grid-row: 4;
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .signal-trend-mode {
     margin-bottom: 0;
     padding: 0 14px;
     border-left: 1px solid #243143;
@@ -1838,9 +1847,7 @@ button.chart-indicator-select {
     background: #10151d;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
-    grid-column: 2;
-    grid-row: 5;
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .signal-grid {
     max-height: none;
     align-content: start;
     padding: 0 14px 14px;
@@ -1849,8 +1856,7 @@ button.chart-indicator-select {
     border-radius: 0 0 16px 16px;
     background: #10151d;
     min-height: 0;
-    overflow-y: auto;
-    overscroll-behavior: contain;
+    overflow: visible;
   }
 
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"] #toggleChart,
@@ -1859,7 +1865,7 @@ button.chart-indicator-select {
     pointer-events: none;
   }
 
-  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-chart-head {
+  .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .signal-chart-head {
     display: none !important;
   }
 
@@ -2055,8 +2061,8 @@ button.chart-indicator-select {
     min-height: 0;
   }
 
-  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child,
-  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .card-head:first-child,
+  .phone.chart2-mode .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll > .signal-grid {
     border-left: 0;
     padding-left: 0;
   }
@@ -2078,11 +2084,7 @@ button.chart-indicator-select {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .card-head:first-child,
-  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .main-signal-actions,
-  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .market-scanner,
-  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-trend-mode,
-  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-grid {
+  .phone.signal-sidebar-collapsed .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .signal-panel-scroll {
     display: none;
   }
 }
