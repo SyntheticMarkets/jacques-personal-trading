@@ -14,6 +14,13 @@
         </div>
         <div class="topbar-actions">
           <button id="chart2BackBtn" class="ghost small chart2-back-btn" type="button">Back to Chart</button>
+          <nav id="desktopQuickTabs" class="desktop-quick-tabs" aria-label="Desktop panel">
+            <button class="desktop-quick-tab active" data-desktop-panel="proposals" type="button">Trade proposals</button>
+            <button class="desktop-quick-tab" data-desktop-panel="settings" type="button">Settings</button>
+            <button class="desktop-quick-tab" data-desktop-panel="results" type="button">Results</button>
+            <button class="desktop-quick-tab" data-desktop-panel="auto" type="button">Auto</button>
+            <button class="desktop-quick-tab" data-desktop-panel="backtest" type="button">Backtest</button>
+          </nav>
           <button id="toggleSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Sidebar</button>
           <button id="toggleSignalSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Signals</button>
           <div class="status" id="status">Connecting...</div>
@@ -118,6 +125,23 @@
           <button id="generateMainSignal" class="ghost small main-signal-btn" type="button">Generate signal</button>
           <div id="mainSignalStatus" class="main-signal-status">Wait for the current 1m close, then scan M15 / M5 / M1.</div>
         </div>
+        <div class="market-scanner">
+          <div class="market-scanner-controls">
+            <select id="marketScannerIndicator" class="field-input" aria-label="Indicator market scanner"></select>
+            <button id="scanMarkets" class="ghost small main-signal-btn" type="button">Scan markets</button>
+          </div>
+          <div id="marketScannerStatus" class="main-signal-status">Select an indicator, then scan markets for the best current setup.</div>
+          <div id="marketScannerResults" class="market-scanner-results"></div>
+        </div>
+        <div class="signal-trend-mode">
+          <div class="field-label">Trend mode</div>
+          <select id="trendModeSelect" class="field-input chart-mode-select" aria-label="Trend mode">
+            <option value="EMA">EMA Trend</option>
+            <option value="AVG">AVG Trend</option>
+            <option value="OBV">OBV Trend</option>
+            <option value="STACK">Stack Trend</option>
+          </select>
+        </div>
         <div id="signalBody" class="signal-grid">
           <div class="signal-item">
             <div class="field-label">Trend</div>
@@ -170,12 +194,6 @@
         </div>
         <div class="card-head signal-chart-head">
           <div class="signal-chart-meta">
-            <select id="trendModeSelect" class="field-input chart-mode-select" aria-label="Trend mode">
-              <option value="EMA">EMA Trend</option>
-              <option value="AVG">AVG Trend</option>
-              <option value="OBV">OBV Trend</option>
-              <option value="STACK">Stack Trend</option>
-            </select>
             <select id="drawingToolSelect" class="field-input chart-mode-select chart-drawing-select" aria-label="Drawing tool">
               <option value="SELECT">Select Tool</option>
               <option value="TRENDLINE">Trendline</option>
@@ -194,6 +212,17 @@
           </div>
         </div>
         <div id="chartBody" class="chart-body">
+          <div id="chartMarketPicker" class="chart-market-picker">
+            <button id="chartMarketButton" class="chart-market-button" type="button" aria-expanded="false" aria-controls="chartMarketMenu">
+              <span class="chart-market-icon"></span>
+              <span class="chart-market-text">
+                <span id="chartMarketName">--</span>
+                <span id="chartMarketPrice">--</span>
+              </span>
+              <span class="chart-market-caret">⌄</span>
+            </button>
+            <div id="chartMarketMenu" class="chart-market-menu hidden"></div>
+          </div>
           <div id="chartTfPicker" class="chart-tf-picker hidden">
             <select id="chartTfSelect" class="field-input" aria-label="Chart timeframe"></select>
           </div>

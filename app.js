@@ -123,6 +123,10 @@ let sigBlueEl;
 let sigWhiteEl;
 let generateMainSignalBtn;
 let mainSignalStatusEl;
+let marketScannerIndicatorSelectEl;
+let scanMarketsBtnEl;
+let marketScannerStatusEl;
+let marketScannerResultsEl;
 let signalBodyEl;
 let signalSectionTitleEl;
 let toggleSignalBtn;
@@ -131,6 +135,12 @@ let toggleChartBtn;
 let chartTfLabelEl;
 let chartTfPickerEl;
 let chartTfSelectEl;
+let chartMarketPickerEl;
+let chartMarketButtonEl;
+let chartMarketMenuEl;
+let chartMarketMenuMarket = "";
+let chartMarketMenuSearch = "";
+let chartMarketFavorites = new Set();
 let chart2MobileToolbarEl;
 let chart2DrawingMenuEl;
 let indicatorSelectEl;
@@ -181,6 +191,9 @@ let currentAppTab = "settings";
 let chart2HideEls;
 let tradeModeTabsEl;
 let proposalsCardEl;
+let desktopQuickTabsEl;
+let desktopSidebarPanel = "proposals";
+let desktopPanelRecords = [];
 let chartPrimaryCardEl;
 let originalTradeTabsParent = null;
 let originalTradeTabsNextSibling = null;
@@ -212,6 +225,7 @@ let mainSignalInFlight = false;
 let mainSignalSchedule = null;
 let mainSignalLockedState = null;
 let mainSignalTargetSymbol = null;
+let marketScannerInFlight = false;
 let topDownCandleCache = new Map();
 let topDownCacheLoadState = new Map();
 
@@ -358,7 +372,30 @@ const CHART_INDICATOR_GROUPS = [
     items: ["EMA"],
   },
 ];
+const MARKET_SCANNER_INDICATORS = [
+  "INST_EXECUTION_MODEL",
+  "INST_LEVEL_BEHAVIOR",
+  "ALGO_BEHAVIOR_ENGINE",
+  "PRICE_ACTION_TOOLKIT",
+  "ICT_STRUCTURE",
+  "LIQ_SWEEP_OB",
+  "LDMSS",
+  "SMC_SETUP_08",
+  "SMC_PRO_COMBO",
+  "ADX_VOL_WAVES",
+  "BREAKOUT_TARGETS",
+  "DYNAMIC_Z_DIVERGENCE",
+  "LIQUIDITY_TRENDLINE",
+  "SR_SIGNALS_MTF",
+  "STRUCTURE_PULLBACK",
+  "TICK_REJECTION",
+  "CHART_PATTERNS",
+  "CHANNELS_PATTERNS",
+  "TREND_VOLUME_ACCUM",
+  "EMA",
+];
 const activeChartIndicators = new Set();
+const CHART_MARKET_FAVORITES_KEY = "deriv_chart_market_favorites_v1";
 
 function synthesizeCandleTicks(candle) {
   if (!candle || !Number.isFinite(candle.open) || !Number.isFinite(candle.high) || !Number.isFinite(candle.low) || !Number.isFinite(candle.close)) {
@@ -7256,7 +7293,7 @@ function renderMiniChart(candles) {
     ];
     const boxW = 112;
     const boxH = 42;
-    const boxX = leftPad + 4;
+    const boxX = width - rightPad - boxW - 8;
     const boxY = topPad + 4;
     ctx.save();
     ctx.fillStyle = "rgba(12, 16, 22, 0.78)";
@@ -9151,6 +9188,17 @@ function resetChartView() {
   renderMiniChart(getBuiltCandles());
 }
 
+function resetChartViewportState({ render = true } = {}) {
+  chartOffset = 0;
+  chartDragX = null;
+  chartDragY = null;
+  chartDragMode = null;
+  chartGestureMoved = false;
+  chartVerticalOffset = 0;
+  chartVerticalScale = 1;
+  if (render) renderMiniChart(getBuiltCandles());
+}
+
 function getBacktestChartOffsetBounds(candles) {
   const built = Array.isArray(candles) ? candles : [];
   return {
@@ -9503,6 +9551,13 @@ function populateTimeframeOptions() {
   updateTimeframeUI();
 }
 
+function populateMarketScannerIndicators() {
+  if (!marketScannerIndicatorSelectEl) return;
+  marketScannerIndicatorSelectEl.innerHTML = MARKET_SCANNER_INDICATORS
+    .map((value) => `<option value="${value}">${getChartIndicatorLabel(value)}</option>`)
+    .join("");
+}
+
 function populateRiseFallExpiryOptions() {
   const selected = getRiseFallExpiryValue();
   const html = RISE_FALL_EXPIRY_OPTIONS
@@ -9678,7 +9733,8 @@ function populateTrendModeOptions() {
   trendModeSelectEl.value = currentTrendMode;
 }
 
-async function setChartTimeframe(seconds) {
+async function setChartTimeframe(seconds, options = {}) {
+  const shouldLoad = options.load !== false;
   const next = Number(seconds);
   if (!next || next === candleBuilder.timeframe) {
     updateTimeframeUI();
@@ -9687,9 +9743,7 @@ async function setChartTimeframe(seconds) {
   }
 
   candleBuilder.timeframe = next;
-  chartOffset = 0;
-  chartDragX = null;
-  chartGestureMoved = false;
+  resetChartViewportState({ render: false });
   lastAutoTradeCandle = null;
   shownIndicatorSignalKeys.clear();
   signalToastLayerEl?.classList.add("hidden");
@@ -9699,7 +9753,7 @@ async function setChartTimeframe(seconds) {
   updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", setup: "--", time: null });
   renderMiniChart([]);
 
-  if (currentSymbol) {
+  if (shouldLoad && currentSymbol) {
     await loadTickHistory(currentSymbol);
   }
 }
@@ -9830,6 +9884,7 @@ function onMessage(event) {
       lastTickAt = Date.now();
       lastSpot = price;
       if (symbolPrice) symbolPrice.textContent = formatPrice(price, currentPip);
+      updateChartMarketButton();
       tickStreamId = data.tick.id || tickStreamId;
       scheduleProposalRefresh();
 
@@ -9905,6 +9960,33 @@ function formatPrice(value, pip) {
   if (!pip || pip <= 0) return value.toFixed(2);
   const decimals = Math.max(0, Math.round(Math.abs(Math.log10(pip))));
   return Number(value).toFixed(decimals);
+}
+
+function escapeHtml(value) {
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+function loadChartMarketFavorites() {
+  try {
+    const raw = localStorage.getItem(CHART_MARKET_FAVORITES_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    chartMarketFavorites = new Set(Array.isArray(parsed) ? parsed.filter(Boolean) : []);
+  } catch {
+    chartMarketFavorites = new Set();
+  }
+}
+
+function saveChartMarketFavorites() {
+  try {
+    localStorage.setItem(CHART_MARKET_FAVORITES_KEY, JSON.stringify(Array.from(chartMarketFavorites)));
+  } catch {
+    // ignore storage limits
+  }
 }
 
 function formatOffset(value, pip) {
@@ -10965,6 +11047,141 @@ function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
     },
     entryPrice: Number.isFinite(refPrice) ? refPrice : null,
   };
+}
+
+function getRiseFallScannerSymbols() {
+  const map = symbolsByTradeMode.rise_fall || new Map();
+  const seen = new Set();
+  return Array.from(map.values())
+    .flatMap((entry) => entry.symbols || [])
+    .filter((symbol) => {
+      if (!symbol?.symbol || seen.has(symbol.symbol)) return false;
+      seen.add(symbol.symbol);
+      return isTradableActiveSymbol(symbol) && isRiseFallEligibleSymbol(symbol);
+    });
+}
+
+function scoreIndicatorMarket(indicator, candles) {
+  const oneMinuteCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  if (oneMinuteCandles.length < 90) return null;
+  const m15 = aggregateCandlesToTimeframe(oneMinuteCandles, 60, 900);
+  const m5 = aggregateCandlesToTimeframe(oneMinuteCandles, 60, 300);
+  const votes = [
+    ...scanMainSignalIndicator(indicator, m15, "M15", 1.35),
+    ...scanMainSignalIndicator(indicator, m5, "M5", 1.6),
+    ...scanMainSignalIndicator(indicator, oneMinuteCandles, "M1", 2.0),
+  ];
+  if (!votes.length) return null;
+  const callWeight = votes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
+  const putWeight = votes.filter((vote) => vote.direction === "PUT").reduce((sum, vote) => sum + vote.weight, 0);
+  const totalWeight = callWeight + putWeight;
+  if (!totalWeight || callWeight === putWeight) return null;
+  const direction = callWeight > putWeight ? "CALL" : "PUT";
+  const confidence = Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100);
+  const edge = Math.abs(callWeight - putWeight) / totalWeight;
+  const winningVotes = votes
+    .filter((vote) => vote.direction === direction)
+    .sort((a, b) => b.weight - a.weight);
+  const setupVotes = winningVotes.filter((vote) => vote.isSetup);
+  const score = Math.round((confidence * 0.7) + (edge * 100 * 0.3) + Math.min(20, setupVotes.length * 4));
+  return {
+    direction,
+    confidence,
+    score,
+    edge,
+    votes: votes.length,
+    setupVotes: setupVotes.length,
+    reason: winningVotes[0]?.reason || winningVotes[0]?.system || "aligned",
+    frame: winningVotes[0]?.frame || "--",
+    timeframeSeconds: winningVotes[0]?.frame === "M15"
+      ? 900
+      : winningVotes[0]?.frame === "M5"
+        ? 300
+        : 60,
+  };
+}
+
+function renderMarketScannerResults(results = []) {
+  if (!marketScannerResultsEl) return;
+  if (!results.length) {
+    marketScannerResultsEl.innerHTML = "<div class=\"trade-meta\">No active setup found for this indicator.</div>";
+    return;
+  }
+  marketScannerResultsEl.innerHTML = results.slice(0, 10).map((result, index) => {
+    const sideClass = result.direction === "CALL" ? "call" : "put";
+    const sideText = result.direction === "CALL" ? "Rise / BUY" : "Fall / SELL";
+    const title = escapeHtml(result.displayName);
+    const reason = escapeHtml(result.reason);
+    return `
+      <button class="market-scan-row ${sideClass}" type="button" data-scan-symbol="${escapeHtml(result.symbol)}" data-scan-timeframe="${result.timeframeSeconds || 60}">
+        <div>
+          <div class="market-scan-title">${index + 1}. ${title} - ${sideText}</div>
+          <div class="market-scan-meta">${result.confidence}% confidence • ${result.votes} votes • ${escapeHtml(result.frame)} • ${reason}</div>
+        </div>
+        <div class="market-scan-score">${result.score}</div>
+      </button>
+    `;
+  }).join("");
+}
+
+async function scanMarketsBySelectedIndicator() {
+  if (marketScannerInFlight) return;
+  const indicator = marketScannerIndicatorSelectEl?.value || MARKET_SCANNER_INDICATORS[0];
+  const symbols = getRiseFallScannerSymbols();
+  if (!symbols.length) {
+    if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No Rise/Fall markets are loaded yet.";
+    return;
+  }
+
+  marketScannerInFlight = true;
+  if (scanMarketsBtnEl) {
+    scanMarketsBtnEl.disabled = true;
+    scanMarketsBtnEl.textContent = "Scanning...";
+  }
+  if (marketScannerStatusEl) {
+    marketScannerStatusEl.textContent = `Scanning ${symbols.length} markets with ${getChartIndicatorLabel(indicator)}...`;
+  }
+  renderMarketScannerResults([]);
+
+  const results = [];
+  const batchSize = 4;
+  try {
+    for (let i = 0; i < symbols.length; i += batchSize) {
+      const batch = symbols.slice(i, i + batchSize);
+      const batchResults = await Promise.all(batch.map(async (symbolInfo) => {
+        try {
+          const candles = await getMainSignalCandles(symbolInfo.symbol);
+          const score = scoreIndicatorMarket(indicator, candles);
+          if (!score) return null;
+          return {
+            ...score,
+            symbol: symbolInfo.symbol,
+            displayName: symbolInfo.display_name || symbolInfo.symbol,
+            market: symbolInfo.market_display_name || symbolInfo.market || "Market",
+          };
+        } catch {
+          return null;
+        }
+      }));
+      batchResults.filter(Boolean).forEach((item) => results.push(item));
+      results.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
+      renderMarketScannerResults(results);
+      if (marketScannerStatusEl) {
+        marketScannerStatusEl.textContent = `Scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best: ${results[0]?.displayName || "--"}.`;
+      }
+    }
+    if (marketScannerStatusEl) {
+      marketScannerStatusEl.textContent = results.length
+        ? `Scan complete. Best market: ${results[0].displayName} (${results[0].direction === "CALL" ? "Rise" : "Fall"}, ${results[0].confidence}%).`
+        : `Scan complete. No current setup from ${getChartIndicatorLabel(indicator)}.`;
+    }
+  } finally {
+    marketScannerInFlight = false;
+    if (scanMarketsBtnEl) {
+      scanMarketsBtnEl.disabled = false;
+      scanMarketsBtnEl.textContent = "Scan markets";
+    }
+  }
 }
 
 async function getMainSignalCandles(symbol) {
@@ -12089,22 +12306,48 @@ function isDesktopLayout() {
   return window.matchMedia("(min-width: 980px)").matches;
 }
 
+function restoreMovedElement(el, parent, nextSibling) {
+  if (!el || !parent) return;
+  if (nextSibling && nextSibling.parentElement === parent) {
+    parent.insertBefore(el, nextSibling);
+  } else {
+    parent.appendChild(el);
+  }
+}
+
 function restoreMovedPanels() {
   if (tradeModeTabsEl && originalTradeTabsParent) {
-    originalTradeTabsParent.insertBefore(tradeModeTabsEl, originalTradeTabsNextSibling);
+    restoreMovedElement(tradeModeTabsEl, originalTradeTabsParent, originalTradeTabsNextSibling);
   }
   if (proposalsCardEl && originalProposalsParent) {
-    originalProposalsParent.insertBefore(proposalsCardEl, originalProposalsNextSibling);
+    restoreMovedElement(proposalsCardEl, originalProposalsParent, originalProposalsNextSibling);
   }
   if (desktopTradeTypeCardEl && originalDesktopTradeTypeParent) {
-    originalDesktopTradeTypeParent.insertBefore(desktopTradeTypeCardEl, originalDesktopTradeTypeNextSibling);
+    restoreMovedElement(desktopTradeTypeCardEl, originalDesktopTradeTypeParent, originalDesktopTradeTypeNextSibling);
   }
+  desktopPanelRecords.forEach((record) => {
+    if (record.el && record.parent) {
+      restoreMovedElement(record.el, record.parent, record.nextSibling);
+      const isCurrentPanel = currentAppTab === record.name;
+      record.el.hidden = !isCurrentPanel;
+      record.el.classList.toggle("active", isCurrentPanel);
+      record.el.classList.toggle("desktop-sidebar-panel", false);
+    }
+  });
+}
+
+function updateDesktopQuickTabs() {
+  desktopQuickTabsEl?.querySelectorAll("[data-desktop-panel]").forEach((button) => {
+    const isActive = button.getAttribute("data-desktop-panel") === desktopSidebarPanel;
+    button.classList.toggle("active", isActive);
+  });
 }
 
 function syncDesktopSidebarContent() {
   if (!desktopSidebarExtraEl) return;
-  desktopSidebarExtraEl.innerHTML = "";
+  desktopSidebarExtraEl.replaceChildren();
   restoreMovedPanels();
+  updateDesktopQuickTabs();
 
   if (!isDesktopLayout()) {
     phoneEl?.classList.remove("desktop-chart-layout");
@@ -12119,9 +12362,29 @@ function syncDesktopSidebarContent() {
   if (desktopTradeTypeCardEl) {
     desktopTradeTypeCardEl.classList.add("hidden");
   }
+  if (proposalsCardEl) {
+    proposalsCardEl.hidden = true;
+    proposalsCardEl.classList.remove("active", "desktop-sidebar-panel");
+  }
+  desktopPanelRecords.forEach((record) => {
+    if (record.el) {
+      record.el.hidden = true;
+      record.el.classList.remove("active", "desktop-sidebar-panel");
+    }
+  });
 
-  if (isChart && proposalsCardEl) {
-    desktopSidebarExtraEl.appendChild(proposalsCardEl);
+  if (isChart) {
+    const panelRecord = desktopPanelRecords.find((record) => record.name === desktopSidebarPanel);
+    const panelEl = desktopSidebarPanel === "proposals"
+      ? proposalsCardEl
+      : panelRecord?.el;
+    if (panelEl) {
+      panelEl.hidden = false;
+      panelEl.removeAttribute("hidden");
+      panelEl.classList.remove("active");
+      panelEl.classList.add("desktop-sidebar-panel");
+      desktopSidebarExtraEl.appendChild(panelEl);
+    }
   }
 }
 
@@ -12429,6 +12692,79 @@ function buildSymbolsByMarket(symbols, fallbackDisplay = "Markets") {
   return grouped;
 }
 
+function updateChartMarketButton() {
+  if (!chartMarketButtonEl) return;
+  const nameEl = document.getElementById("chartMarketName");
+  const priceEl = document.getElementById("chartMarketPrice");
+  if (nameEl) nameEl.textContent = symbolSelect?.selectedOptions?.[0]?.textContent || currentSymbol || "--";
+  if (priceEl) priceEl.textContent = Number.isFinite(lastSpot) ? formatPrice(lastSpot, currentPip) : "--";
+}
+
+function renderChartMarketMenu() {
+  if (!chartMarketMenuEl) return;
+  const modeMap = symbolsByTradeMode[getActiveTradeMode()] || symbolsByMarket || new Map();
+  const baseEntries = Array.from(modeMap.values()).sort((a, b) => a.display.localeCompare(b.display));
+  if (!baseEntries.length) {
+    chartMarketMenuEl.innerHTML = "<div class=\"chart-market-main\"><div class=\"trade-meta\">Markets are still loading.</div></div>";
+    return;
+  }
+  const favoriteSymbols = baseEntries
+    .flatMap((entry) => entry.symbols || [])
+    .filter((symbol, index, list) => chartMarketFavorites.has(symbol.symbol) && list.findIndex((item) => item.symbol === symbol.symbol) === index);
+  const entries = favoriteSymbols.length
+    ? [{ market: "__favorites", display: "Favorites", symbols: favoriteSymbols }, ...baseEntries]
+    : baseEntries;
+  if (!chartMarketMenuMarket || !modeMap.has(chartMarketMenuMarket)) {
+    chartMarketMenuMarket = chartMarketMenuMarket === "__favorites" && favoriteSymbols.length
+      ? "__favorites"
+      : marketSelect?.value && modeMap.has(marketSelect.value)
+      ? marketSelect.value
+      : baseEntries[0].market;
+  }
+  const activeEntry = modeMap.get(chartMarketMenuMarket) || entries[0];
+  const search = chartMarketMenuSearch.trim().toLowerCase();
+  const symbols = (activeEntry.symbols || [])
+    .slice()
+    .sort((a, b) => String(a.display_name || a.symbol).localeCompare(String(b.display_name || b.symbol)))
+    .filter((symbol) => !search || [symbol.display_name, symbol.symbol, symbol.market_display_name, symbol.submarket_display_name].filter(Boolean).join(" ").toLowerCase().includes(search));
+
+  chartMarketMenuEl.innerHTML = `
+    <div class="chart-market-sidebar">
+      ${entries.map((entry) => `
+        <button class="chart-market-tab ${entry.market === activeEntry.market ? "active" : ""}" type="button" data-chart-market-tab="${escapeHtml(entry.market)}">
+          ${escapeHtml(entry.display)}
+        </button>
+      `).join("")}
+    </div>
+    <div class="chart-market-main">
+      <input class="field-input chart-market-search" type="search" placeholder="Search..." value="${escapeHtml(chartMarketMenuSearch)}" />
+      <div class="chart-market-list">
+        <div class="chart-market-group-title">${escapeHtml(activeEntry.display)}</div>
+        ${symbols.map((symbol) => {
+          const symbolMarket = activeEntry.market === "__favorites" ? symbol.market || symbol.market_display_name || marketSelect?.value || "" : activeEntry.market;
+          return `
+          <button class="chart-market-item ${symbol.symbol === currentSymbol ? "active" : ""}" type="button" data-chart-symbol="${escapeHtml(symbol.symbol)}" data-chart-market="${escapeHtml(symbolMarket)}">
+            <span class="chart-market-icon"></span>
+            <span>
+              <span class="chart-market-item-name">${escapeHtml(symbol.display_name || symbol.symbol)}</span>
+              <span class="chart-market-item-meta">${escapeHtml(symbol.symbol)}</span>
+            </span>
+            <span class="chart-market-star ${chartMarketFavorites.has(symbol.symbol) ? "active" : ""}" data-chart-favorite="${escapeHtml(symbol.symbol)}" title="Toggle favorite">${chartMarketFavorites.has(symbol.symbol) ? "★" : "☆"}</span>
+          </button>
+        `;
+        }).join("") || "<div class=\"trade-meta\">No markets match this search.</div>"}
+      </div>
+    </div>
+  `;
+}
+
+function setChartMarketMenuOpen(open) {
+  if (!chartMarketMenuEl || !chartMarketButtonEl) return;
+  if (open) renderChartMarketMenu();
+  chartMarketMenuEl.classList.toggle("hidden", !open);
+  chartMarketButtonEl.setAttribute("aria-expanded", open ? "true" : "false");
+}
+
 function rebuildSymbolsForTradeMode({ preserveSelection = true } = {}) {
   if (!marketSelect || !symbolSelect) return;
   const mode = getActiveTradeMode();
@@ -12500,7 +12836,7 @@ async function loadActiveSymbols() {
   setStatus(`Markets loaded (${riseFallSymbols.length} Rise/Fall symbols)`);
 }
 
-function updateSymbols({ preferredSymbol = "" } = {}) {
+function updateSymbols({ preferredSymbol = "", awaitHistory = false } = {}) {
   const market = marketSelect.value;
   const entry = symbolsByMarket.get(market);
   symbolSelect.innerHTML = "";
@@ -12522,7 +12858,9 @@ function updateSymbols({ preferredSymbol = "" } = {}) {
     symbolSelect.value = preferredSymbol;
   }
 
-  onSymbolChange();
+  chartMarketMenuMarket = marketSelect.value;
+  renderChartMarketMenu();
+  return onSymbolChange({ awaitHistory });
 }
 
 function subscribeToCurrentSymbol({ force = false } = {}) {
@@ -12540,7 +12878,7 @@ function subscribeToCurrentSymbol({ force = false } = {}) {
   ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
 }
 
-function onSymbolChange() {
+function onSymbolChange(options = {}) {
   const symbol = symbolSelect.value;
   const display = symbolSelect.selectedOptions[0]?.textContent || "--";
   const pip = Number(symbolSelect.selectedOptions[0]?.dataset?.pip || "0");
@@ -12550,6 +12888,9 @@ function onSymbolChange() {
   symbolPrice.textContent = "--";
   currentSymbol = symbol;
   currentPip = pip;
+  lastSpot = null;
+  updateChartMarketButton();
+  resetChartViewportState({ render: false });
   maybePrimeTopDownTimeframeCache(symbol, candleBuilder.timeframe, { force: true });
   resetBacktestPanel(`Ready for ${display}.`);
   if (defaultBarrier != null) {
@@ -12565,23 +12906,31 @@ function onSymbolChange() {
   shownIndicatorSignalKeys.clear();
   signalToastLayerEl?.classList.add("hidden");
   updateSignalUI({ trend: "BUILDING 0%", divergence: "--", sweep: "--", confidence: null, signal: "--", setup: "--", time: null });
-  loadTickHistory(symbol).catch(() => {});
-  loadContractsFor(symbol).catch(() => {});
+  const historyPromise = loadTickHistory(symbol);
+  const contractsPromise = loadContractsFor(symbol);
+  if (options.awaitHistory) {
+    return Promise.allSettled([historyPromise, contractsPromise]);
+  }
+  historyPromise.catch(() => {});
+  contractsPromise.catch(() => {});
+  return null;
 }
 
 async function loadTickHistory(symbol) {
   if (!symbol) return;
   try {
     let built = [];
+    const requestedTimeframe = candleBuilder.timeframe;
 
-    if (candleBuilder.timeframe < 60) {
+    if (requestedTimeframe < 60) {
       built = await loadAggregatedTickHistory(symbol);
     } else {
       built = await loadCandleHistory(symbol);
     }
 
-    setCachedCandles(symbol, candleBuilder.timeframe, built);
-    maybePrimeTopDownTimeframeCache(symbol, candleBuilder.timeframe);
+    if (symbol !== currentSymbol || requestedTimeframe !== candleBuilder.timeframe) return;
+    setCachedCandles(symbol, requestedTimeframe, built);
+    maybePrimeTopDownTimeframeCache(symbol, requestedTimeframe);
     updateSignalFromCandles(built);
   } catch (err) {
     setStatus(err?.message || "History load failed", true);
@@ -13137,6 +13486,7 @@ function init() {
   phoneEl = document.querySelector(".phone");
   desktopSidebarEl = document.getElementById("desktopSidebar");
   desktopSidebarExtraEl = document.getElementById("desktopSidebarExtra");
+  desktopQuickTabsEl = document.getElementById("desktopQuickTabs");
   toggleSidebarBtn = document.getElementById("toggleSidebar");
   toggleSignalSidebarBtn = document.getElementById("toggleSignalSidebar");
   chart2BackBtn = document.getElementById("chart2BackBtn");
@@ -13188,6 +13538,10 @@ function init() {
   sigWhiteEl = document.getElementById("sigWhite");
   generateMainSignalBtn = document.getElementById("generateMainSignal");
   mainSignalStatusEl = document.getElementById("mainSignalStatus");
+  marketScannerIndicatorSelectEl = document.getElementById("marketScannerIndicator");
+  scanMarketsBtnEl = document.getElementById("scanMarkets");
+  marketScannerStatusEl = document.getElementById("marketScannerStatus");
+  marketScannerResultsEl = document.getElementById("marketScannerResults");
   signalBodyEl = document.getElementById("signalBody");
   signalSectionTitleEl = document.getElementById("signalSectionTitle");
   toggleSignalBtn = document.getElementById("toggleSignal");
@@ -13196,6 +13550,9 @@ function init() {
   chartTfLabelEl = document.getElementById("chartTfLabel");
   chartTfPickerEl = document.getElementById("chartTfPicker");
   chartTfSelectEl = document.getElementById("chartTfSelect");
+  chartMarketPickerEl = document.getElementById("chartMarketPicker");
+  chartMarketButtonEl = document.getElementById("chartMarketButton");
+  chartMarketMenuEl = document.getElementById("chartMarketMenu");
   chart2MobileToolbarEl = document.getElementById("chart2MobileToolbar");
   chart2DrawingMenuEl = document.getElementById("chart2DrawingMenu");
   indicatorSelectEl = document.getElementById("indicatorSelect");
@@ -13249,16 +13606,28 @@ function init() {
   originalProposalsNextSibling = proposalsCardEl?.nextElementSibling || null;
   originalDesktopTradeTypeParent = desktopTradeTypeCardEl?.parentElement || null;
   originalDesktopTradeTypeNextSibling = desktopTradeTypeCardEl?.nextElementSibling || null;
+  desktopPanelRecords = ["settings", "results", "auto", "backtest"].map((name) => {
+    const el = document.querySelector(`.app-panel[data-app-panel="${name}"]`);
+    return {
+      name,
+      el,
+      parent: el?.parentElement || null,
+      nextSibling: el?.nextElementSibling || null,
+      hidden: !!el?.hidden,
+    };
+  });
 
   if (!marketSelect || !symbolSelect) {
     setStatus("UI error: market/symbol selects missing", true);
     return;
   }
 
+  loadChartMarketFavorites();
   marketSelect.addEventListener("change", updateSymbols);
   symbolSelect.addEventListener("change", onSymbolChange);
   populateRiseFallExpiryOptions();
   populateTimeframeOptions();
+  populateMarketScannerIndicators();
   populateTrendModeOptions();
   chartDrawingStore = loadChartDrawingStore();
   syncDrawingToolUI();
@@ -13301,6 +13670,16 @@ function init() {
 
   appTabs.forEach((tab) => {
     tab.addEventListener("click", () => setActiveAppTab(tab.dataset.appTab));
+  });
+
+  desktopQuickTabsEl?.addEventListener("click", (event) => {
+    const button = event.target instanceof HTMLElement ? event.target.closest("[data-desktop-panel]") : null;
+    if (!(button instanceof HTMLElement)) return;
+    desktopSidebarPanel = button.getAttribute("data-desktop-panel") || "proposals";
+    updateDesktopQuickTabs();
+    syncDesktopSidebarContent();
+    scheduleChartResize();
+    renderMiniChart(getBuiltCandles());
   });
 
   if (toggleTradeBtn && tradeBody) {
@@ -13378,6 +13757,57 @@ function init() {
     event.stopPropagation();
     if (chartTfPickerEl?.classList.contains("hidden")) openTimeframePicker();
     else hideTimeframePicker();
+  });
+
+  chartMarketButtonEl?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    setChartMarketMenuOpen(chartMarketMenuEl?.classList.contains("hidden"));
+  });
+
+  chartMarketMenuEl?.addEventListener("input", (event) => {
+    const target = event.target;
+    if (!(target instanceof HTMLInputElement) || !target.classList.contains("chart-market-search")) return;
+    chartMarketMenuSearch = target.value;
+    renderChartMarketMenu();
+    const searchInput = chartMarketMenuEl.querySelector(".chart-market-search");
+    searchInput?.focus();
+    if (searchInput instanceof HTMLInputElement) {
+      const len = searchInput.value.length;
+      searchInput.setSelectionRange(len, len);
+    }
+  });
+
+  chartMarketMenuEl?.addEventListener("click", (event) => {
+    event.stopPropagation();
+    const target = event.target instanceof HTMLElement ? event.target : null;
+    const favorite = target?.closest("[data-chart-favorite]");
+    if (favorite instanceof HTMLElement) {
+      const symbol = favorite.getAttribute("data-chart-favorite");
+      if (symbol) {
+        if (chartMarketFavorites.has(symbol)) chartMarketFavorites.delete(symbol);
+        else chartMarketFavorites.add(symbol);
+        saveChartMarketFavorites();
+        renderChartMarketMenu();
+      }
+      return;
+    }
+    const tab = target?.closest("[data-chart-market-tab]");
+    if (tab instanceof HTMLElement) {
+      chartMarketMenuMarket = tab.getAttribute("data-chart-market-tab") || chartMarketMenuMarket;
+      chartMarketMenuSearch = "";
+      renderChartMarketMenu();
+      return;
+    }
+    const item = target?.closest("[data-chart-symbol]");
+    if (item instanceof HTMLElement && marketSelect && symbolSelect) {
+      const market = item.getAttribute("data-chart-market");
+      const symbol = item.getAttribute("data-chart-symbol");
+      if (market && symbol) {
+        marketSelect.value = market;
+        updateSymbols({ preferredSymbol: symbol });
+        setChartMarketMenuOpen(false);
+      }
+    }
   });
 
   window.addEventListener("resize", () => {
@@ -13822,6 +14252,12 @@ function init() {
     setChart2DrawingMenuOpen(false);
   });
 
+  document.addEventListener("click", (event) => {
+    if (!(event.target instanceof Node)) return;
+    if (chartMarketPickerEl?.contains(event.target)) return;
+    setChartMarketMenuOpen(false);
+  });
+
   chartIndicatorListEl?.addEventListener("click", (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -13978,12 +14414,36 @@ function init() {
   generateBacktestSignalBtn?.addEventListener("click", handleGenerateBacktestSignalClick);
   runBacktestNowBtn?.addEventListener("click", handleRunBacktestNowClick);
   generateMainSignalBtn?.addEventListener("click", handleGenerateMainSignalClick);
+  scanMarketsBtnEl?.addEventListener("click", scanMarketsBySelectedIndicator);
+  marketScannerResultsEl?.addEventListener("click", async (event) => {
+    const target = event.target instanceof HTMLElement ? event.target.closest("[data-scan-symbol]") : null;
+    const symbol = target?.getAttribute("data-scan-symbol");
+    if (!symbol) return;
+    const suggestedTimeframe = Number(target.getAttribute("data-scan-timeframe") || "60");
+    const scannerIndicator = marketScannerIndicatorSelectEl?.value || "";
+    const marketEntry = Array.from(symbolsByTradeMode.rise_fall?.values?.() || [])
+      .find((entry) => entry.symbols?.some((item) => item.symbol === symbol));
+    if (marketEntry && marketSelect && symbolSelect) {
+      setActiveTab("rise_fall");
+      setStatus(`Loading ${target.querySelector(".market-scan-title")?.textContent || symbol}...`);
+      if (TIMEFRAME_OPTIONS.some((option) => option.seconds === suggestedTimeframe)) {
+        await setChartTimeframe(suggestedTimeframe, { load: false });
+      }
+      marketSelect.value = marketEntry.market;
+      await updateSymbols({ preferredSymbol: symbol, awaitHistory: true });
+      if (scannerIndicator) addChartIndicator(scannerIndicator);
+      await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+      scheduleChartResize();
+      renderMiniChart(getBuiltCandles());
+      setStatus(`Selected ${target.querySelector(".market-scan-title")?.textContent || symbol} on ${getTimeframeLabel(suggestedTimeframe)}`);
+    }
+  });
 
   window.__generateBacktestSignalNow = handleGenerateBacktestSignalClick;
   window.__runBacktestNow = handleRunBacktestNowClick;
 
   setActiveTab("higher_lower");
-  setActiveAppTab("settings");
+  setActiveAppTab("chart");
   connectWS();
   loadActiveSymbols();
   setExpiryMinutes(1);
