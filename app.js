@@ -670,6 +670,35 @@ function getChartTimeframeSeconds() {
   return Number(candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC || 60);
 }
 
+function getMtfTimeframeSet(baseSeconds = getChartTimeframeSeconds()) {
+  const sourceSeconds = Math.max(1, Number(baseSeconds) || DEFAULT_TIMEFRAME_SEC);
+  const majorFrames = [10, 30, 60, 300, 900, 3600, 14400, 86400];
+  const higher = majorFrames.filter((seconds) => seconds > sourceSeconds);
+  const alignSeconds = higher[0] || Math.max(sourceSeconds * 4, sourceSeconds + 1);
+  const mainSeconds = higher[1] || Math.max(alignSeconds * 4, alignSeconds + 1);
+  return {
+    sourceSeconds,
+    entrySeconds: sourceSeconds,
+    alignSeconds,
+    mainSeconds,
+    entryLabel: getTimeframeLabel(sourceSeconds),
+    alignLabel: getTimeframeLabel(alignSeconds),
+    mainLabel: getTimeframeLabel(mainSeconds),
+  };
+}
+
+function getMtfFrameLabel(seconds) {
+  return getTimeframeLabel(seconds).toUpperCase();
+}
+
+function getMtfSourceLabel(source) {
+  return String(source || "--")
+    .split("+")
+    .map((part) => part.trim().toUpperCase())
+    .filter(Boolean)
+    .join("+") || "--";
+}
+
 function snapChartTime(timeSec) {
   const tf = Math.max(1, getChartTimeframeSeconds());
   return Math.round(Number(timeSec || 0) / tf) * tf;
@@ -3797,35 +3826,43 @@ function getInstitutionalStrongBreakDirection(candle, level, tolerance) {
   return null;
 }
 
-function buildInstitutionalPoiCandidatePool(history, fiveMinuteSec = 300) {
-  const fiveMinute = aggregateCandlesByTimeframe(history, fiveMinuteSec);
-  const latestAvgRange = averageRange(fiveMinute, 30) || averageRange(history, 30) || 0.0001;
+function buildInstitutionalPoiCandidatePool(history, alignSeconds = getMtfTimeframeSet().alignSeconds, entrySeconds = getMtfTimeframeSet().entrySeconds) {
+  const entryFrame = Math.max(1, Number(entrySeconds) || getChartTimeframeSeconds());
+  const alignFrame = Math.max(entryFrame, Number(alignSeconds) || entryFrame);
+  const alignCandles = aggregateCandlesByTimeframe(history, alignFrame);
+  const entryCandles = entryFrame === getChartTimeframeSeconds()
+    ? history
+    : aggregateCandlesByTimeframe(history, entryFrame);
+  const latestAvgRange = averageRange(alignCandles, 30) || averageRange(entryCandles, 30) || averageRange(history, 30) || 0.0001;
   const latestTolerance = Math.max(currentPip || 0.0001, latestAvgRange * 0.28);
-  const m5PoiCandidates = getInstitutionalPoiLevels(fiveMinute.slice(-120), latestTolerance, 3)
-    .map((level) => ({ ...level, source: "5m", kind: "close-cluster" }));
-  const m1ReactionTolerance = Math.max(currentPip || 0.0001, (averageRange(history, 30) || latestAvgRange) * 0.32);
-  const m1PoiCandidates = getInstitutionalReactionPoiLevels(history.slice(-360), m1ReactionTolerance, {
+  const alignPoiCandidates = getInstitutionalPoiLevels(alignCandles.slice(-120), latestTolerance, 3)
+    .map((level) => ({ ...level, source: getMtfFrameLabel(alignFrame), kind: "close-cluster" }));
+  const entryReactionTolerance = Math.max(currentPip || 0.0001, (averageRange(entryCandles, 30) || latestAvgRange) * 0.32);
+  const entryPoiCandidates = getInstitutionalReactionPoiLevels(entryCandles.slice(-360), entryReactionTolerance, {
     pivotLen: 3,
     minTouches: 2,
-    source: "1m",
+    source: getMtfFrameLabel(entryFrame),
   });
   return {
     candidates: mergeInstitutionalPoiCandidates(
-      [m5PoiCandidates, m1PoiCandidates],
-      Math.max(latestTolerance, m1ReactionTolerance),
+      [alignPoiCandidates, entryPoiCandidates],
+      Math.max(latestTolerance, entryReactionTolerance),
     ),
     avgRange: latestAvgRange,
-    tolerance: Math.max(latestTolerance, m1ReactionTolerance),
-    fiveMinute,
+    tolerance: Math.max(latestTolerance, entryReactionTolerance),
+    alignCandles,
+    entryCandles,
   };
 }
 
 function buildInstitutionalExecutionModel(candles, config = {}) {
   const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
   const last = confirmedCandles[confirmedCandles.length - 1] || null;
+  const executionTf = Math.max(1, Number(config.baseSeconds || candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC));
+  const mtf = getMtfTimeframeSet(executionTf);
   const cacheKey = [
     currentSymbol || "symbol",
-    candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC,
+    executionTf,
     currentPip || 0,
     baseMinutes || 1,
     config.minConfidence ?? 70,
@@ -3845,17 +3882,16 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
       signals: [],
       poiLevels: [],
       stats: { total: 0, wins: 0, losses: 0, pending: 0, winRate: null },
-      trend15: "RANGE",
-      trend5: "RANGE",
+      trendMain: "RANGE",
+      trendAlign: "RANGE",
+      mainLabel: mtf.mainLabel,
+      alignLabel: mtf.alignLabel,
+      entryLabel: mtf.entryLabel,
     };
     institutionalExecutionModelCache = { key: cacheKey, value: empty };
     return empty;
   }
 
-  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
-  const ltfSec = Math.max(60, executionTf);
-  const fiveMinuteSec = 300;
-  const fifteenMinuteSec = 900;
   const signals = [];
   const seenSignalKeys = new Set();
   let lastSignalIndex = -8;
@@ -3864,24 +3900,24 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
 
   for (let i = minCandles; i < confirmedCandles.length; i += 1) {
     const history = confirmedCandles.slice(0, i + 1);
-    const ltfHistory = executionTf === ltfSec ? history : aggregateCandlesByTimeframe(history, ltfSec);
+    const ltfHistory = executionTf === mtf.entrySeconds ? history : aggregateCandlesByTimeframe(history, mtf.entrySeconds);
     if (ltfHistory.length < 24) continue;
 
     const current = history[i];
-    const fiveMinute = aggregateCandlesByTimeframe(history, fiveMinuteSec);
-    const fifteenMinute = aggregateCandlesByTimeframe(history, fifteenMinuteSec);
-    const trend15 = getInstitutionalTrend(fifteenMinute);
-    const trend5 = getInstitutionalTrend(fiveMinute);
-    if (trend15 === "RANGE" || trend15 !== trend5) continue;
+    const alignCandles = aggregateCandlesByTimeframe(history, mtf.alignSeconds);
+    const mainCandles = aggregateCandlesByTimeframe(history, mtf.mainSeconds);
+    const trendMain = getInstitutionalTrend(mainCandles);
+    const trendAlign = getInstitutionalTrend(alignCandles);
+    if (trendMain === "RANGE" || trendMain !== trendAlign) continue;
 
-    const recentFive = fiveMinute.slice(-120);
-    const poiAvgRange = averageRange(recentFive, 30) || averageRange(history, 30) || Math.abs(current.close) * 0.0005;
+    const recentAlign = alignCandles.slice(-120);
+    const poiAvgRange = averageRange(recentAlign, 30) || averageRange(history, 30) || Math.abs(current.close) * 0.0005;
     const tolerance = Math.max(currentPip || 0.0001, poiAvgRange * 0.28);
-    const poiLevels = getInstitutionalPoiLevels(recentFive, tolerance, 3);
+    const poiLevels = getInstitutionalPoiLevels(recentAlign, tolerance, 3);
     const poi = findInstitutionalPoi(current.close, poiLevels, tolerance);
     if (!poi) continue;
 
-    const direction = trend15 === "BULLISH" ? "BUY" : "SELL";
+    const direction = trendMain === "BULLISH" ? "BUY" : "SELL";
     if (!hasInstitutionalConfirmation(history.slice(0, i + 1), direction)) continue;
     if (i - lastSignalIndex < Math.max(3, config.cooldownBars ?? 6)) continue;
     const prev = history[i - 1];
@@ -3923,8 +3959,11 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
       confidence,
       expiryBars,
       tolerance,
-      trend15,
-      trend5,
+      trendMain,
+      trendAlign,
+      mainLabel: mtf.mainLabel,
+      alignLabel: mtf.alignLabel,
+      entryLabel: mtf.entryLabel,
       result: won == null ? "PENDING" : won ? "WIN" : "LOSS",
     });
   }
@@ -3934,21 +3973,21 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
   const losses = scored.length - wins;
   const winRate = scored.length ? Math.round((wins / scored.length) * 100) : null;
   const latestHistory = confirmedCandles;
-  const latestFive = aggregateCandlesByTimeframe(latestHistory, fiveMinuteSec);
-  const latestFifteen = aggregateCandlesByTimeframe(latestHistory, fifteenMinuteSec);
-  const latestAvgRange = averageRange(latestFive, 30) || averageRange(latestHistory, 30) || 0.0001;
+  const latestAlign = aggregateCandlesByTimeframe(latestHistory, mtf.alignSeconds);
+  const latestMain = aggregateCandlesByTimeframe(latestHistory, mtf.mainSeconds);
+  const latestAvgRange = averageRange(latestAlign, 30) || averageRange(latestHistory, 30) || 0.0001;
   const latestCurrent = latestHistory[latestHistory.length - 1] || null;
   const latestTolerance = Math.max(currentPip || 0.0001, latestAvgRange * 0.28);
-  const m5PoiCandidates = getInstitutionalPoiLevels(latestFive.slice(-120), latestTolerance, 3)
-    .map((level) => ({ ...level, source: "5m", kind: "close-cluster" }));
+  const alignPoiCandidates = getInstitutionalPoiLevels(latestAlign.slice(-120), latestTolerance, 3)
+    .map((level) => ({ ...level, source: mtf.alignLabel, kind: "close-cluster" }));
   const m1ReactionTolerance = Math.max(currentPip || 0.0001, (averageRange(latestHistory, 30) || latestAvgRange) * 0.32);
-  const m1PoiCandidates = getInstitutionalReactionPoiLevels(latestHistory.slice(-360), m1ReactionTolerance, {
+  const entryPoiCandidates = getInstitutionalReactionPoiLevels(latestHistory.slice(-360), m1ReactionTolerance, {
     pivotLen: 3,
     minTouches: 2,
-    source: "1m",
+    source: mtf.entryLabel,
   });
   const latestPoiCandidates = mergeInstitutionalPoiCandidates(
-    [m5PoiCandidates, m1PoiCandidates],
+    [alignPoiCandidates, entryPoiCandidates],
     Math.max(latestTolerance, m1ReactionTolerance),
   );
   const displayPoiLevels = resolveStableInstitutionalPoiLevels({
@@ -3972,8 +4011,11 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
       minConfidence,
       expiryBars,
     },
-    trend15: getInstitutionalTrend(latestFifteen),
-    trend5: getInstitutionalTrend(latestFive),
+    trendMain: getInstitutionalTrend(latestMain),
+    trendAlign: getInstitutionalTrend(latestAlign),
+    mainLabel: mtf.mainLabel,
+    alignLabel: mtf.alignLabel,
+    entryLabel: mtf.entryLabel,
   };
   if (!config.noCache) institutionalExecutionModelCache = { key: cacheKey, value: result };
   return result;
@@ -3982,7 +4024,7 @@ function buildInstitutionalExecutionModel(candles, config = {}) {
 function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
   const confirmedCandles = Array.isArray(candles) ? candles.slice(0, -1) : [];
   const last = confirmedCandles[confirmedCandles.length - 1] || null;
-  const executionTf = candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC;
+  const executionTf = Math.max(1, Number(config.baseSeconds || candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC));
   const cacheKey = [
     currentSymbol || "symbol",
     executionTf,
@@ -4002,17 +4044,20 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
   }
   const minCandles = Math.max(80, config.minCandles ?? 90);
   if (confirmedCandles.length < minCandles) {
+    const mtf = getMtfTimeframeSet(executionTf);
     const empty = {
       signals: [],
       poiLevels: [],
       stats: { total: 0, wins: 0, losses: 0, pending: 0, winRate: null, minConfidence: 65 },
+      mainLabel: mtf.mainLabel,
+      alignLabel: mtf.alignLabel,
+      entryLabel: mtf.entryLabel,
     };
     institutionalLevelBehaviorModelCache = { key: cacheKey, value: empty };
     return empty;
   }
 
-  const fiveMinuteSec = 300;
-  const fifteenMinuteSec = 900;
+  const mtf = getMtfTimeframeSet(executionTf);
   const expiryBars = Math.max(1, Math.round(((config.expirySeconds ?? (baseMinutes * 60)) || 60) / Math.max(1, executionTf)));
   const minConfidence = Math.max(0, Math.min(100, config.minConfidence ?? 65));
   const structureLookbackBars = Math.max(180, config.lookbackBars ?? 420);
@@ -4024,9 +4069,9 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
     const current = confirmedCandles[i];
     const historyStart = Math.max(0, i - structureLookbackBars + 1);
     const history = confirmedCandles.slice(historyStart, i + 1);
-    const fifteenMinute = aggregateCandlesByTimeframe(history, fifteenMinuteSec);
-    const trend15 = getInstitutionalTrend(fifteenMinute);
-    const pool = buildInstitutionalPoiCandidatePool(history, fiveMinuteSec);
+    const mainCandles = aggregateCandlesByTimeframe(history, mtf.mainSeconds);
+    const trendMain = getInstitutionalTrend(mainCandles);
+    const pool = buildInstitutionalPoiCandidatePool(history, mtf.alignSeconds, mtf.entrySeconds);
     const atLevelTolerance = Math.max(pool.tolerance, pool.avgRange * 0.35, currentPip || 0.0001);
     const touchedLevels = pool.candidates
       .map((level) => ({ ...level, distance: Math.min(Math.abs(current.close - level.price), Math.abs(current.high - level.price), Math.abs(current.low - level.price)) }))
@@ -4061,8 +4106,8 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
     if (!direction || !behavior) continue;
 
     const trendBonus =
-      trend15 === "BULLISH" && direction === "BUY" ? 8 :
-      trend15 === "BEARISH" && direction === "SELL" ? 8 :
+      trendMain === "BULLISH" && direction === "BUY" ? 8 :
+      trendMain === "BEARISH" && direction === "SELL" ? 8 :
       0;
     const touchScore = touches <= 2
       ? Math.max(0, 18 - ((touches - 1) * 7))
@@ -4107,11 +4152,14 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
       touches,
       levelStrength: 1 / Math.max(1, touches),
       confidence,
+      mainLabel: mtf.mainLabel,
+      alignLabel: mtf.alignLabel,
+      entryLabel: mtf.entryLabel,
       result: won == null ? "PENDING" : won ? "WIN" : "LOSS",
     });
   }
 
-  const latestPool = buildInstitutionalPoiCandidatePool(confirmedCandles.slice(-structureLookbackBars), fiveMinuteSec);
+  const latestPool = buildInstitutionalPoiCandidatePool(confirmedCandles.slice(-structureLookbackBars), mtf.alignSeconds, mtf.entrySeconds);
   const latestCurrent = confirmedCandles[confirmedCandles.length - 1] || null;
   const poiLevels = resolveStableInstitutionalPoiLevels({
     candidates: latestPool.candidates,
@@ -4137,6 +4185,9 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
       minConfidence,
       expiryBars,
     },
+    mainLabel: mtf.mainLabel,
+    alignLabel: mtf.alignLabel,
+    entryLabel: mtf.entryLabel,
   };
   if (!config.noCache) institutionalLevelBehaviorModelCache = { key: cacheKey, value: result };
   return result;
@@ -6022,7 +6073,8 @@ function getAvailableTopDownSourceCandles(symbol, timeframeSeconds, fallbackCand
     sourceCandidates.push({ seconds: fallbackSeconds, candles: fallbackCandles });
   }
 
-  [...TOP_DOWN_STACK_TIMEFRAMES, timeframeSeconds].forEach((seconds) => {
+  const mtf = getMtfTimeframeSet(fallbackSeconds || currentSeconds);
+  [mtf.entrySeconds, mtf.alignSeconds, mtf.mainSeconds, timeframeSeconds].forEach((seconds) => {
     const cached = getCachedCandles(symbol, seconds);
     if (cached.length) {
       sourceCandidates.push({ seconds, candles: cached });
@@ -6048,9 +6100,9 @@ function resolveTopDownCandles(symbol, timeframeSeconds, fallbackCandles = [], f
   if (exactCached.length) return exactCached;
 
   const candidates = getAvailableTopDownSourceCandles(symbol, targetSeconds, fallbackCandles, fallbackSeconds);
-  const aggregateSource = candidates.find((candidate) => candidate.seconds < targetSeconds && targetSeconds % candidate.seconds === 0);
+  const aggregateSource = candidates.find((candidate) => candidate.seconds < targetSeconds);
   if (aggregateSource?.candles?.length) {
-    return aggregateCandlesToTimeframe(aggregateSource.candles, aggregateSource.seconds, targetSeconds);
+    return aggregateCandlesByTimeframe(aggregateSource.candles, targetSeconds);
   }
 
   if (targetSeconds === fallbackSeconds && Array.isArray(fallbackCandles) && fallbackCandles.length) {
@@ -6065,7 +6117,13 @@ function maybePrimeTopDownTimeframeCache(symbol, baseSeconds = getChartTimeframe
   const force = Boolean(options.force);
   const refreshKey = `${symbol}|${Number(baseSeconds) || 0}`;
   if (topDownCacheLoadState.get(refreshKey)) return;
-  const required = Array.from(new Set([...TOP_DOWN_STACK_TIMEFRAMES, Math.max(1, Number(baseSeconds) || DEFAULT_TIMEFRAME_SEC)]));
+  const targets = getMtfTimeframeSet(baseSeconds);
+  const required = Array.from(new Set([
+    targets.entrySeconds,
+    targets.alignSeconds,
+    targets.mainSeconds,
+    Math.max(1, Number(baseSeconds) || DEFAULT_TIMEFRAME_SEC),
+  ]));
   const missing = required.some((seconds) => !getCachedCandles(symbol, seconds, { freshOnly: !force }).length);
   if (!force && !missing) return;
 
@@ -6082,11 +6140,7 @@ function maybePrimeTopDownTimeframeCache(symbol, baseSeconds = getChartTimeframe
 }
 
 function getTopDownTimeframeTargets(baseSeconds = getChartTimeframeSeconds()) {
-  const sourceSeconds = Math.max(1, Number(baseSeconds) || 60);
-  if (sourceSeconds <= 300) {
-    return { sourceSeconds, entrySeconds: 30, alignSeconds: 60, mainSeconds: 300 };
-  }
-  return { sourceSeconds, entrySeconds: 60, alignSeconds: 300, mainSeconds: sourceSeconds };
+  return getMtfTimeframeSet(baseSeconds);
 }
 
 function aggregateCandlesToTimeframe(candles, sourceSeconds = 60, targetSeconds = 300) {
@@ -7243,11 +7297,7 @@ function renderMiniChart(candles) {
       ctx.textAlign = "right";
       ctx.textBaseline = "bottom";
       ctx.fillStyle = "#f2c94c";
-      const sourceLabel = level.source?.includes("1m") && level.source?.includes("5m")
-        ? "M1+M5"
-        : level.source === "1m"
-          ? "M1"
-          : "M5";
+      const sourceLabel = getMtfSourceLabel(level.source);
       ctx.fillText(`${sourceLabel} POI ${level.strength}`, width - rightPad - 4, y - 2);
       ctx.restore();
     });
@@ -7293,7 +7343,7 @@ function renderMiniChart(candles) {
     const statLines = [
       `IEM ${iem.stats.winRate == null ? "--" : `${iem.stats.winRate}%`} ${baseMinutes}m`,
       `${iem.stats.wins}W/${iem.stats.losses}L`,
-      `Min ${iem.stats.minConfidence}% 15m ${iem.trend15}`,
+      `Min ${iem.stats.minConfidence}% ${getMtfSourceLabel(iem.mainLabel)} ${iem.trendMain}`,
     ];
     const boxW = 112;
     const boxH = 42;
@@ -7336,11 +7386,7 @@ function renderMiniChart(candles) {
       ctx.textAlign = "right";
       ctx.textBaseline = "top";
       ctx.fillStyle = "#50d2ff";
-      const sourceLabel = level.source?.includes("1m") && level.source?.includes("5m")
-        ? "M1+M5"
-        : level.source === "1m"
-          ? "M1"
-          : "M5";
+      const sourceLabel = getMtfSourceLabel(level.source);
       ctx.fillText(`${sourceLabel} LB ${level.strength}`, width - rightPad - 4, y + 2);
       ctx.restore();
     });
@@ -9310,7 +9356,13 @@ function showSignalToast({ title, body, tone = "neutral" }) {
 }
 
 function getTimeframeLabel(seconds) {
-  return TIMEFRAME_OPTIONS.find((option) => option.seconds === seconds)?.label || `${seconds}s`;
+  const value = Number(seconds);
+  const configured = TIMEFRAME_OPTIONS.find((option) => option.seconds === value)?.label;
+  if (configured) return configured;
+  if (value >= 86400 && value % 86400 === 0) return `${value / 86400}d`;
+  if (value >= 3600 && value % 3600 === 0) return `${value / 3600}h`;
+  if (value >= 60 && value % 60 === 0) return `${value / 60}m`;
+  return `${value}s`;
 }
 
 function getChartIndicatorLabel(value) {
@@ -10505,16 +10557,17 @@ function buildCompositeBacktestSignal(candles, options = {}) {
 }
 
 function computeMainSignalSchedule() {
-  const candleMs = 60000;
+  const candleMs = Math.max(10000, getChartTimeframeSeconds() * 1000);
   const now = Date.now();
   const scanStartAt = Math.ceil(now / candleMs) * candleMs;
+  const lockDelayMs = Math.min(50000, Math.max(2500, Math.round(candleMs * 0.82)));
   const expiry = getActiveTradeMode() === "rise_fall"
     ? getEffectiveRiseFallSignalExpiry()
     : { seconds: Math.max(60, baseMinutes * 60), unit: "s", label: `${baseMinutes} minute${baseMinutes === 1 ? "" : "s"}` };
   return {
     now,
     scanStartAt,
-    signalAt: scanStartAt + 50000,
+    signalAt: scanStartAt + lockDelayMs,
     entryAt: scanStartAt + candleMs,
     expirySeconds: expiry.seconds,
     expiryUnit: expiry.unit,
@@ -10567,11 +10620,13 @@ function renderMainSignalCountdown() {
     return;
   }
   if (now < mainSignalSchedule.scanStartAt) {
-    setMainSignalStatus(`Waiting for 1m close. ${mainSignalSchedule.expiryLabel} expiry scan starts in ${formatMainSignalCountdown(mainSignalSchedule.scanStartAt)}.`, "armed");
+    const mtf = getMtfTimeframeSet();
+    setMainSignalStatus(`Waiting for ${mtf.entryLabel} close. ${mainSignalSchedule.expiryLabel} expiry scan starts in ${formatMainSignalCountdown(mainSignalSchedule.scanStartAt)}.`, "armed");
     return;
   }
   if (now < mainSignalSchedule.signalAt) {
-    setMainSignalStatus(`Scanning M15 / M5 / M1 for ${mainSignalSchedule.expiryLabel} expiry. Signal locks in ${formatMainSignalCountdown(mainSignalSchedule.signalAt)}.`, "armed");
+    const mtf = getMtfTimeframeSet();
+    setMainSignalStatus(`Scanning ${mtf.mainLabel} / ${mtf.alignLabel} / ${mtf.entryLabel} for ${mainSignalSchedule.expiryLabel} expiry. Signal locks in ${formatMainSignalCountdown(mainSignalSchedule.signalAt)}.`, "armed");
     return;
   }
   setMainSignalStatus(`Signal locked for ${mainSignalSchedule.expiryLabel} expiry. Entry opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, "ready");
@@ -10620,7 +10675,7 @@ function pushMainIndicatorVote(votes, { direction, weight, indicator, frame, pri
   });
 }
 
-function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
+function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSeconds = getChartTimeframeSeconds()) {
   const votes = [];
   const count = Array.isArray(candles) ? candles.length : 0;
   if (count < 30) return votes;
@@ -10633,7 +10688,7 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
 
   try {
     if (indicator === "INST_EXECUTION_MODEL") {
-      const model = buildInstitutionalExecutionModel(candles, {});
+      const model = buildInstitutionalExecutionModel(candles, { baseSeconds: frameSeconds });
       const latest = latestByIndex(model.signals);
       if (latest) pushMainIndicatorVote(votes, {
         direction: latest.direction,
@@ -10646,7 +10701,7 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
         candleCount: count,
       });
     } else if (indicator === "INST_LEVEL_BEHAVIOR") {
-      const model = buildInstitutionalLevelBehaviorModel(candles, {});
+      const model = buildInstitutionalLevelBehaviorModel(candles, { baseSeconds: frameSeconds });
       const latest = latestByIndex(model.signals);
       if (latest) pushMainIndicatorVote(votes, {
         direction: latest.direction,
@@ -10989,7 +11044,7 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight) {
   return votes;
 }
 
-function scanAllMainSignalIndicators(candles, frame, frameWeight) {
+function scanAllMainSignalIndicators(candles, frame, frameWeight, frameSeconds = getChartTimeframeSeconds()) {
   const signalIndicators = [
     "INST_EXECUTION_MODEL",
     "INST_LEVEL_BEHAVIOR",
@@ -11012,10 +11067,10 @@ function scanAllMainSignalIndicators(candles, frame, frameWeight) {
     "TREND_VOLUME_ACCUM",
     "EMA",
   ];
-  return signalIndicators.flatMap((indicator) => scanMainSignalIndicator(indicator, candles, frame, frameWeight));
+  return signalIndicators.flatMap((indicator) => scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSeconds));
 }
 
-function summarizeMainSignalVotes(votes) {
+function summarizeMainSignalVotes(votes, frameSet = getMtfTimeframeSet()) {
   const setupVotes = votes.filter((vote) => vote.isSetup);
   const sumDirection = (items, direction) => items
     .filter((vote) => vote.direction === direction)
@@ -11029,26 +11084,33 @@ function summarizeMainSignalVotes(votes) {
     return call > put ? "CALL" : "PUT";
   };
   const distinctSetupIndicators = new Set(setupVotes.map((vote) => vote.indicator)).size;
+  const mainFrame = getMtfFrameLabel(frameSet.mainSeconds);
+  const alignFrame = getMtfFrameLabel(frameSet.alignSeconds);
+  const entryFrame = getMtfFrameLabel(frameSet.entrySeconds);
   return {
     setupVotes,
     distinctSetupIndicators,
-    m15Direction: frameDirection("M15"),
-    m5Direction: frameDirection("M5"),
-    m1Direction: frameDirection("M1"),
-    m15Count: byFrame("M15").length,
-    m5Count: byFrame("M5").length,
-    m1Count: byFrame("M1").length,
+    mainDirection: frameDirection(mainFrame),
+    alignDirection: frameDirection(alignFrame),
+    entryDirection: frameDirection(entryFrame),
+    mainCount: byFrame(mainFrame).length,
+    alignCount: byFrame(alignFrame).length,
+    entryCount: byFrame(entryFrame).length,
+    mainFrame,
+    alignFrame,
+    entryFrame,
   };
 }
 
-function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
-  const candles = Array.isArray(oneMinuteCandles) ? oneMinuteCandles.filter(Boolean) : [];
+function buildTopDownMainSignal(sourceCandles, referencePrice = null, baseSeconds = getChartTimeframeSeconds()) {
+  const candles = Array.isArray(sourceCandles) ? sourceCandles.filter(Boolean) : [];
+  const frameSet = getMtfTimeframeSet(baseSeconds);
   if (candles.length < 90) {
     return {
       direction: null,
       confidence: 0,
       trend: "BUILDING",
-      setup: "Need more 1m history for top-down scan",
+      setup: `Need more ${frameSet.entryLabel} history for top-down scan`,
       reasons: [],
       callWeight: 0,
       putWeight: 0,
@@ -11058,13 +11120,16 @@ function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
   const refPrice = Number.isFinite(referencePrice)
     ? Number(referencePrice)
     : Number(candles[candles.length - 1]?.close);
-  const m15 = aggregateCandlesToTimeframe(candles, 60, 900);
-  const m5 = aggregateCandlesToTimeframe(candles, 60, 300);
-  const m1 = candles;
+  const main = aggregateCandlesByTimeframe(candles, frameSet.mainSeconds);
+  const align = aggregateCandlesByTimeframe(candles, frameSet.alignSeconds);
+  const entry = candles;
+  const mainFrame = getMtfFrameLabel(frameSet.mainSeconds);
+  const alignFrame = getMtfFrameLabel(frameSet.alignSeconds);
+  const entryFrame = getMtfFrameLabel(frameSet.entrySeconds);
   const votes = [
-    ...scanAllMainSignalIndicators(m15, "M15", 1.35),
-    ...scanAllMainSignalIndicators(m5, "M5", 1.6),
-    ...scanAllMainSignalIndicators(m1, "M1", 2.0),
+    ...scanAllMainSignalIndicators(main, mainFrame, 1.35, frameSet.mainSeconds),
+    ...scanAllMainSignalIndicators(align, alignFrame, 1.6, frameSet.alignSeconds),
+    ...scanAllMainSignalIndicators(entry, entryFrame, 2.0, frameSet.entrySeconds),
   ];
 
   const callWeight = votes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
@@ -11073,23 +11138,23 @@ function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
   const direction = totalWeight > 0 && callWeight !== putWeight ? (callWeight > putWeight ? "CALL" : "PUT") : null;
   const confidence = totalWeight > 0 ? Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100) : 0;
   const margin = totalWeight > 0 ? Math.abs(callWeight - putWeight) / totalWeight : 0;
-  const voteSummary = summarizeMainSignalVotes(votes);
-  const htfDirection = voteSummary.m5Direction || voteSummary.m15Direction;
+  const voteSummary = summarizeMainSignalVotes(votes, frameSet);
+  const htfDirection = voteSummary.alignDirection || voteSummary.mainDirection;
   const htfAligned = Boolean(htfDirection && htfDirection === direction);
-  const entryAligned = Boolean(voteSummary.m1Direction && voteSummary.m1Direction === direction);
+  const entryAligned = Boolean(voteSummary.entryDirection && voteSummary.entryDirection === direction);
   const enoughSetups =
     voteSummary.distinctSetupIndicators >= 3 &&
-    voteSummary.m1Count >= 2 &&
-    (voteSummary.m5Count + voteSummary.m15Count) >= 1;
+    voteSummary.entryCount >= 2 &&
+    (voteSummary.alignCount + voteSummary.mainCount) >= 1;
   const canSignal =
     confidence >= 65 &&
     margin >= 0.25 &&
     enoughSetups &&
     htfAligned &&
     entryAligned;
-  const trend15 = getInstitutionalTrend(m15);
-  const trend5 = getInstitutionalTrend(m5);
-  const trend1 = getInstitutionalTrend(m1);
+  const trendMain = getInstitutionalTrend(main);
+  const trendAlign = getInstitutionalTrend(align);
+  const trendEntry = getInstitutionalTrend(entry);
   const winningVotes = votes
     .filter((vote) => vote.direction === direction)
     .sort((a, b) => b.weight - a.weight);
@@ -11097,7 +11162,7 @@ function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
     direction: canSignal ? direction : null,
     rawDirection: direction,
     confidence,
-    trend: `${trend15} / ${trend5} / ${trend1}`,
+    trend: `${trendMain} / ${trendAlign} / ${trendEntry}`,
     setup: winningVotes.length
       ? `${canSignal ? "PASS" : "WAIT"} ${Math.round(margin * 100)}% edge, ${voteSummary.distinctSetupIndicators} setup systems | ${winningVotes.slice(0, 4).map((vote) => `${vote.system}: ${vote.reason || "aligned"}`).join(" | ")}`
       : "No aligned top-down edge",
@@ -11112,9 +11177,12 @@ function buildTopDownMainSignal(oneMinuteCandles, referencePrice = null) {
       htfAligned,
       entryAligned,
       enoughSetups,
-      m15Direction: voteSummary.m15Direction,
-      m5Direction: voteSummary.m5Direction,
-      m1Direction: voteSummary.m1Direction,
+      mainDirection: voteSummary.mainDirection,
+      alignDirection: voteSummary.alignDirection,
+      entryDirection: voteSummary.entryDirection,
+      mainFrame,
+      alignFrame,
+      entryFrame,
     },
     entryPrice: Number.isFinite(refPrice) ? refPrice : null,
   };
@@ -11132,15 +11200,20 @@ function getRiseFallScannerSymbols() {
     });
 }
 
-function scoreIndicatorMarket(indicator, candles) {
-  const oneMinuteCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
-  if (oneMinuteCandles.length < 90) return null;
-  const m15 = aggregateCandlesToTimeframe(oneMinuteCandles, 60, 900);
-  const m5 = aggregateCandlesToTimeframe(oneMinuteCandles, 60, 300);
+function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimeframeSeconds()) {
+  const sourceCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  if (sourceCandles.length < 90) return null;
+  const frameSet = getMtfTimeframeSet(baseSeconds);
+  const main = aggregateCandlesByTimeframe(sourceCandles, frameSet.mainSeconds);
+  const align = aggregateCandlesByTimeframe(sourceCandles, frameSet.alignSeconds);
+  const entry = sourceCandles;
+  const mainFrame = getMtfFrameLabel(frameSet.mainSeconds);
+  const alignFrame = getMtfFrameLabel(frameSet.alignSeconds);
+  const entryFrame = getMtfFrameLabel(frameSet.entrySeconds);
   const votes = [
-    ...scanMainSignalIndicator(indicator, m15, "M15", 1.35),
-    ...scanMainSignalIndicator(indicator, m5, "M5", 1.6),
-    ...scanMainSignalIndicator(indicator, oneMinuteCandles, "M1", 2.0),
+    ...scanMainSignalIndicator(indicator, main, mainFrame, 1.35, frameSet.mainSeconds),
+    ...scanMainSignalIndicator(indicator, align, alignFrame, 1.6, frameSet.alignSeconds),
+    ...scanMainSignalIndicator(indicator, entry, entryFrame, 2.0, frameSet.entrySeconds),
   ];
   if (!votes.length) return null;
   const callWeight = votes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
@@ -11164,11 +11237,10 @@ function scoreIndicatorMarket(indicator, candles) {
     setupVotes: setupVotes.length,
     reason: winningVotes[0]?.reason || winningVotes[0]?.system || "aligned",
     frame: winningVotes[0]?.frame || "--",
-    timeframeSeconds: winningVotes[0]?.frame === "M15"
-      ? 900
-      : winningVotes[0]?.frame === "M5"
-        ? 300
-        : 60,
+    timeframeSeconds:
+      winningVotes[0]?.frame === mainFrame ? frameSet.mainSeconds :
+      winningVotes[0]?.frame === alignFrame ? frameSet.alignSeconds :
+      frameSet.entrySeconds,
   };
 }
 
@@ -11257,7 +11329,8 @@ async function scanMarketsBySelectedIndicator() {
 
 async function getMainSignalCandles(symbol) {
   const live = currentSymbol === symbol ? getBuiltCandles() : [];
-  const historical = live.length >= 700 ? [] : await fetchHistoricalCandles(symbol, 60, 900);
+  const baseSeconds = getChartTimeframeSeconds();
+  const historical = live.length >= 700 ? [] : await fetchCandlesForGranularity(symbol, baseSeconds, 900);
   const combined = [...historical, ...live];
   const byTime = new Map();
   combined.forEach((candle) => {
@@ -11275,7 +11348,7 @@ async function lockMainSignal() {
   try {
     const candles = await getMainSignalCandles(symbol);
     const referencePrice = currentSymbol === symbol && Number.isFinite(lastSpot) ? Number(lastSpot) : Number(candles[candles.length - 1]?.close);
-    const result = buildTopDownMainSignal(candles, referencePrice);
+    const result = buildTopDownMainSignal(candles, referencePrice, getChartTimeframeSeconds());
     const tradeDirection = result.direction;
     const expiryLabel = mainSignalSchedule.expiryLabel || "1 minute";
     const signalText = tradeDirection === "CALL"
@@ -11308,9 +11381,10 @@ async function lockMainSignal() {
         tone: result.direction === "CALL" ? "buy" : "sell",
       });
     }
+    const entryGateLabel = result.gate?.entryFrame || getMtfFrameLabel(getMtfTimeframeSet().entrySeconds);
     const gateText = result.direction
       ? `${signalText}. ${result.setupSystems || 0} setup systems aligned.`
-      : `WAIT. Gate failed: ${result.gate?.htfAligned ? "" : "HTF "} ${result.gate?.entryAligned ? "" : "M1 "} ${result.gate?.enoughSetups ? "" : "setups "}`.replace(/\s+/g, " ").trim();
+      : `WAIT. Gate failed: ${result.gate?.htfAligned ? "" : "HTF "} ${result.gate?.entryAligned ? "" : `${entryGateLabel} `} ${result.gate?.enoughSetups ? "" : "setups "}`.replace(/\s+/g, " ").trim();
     setMainSignalStatus(`${gateText} ${expiryLabel} expiry. Entry opens in ${formatMainSignalCountdown(mainSignalSchedule.entryAt)}.`, result.direction ? "ready" : "armed");
   } catch (err) {
     setMainSignalStatus(`Signal scan failed: ${err?.message || "unknown error"}`, "armed");
