@@ -72,6 +72,7 @@ let lastCalcAt = 0;
 let lastSpot = null;
 let lastTickAt = 0;
 let proposalExpiries = [];
+let riseFallDurationRules = null;
 let proposals = [];
 let countdownTimer = null;
 let lastProposalError = null;
@@ -145,6 +146,7 @@ let chart2MobileToolbarEl;
 let chart2DrawingMenuEl;
 let indicatorSelectEl;
 let indicatorPickerEl;
+let indicatorMenuHomeEl;
 let indicatorMenuButtonEl;
 let indicatorMenuEl;
 let chartIndicatorListEl;
@@ -491,6 +493,8 @@ const MIN_SIGNAL_CANDLES = 20;
 const MAX_CANDLES = 5000;
 const MAX_TICK_HISTORY_BATCH = 5000;
 const MAX_TICK_HISTORY_BATCHES = 6;
+const MICRO_TIMEFRAME_INITIAL_CANDLES = 900;
+const NATIVE_CANDLE_GRANULARITIES = new Set([60, 120, 180, 300, 600, 900, 1800, 3600, 7200, 14400, 28800, 86400]);
 const TOP_DOWN_STACK_TIMEFRAMES = [30, 60, 300];
 const TOP_DOWN_CACHE_MAX_AGE_MS = 45000;
 const SIGNAL_STRUCTURE_LOOKBACK = 20;
@@ -6000,7 +6004,7 @@ async function loadAggregatedTickHistoryForGranularity(symbol, timeframeSeconds 
 }
 
 async function fetchCandlesForGranularity(symbol, timeframeSeconds = 60, count = MAX_CANDLES) {
-  if (timeframeSeconds < 60) {
+  if (!NATIVE_CANDLE_GRANULARITIES.has(Number(timeframeSeconds))) {
     return loadAggregatedTickHistoryForGranularity(symbol, timeframeSeconds, count);
   }
   return fetchHistoricalCandles(symbol, timeframeSeconds, count);
@@ -8870,10 +8874,12 @@ function renderMiniChart(candles) {
       last.close < prev.low ? prev.low - last.close : 0;
     const priceLabel = `${formatPrice(last.close, currentPip)}`;
     const diffLabel = diff > 0 ? `Δ ${formatPrice(diff, currentPip)}` : "Δ 0";
+    const candleEndTime = Number(last.time) + Math.max(1, Number(candleBuilder?.timeframe || DEFAULT_TIMEFRAME_SEC || 60));
+    const candleEndLabel = Number.isFinite(candleEndTime) ? `end ${formatCountdown(candleEndTime)}` : "";
     const priceW = Math.max(54, ctx.measureText(priceLabel).width + 16);
     const priceH = 18;
     const priceBoxX = axisLeft;
-    const priceBoxY = clamp(lastY - priceH / 2, topPad, height - bottomPad - priceH);
+    const priceBoxY = clamp(lastY - priceH / 2, topPad, height - bottomPad - priceH - (candleEndLabel ? 28 : 0));
 
     ctx.save();
     ctx.fillStyle = dotColor;
@@ -8885,11 +8891,17 @@ function renderMiniChart(candles) {
     ctx.restore();
 
     ctx.fillStyle = dotColor;
-    const diffY = clamp(priceBoxY + priceH + 10, topPad + 8, height - bottomPad - 8);
+    const diffY = clamp(priceBoxY + priceH + 10, topPad + 8, height - bottomPad - (candleEndLabel ? 22 : 8));
+    let activeDiffY = diffY;
     if (Math.abs(diffY - highY) < 10 || Math.abs(diffY - lowY) < 10) {
-      ctx.fillText(diffLabel, labelX, clamp(lastY + 24, topPad + 8, height - bottomPad - 8));
+      activeDiffY = clamp(lastY + 24, topPad + 8, height - bottomPad - (candleEndLabel ? 22 : 8));
     } else {
-      ctx.fillText(diffLabel, labelX, diffY);
+      activeDiffY = diffY;
+    }
+    ctx.fillText(diffLabel, labelX, activeDiffY);
+    if (candleEndLabel) {
+      ctx.fillStyle = "#9aa7b8";
+      ctx.fillText(candleEndLabel, labelX, clamp(activeDiffY + 14, topPad + 20, height - bottomPad - 8));
     }
   }
 
@@ -9558,15 +9570,29 @@ function populateMarketScannerIndicators() {
     .join("");
 }
 
+function isRiseFallExpiryOptionAllowed(option) {
+  if (!option || option.value === "candle_end" || !riseFallDurationRules) return true;
+  const choice = parseRiseFallExpiryChoice(option.value);
+  if (choice.mode !== "fixed") return true;
+  const min = riseFallDurationRules.minByUnit?.[choice.unit];
+  const max = riseFallDurationRules.maxByUnit?.[choice.unit];
+  const value = choice.unit === "t" ? choice.duration : durationChoiceToSeconds(choice);
+  if (!Number.isFinite(value)) return false;
+  if (Number.isFinite(min) && value < min) return false;
+  if (Number.isFinite(max) && value > max) return false;
+  return true;
+}
+
 function populateRiseFallExpiryOptions() {
   const selected = getRiseFallExpiryValue();
-  const html = RISE_FALL_EXPIRY_OPTIONS
+  const options = RISE_FALL_EXPIRY_OPTIONS.filter(isRiseFallExpiryOptionAllowed);
+  const html = options
     .map((option) => `<option value="${option.value}">${option.label}</option>`)
     .join("");
   [mainRiseFallExpirySelectEl, riseFallExpirySelectEl].forEach((select) => {
     if (!select) return;
     select.innerHTML = html;
-    select.value = RISE_FALL_EXPIRY_OPTIONS.some((option) => option.value === selected)
+    select.value = options.some((option) => option.value === selected)
       ? selected
       : "candle_end";
   });
@@ -9643,9 +9669,54 @@ function renderIndicatorMenu() {
   `;
 }
 
+function positionIndicatorMenu() {
+  if (!indicatorMenuEl) return;
+  if (!(isDesktopLayout() && currentAppTab === "chart" && chartMarketButtonEl && chartBodyEl)) {
+    if (indicatorMenuHomeEl && indicatorMenuEl.parentElement !== indicatorMenuHomeEl) {
+      indicatorMenuHomeEl.appendChild(indicatorMenuEl);
+    }
+    indicatorMenuEl.classList.remove("indicator-menu-floating");
+    indicatorMenuEl.style.left = "";
+    indicatorMenuEl.style.top = "";
+    indicatorMenuEl.style.right = "";
+    indicatorMenuEl.style.bottom = "";
+    return;
+  }
+
+  const marketRect = chartMarketButtonEl.getBoundingClientRect();
+  const chartRect = chartBodyEl.getBoundingClientRect();
+  const menuWidth = Math.min(460, Math.max(320, chartRect.width - marketRect.width - 42));
+  const preferredLeft = marketRect.right + 28;
+  const maxLeft = Math.max(12, chartRect.right - menuWidth - 14);
+  const left = Math.max(chartRect.left + 14, Math.min(preferredLeft, maxLeft));
+  if (indicatorMenuEl.parentElement !== chartBodyEl) {
+    chartBodyEl.appendChild(indicatorMenuEl);
+  }
+  indicatorMenuEl.classList.add("indicator-menu-floating");
+  indicatorMenuEl.style.left = `${left}px`;
+  indicatorMenuEl.style.top = `${marketRect.top}px`;
+  indicatorMenuEl.style.right = "auto";
+  indicatorMenuEl.style.bottom = "auto";
+  indicatorMenuEl.style.width = `${menuWidth}px`;
+}
+
 function setIndicatorMenuOpen(open) {
   if (!indicatorMenuEl || !indicatorMenuButtonEl) return;
-  indicatorMenuEl.classList.toggle("hidden", !open);
+  if (open) {
+    indicatorMenuEl.classList.remove("hidden");
+    positionIndicatorMenu();
+  } else {
+    if (indicatorMenuHomeEl && indicatorMenuEl.parentElement !== indicatorMenuHomeEl) {
+      indicatorMenuHomeEl.appendChild(indicatorMenuEl);
+    }
+    indicatorMenuEl.classList.remove("indicator-menu-floating");
+    indicatorMenuEl.style.left = "";
+    indicatorMenuEl.style.top = "";
+    indicatorMenuEl.style.right = "";
+    indicatorMenuEl.style.bottom = "";
+    indicatorMenuEl.style.width = "";
+    indicatorMenuEl.classList.add("hidden");
+  }
   indicatorMenuButtonEl.setAttribute("aria-expanded", open ? "true" : "false");
 }
 
@@ -12922,7 +12993,7 @@ async function loadTickHistory(symbol) {
     let built = [];
     const requestedTimeframe = candleBuilder.timeframe;
 
-    if (requestedTimeframe < 60) {
+    if (!NATIVE_CANDLE_GRANULARITIES.has(requestedTimeframe)) {
       built = await loadAggregatedTickHistory(symbol);
     } else {
       built = await loadCandleHistory(symbol);
@@ -12949,12 +13020,13 @@ function rebuildCandlesFromHistory(prices, times) {
 }
 
 async function loadCandleHistory(symbol) {
+  const requestedTimeframe = candleBuilder.timeframe;
   const res = await wsRequest({
     ticks_history: symbol,
     end: "latest",
     count: MAX_CANDLES,
     style: "candles",
-    granularity: candleBuilder.timeframe,
+    granularity: requestedTimeframe,
   });
 
   const candleHistory = Array.isArray(res.candles)
@@ -12968,19 +13040,27 @@ async function loadCandleHistory(symbol) {
     const built = candleBuilder.currentCandle
       ? [...candleBuilder.candles, candleBuilder.currentCandle]
       : candleBuilder.candles;
-    setCachedCandles(symbol, candleBuilder.timeframe, built);
+    setCachedCandles(symbol, requestedTimeframe, built);
     return built;
   }
 
   const history = res.history || {};
   const built = rebuildCandlesFromHistory(history.prices || [], history.times || []);
-  setCachedCandles(symbol, candleBuilder.timeframe, built);
+  setCachedCandles(symbol, requestedTimeframe, built);
   return built;
 }
 
 async function loadAggregatedTickHistory(symbol) {
-  const built = await loadAggregatedTickHistoryForGranularity(symbol, candleBuilder.timeframe);
-  setCachedCandles(symbol, candleBuilder.timeframe, built);
+  const requestedTimeframe = candleBuilder.timeframe;
+  const targetCandles = Math.min(
+    MAX_CANDLES,
+    Math.max(MICRO_TIMEFRAME_INITIAL_CANDLES, chartPoints * 12)
+  );
+  const built = await loadAggregatedTickHistoryForGranularity(symbol, requestedTimeframe, targetCandles);
+  if (symbol === currentSymbol && requestedTimeframe === candleBuilder.timeframe && built.length) {
+    candleBuilder.setHistory(built);
+  }
+  setCachedCandles(symbol, requestedTimeframe, built);
   return built;
 }
 
@@ -12996,11 +13076,58 @@ function parseDurationToSeconds(value) {
   return Math.round(amount * mult);
 }
 
+function parseApiDuration(value) {
+  if (value == null) return null;
+  const text = String(value).trim();
+  const match = text.match(/^(\d+(?:\.\d+)?)([tsmhdw])$/i);
+  if (!match) return null;
+  const amount = Number(match[1]);
+  const unit = match[2].toLowerCase();
+  if (!Number.isFinite(amount) || amount <= 0) return null;
+  const seconds = unit === "t" ? null : parseDurationToSeconds(text);
+  return { amount, unit, seconds };
+}
+
+function buildRiseFallDurationRules(contracts) {
+  const list = Array.isArray(contracts) ? contracts : [];
+  const rules = {
+    minByUnit: {},
+    maxByUnit: {},
+  };
+
+  list.forEach((item) => {
+    if (item?.contract_type !== "CALL" && item?.contract_type !== "PUT") return;
+    const min = parseApiDuration(item.min_contract_duration ?? item.min_duration ?? item.minimum_duration);
+    const max = parseApiDuration(item.max_contract_duration ?? item.max_duration ?? item.maximum_duration);
+    if (min) {
+      const value = min.unit === "t" ? min.amount : min.seconds;
+      if (Number.isFinite(value)) {
+        rules.minByUnit[min.unit] = Number.isFinite(rules.minByUnit[min.unit])
+          ? Math.min(rules.minByUnit[min.unit], value)
+          : value;
+      }
+    }
+    if (max) {
+      const value = max.unit === "t" ? max.amount : max.seconds;
+      if (Number.isFinite(value)) {
+        rules.maxByUnit[max.unit] = Number.isFinite(rules.maxByUnit[max.unit])
+          ? Math.max(rules.maxByUnit[max.unit], value)
+          : value;
+      }
+    }
+  });
+
+  return Object.keys(rules.minByUnit).length || Object.keys(rules.maxByUnit).length ? rules : null;
+}
+
 async function loadContractsFor(symbol) {
   if (!symbol) return;
+  const requestSymbol = symbol;
   try {
     const res = await wsRequest({ contracts_for: symbol });
+    if (requestSymbol !== currentSymbol) return;
     const list = res.contracts_for?.available || res.contracts_for?.contracts || res.contracts_for?.available_contracts || [];
+    riseFallDurationRules = buildRiseFallDurationRules(list);
     let mins = [];
     for (const item of list) {
       if (item.contract_type !== "CALL" && item.contract_type !== "PUT") continue;
@@ -13011,7 +13138,11 @@ async function loadContractsFor(symbol) {
     if (mins.length) {
       minDurationSec = Math.min(...mins);
     }
+    populateRiseFallExpiryOptions();
   } catch {
+    if (requestSymbol !== currentSymbol) return;
+    riseFallDurationRules = null;
+    populateRiseFallExpiryOptions();
     // keep fallback
   }
 
@@ -13559,6 +13690,7 @@ function init() {
   indicatorPickerEl = document.getElementById("indicatorPicker");
   indicatorMenuButtonEl = document.getElementById("indicatorMenuButton");
   indicatorMenuEl = document.getElementById("indicatorMenu");
+  indicatorMenuHomeEl = indicatorMenuEl?.parentElement || null;
   chartIndicatorListEl = document.getElementById("chartIndicatorList");
   trendModeSelectEl = document.getElementById("trendModeSelect");
   drawingToolSelectEl = document.getElementById("drawingToolSelect");
@@ -14243,7 +14375,7 @@ function init() {
   document.addEventListener("click", (event) => {
     if (!indicatorPickerEl || !(event.target instanceof Node)) return;
     if (chart2MobileToolbarEl?.contains(event.target) || indicatorMenuEl?.contains(event.target)) return;
-    if (!indicatorPickerEl.contains(event.target)) setIndicatorMenuOpen(false);
+    if (!indicatorPickerEl.contains(event.target) && event.target !== indicatorMenuButtonEl) setIndicatorMenuOpen(false);
   });
 
   document.addEventListener("click", (event) => {

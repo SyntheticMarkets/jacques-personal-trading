@@ -2015,7 +2015,21 @@ button.chart-indicator-select {
   }
 
   .phone.desktop-chart-layout .indicator-menu {
+    max-height: min(360px, calc(100vh - 380px));
     z-index: 80;
+  }
+
+  .phone.desktop-chart-layout .indicator-menu.indicator-menu-floating {
+    position: fixed !important;
+    right: auto !important;
+    bottom: auto !important;
+    transform: none !important;
+    width: min(460px, calc(100vw - 40px));
+    z-index: 95;
+  }
+
+  .phone.desktop-chart-layout .indicator-menu-content {
+    max-height: calc(min(360px, calc(100vh - 380px)) - 50px);
   }
 
   .phone.chart2-mode .desktop-sidebar-extra > #proposalsCard {
