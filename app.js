@@ -13402,12 +13402,18 @@ async function refreshProposals() {
       const expiryChoice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
       proposals = [];
       if (expiryChoice.mode === "candle_end") {
-        for (const expiry of proposalExpiries) {
+        const visibleExpiries = proposalExpiries.slice(0, 2);
+        for (const expiry of visibleExpiries) {
           const nowSec = Math.floor(Date.now() / 1000);
           const durationSec = Math.max(minDurationSec, expiry - nowSec);
-          for (const direction of ["CALL", "PUT"]) {
+          const isPrimaryExpiry = expiry === primaryExpiry;
+          const directions = isPrimaryExpiry ? ["CALL", "PUT"] : [currentDirection];
+          const expiryLabel = isPrimaryExpiry ? "Current candle end" : "Next candle end";
+          for (const direction of directions) {
             if (!stake || durationSec <= 0) {
-              proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel: "Candle end" });
+              if (direction === currentDirection) {
+                proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel });
+              }
               continue;
             }
             try {
@@ -13430,17 +13436,19 @@ async function refreshProposals() {
                 askPrice,
                 barrier: null,
                 offset: null,
-                expiryLabel: "Candle end",
+                expiryLabel,
               };
-              proposals.push(item);
-              if (expiry === primaryExpiry) quickDirectionQuotes[direction] = item;
+              if (direction === currentDirection) proposals.push(item);
+              if (isPrimaryExpiry) quickDirectionQuotes[direction] = item;
               ok += 1;
             } catch (err) {
               lastProposalError = err?.message || "Proposal error";
               if (lastProposalError.toLowerCase().includes("rate limit")) {
                 rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
               }
-              proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel: "Candle end" });
+              if (direction === currentDirection) {
+                proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel });
+              }
             }
           }
         }
@@ -13547,7 +13555,7 @@ async function refreshProposals() {
     if (proposalExpiries.length) {
       const riseFallChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
       const totalExpected = isRiseFall
-        ? riseFallChoice?.mode === "candle_end" ? proposalExpiries.length * 2 : 2
+        ? riseFallChoice?.mode === "candle_end" ? Math.min(3, proposalExpiries.length + 1) : 2
         : proposalExpiries.length;
       if (ok === 0 && lastProposalError) {
         setStatus(`Proposals: 0/${totalExpected} (${lastProposalError})`, true);
