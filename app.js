@@ -87,6 +87,7 @@ const RISE_FALL_EXPIRY_OPTIONS = [
   { value: "5t", label: "5 ticks" },
   { value: "10t", label: "10 ticks" },
   { value: "30s", label: "30 seconds" },
+  { value: "55s", label: "55 seconds" },
   { value: "60s", label: "1 minute" },
   { value: "300s", label: "5 minutes" },
   ...Array.from({ length: 11 }, (_, index) => {
@@ -9879,6 +9880,9 @@ async function setChartTimeframe(seconds, options = {}) {
   if (shouldLoad && currentSymbol) {
     await loadTickHistory(currentSymbol);
   }
+  if (isRiseFallCandleEndExpiry()) {
+    buildExpiries();
+  }
 }
 
 function connectWS() {
@@ -11229,6 +11233,8 @@ function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimefram
   const setupVotes = winningVotes.filter((vote) => vote.isSetup);
   const score = Math.round((confidence * 0.7) + (edge * 100 * 0.3) + Math.min(20, setupVotes.length * 4));
   return {
+    indicator,
+    indicatorLabel: getChartIndicatorLabel(indicator),
     direction,
     confidence,
     score,
@@ -11244,10 +11250,62 @@ function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimefram
   };
 }
 
+function getMarketScannerIndicators() {
+  const attached = Array.from(activeChartIndicators)
+    .filter((indicator) => MARKET_SCANNER_INDICATORS.includes(indicator));
+  if (attached.length) return attached;
+  const selected = marketScannerIndicatorSelectEl?.value || MARKET_SCANNER_INDICATORS[0];
+  return selected ? [selected] : [];
+}
+
+function scoreMarketWithIndicators(indicators, candles, baseSeconds = getChartTimeframeSeconds()) {
+  const scores = indicators
+    .map((indicator) => scoreIndicatorMarket(indicator, candles, baseSeconds))
+    .filter(Boolean);
+  if (!scores.length) return null;
+
+  const callWeight = scores
+    .filter((score) => score.direction === "CALL")
+    .reduce((sum, score) => sum + score.score, 0);
+  const putWeight = scores
+    .filter((score) => score.direction === "PUT")
+    .reduce((sum, score) => sum + score.score, 0);
+  const totalWeight = callWeight + putWeight;
+  if (!totalWeight || callWeight === putWeight) return null;
+
+  const direction = callWeight > putWeight ? "CALL" : "PUT";
+  const aligned = scores
+    .filter((score) => score.direction === direction)
+    .sort((a, b) => b.score - a.score || b.confidence - a.confidence);
+  const best = aligned[0];
+  const confidence = Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100);
+  const confluenceBonus = Math.min(18, Math.max(0, aligned.length - 1) * 6);
+  const score = Math.round(
+    aligned.reduce((sum, item) => sum + item.score, 0) / aligned.length
+    + confluenceBonus
+    + confidence * 0.2
+  );
+
+  return {
+    direction,
+    confidence,
+    score,
+    edge: Math.abs(callWeight - putWeight) / totalWeight,
+    votes: aligned.reduce((sum, item) => sum + item.votes, 0),
+    setupVotes: aligned.reduce((sum, item) => sum + item.setupVotes, 0),
+    reason: best?.reason || "aligned",
+    frame: best?.frame || "--",
+    timeframeSeconds: best?.timeframeSeconds || baseSeconds,
+    indicators: aligned.map((item) => item.indicator),
+    indicatorLabels: aligned.map((item) => item.indicatorLabel),
+    checkedIndicators: scores.length,
+  };
+}
+
 function renderMarketScannerResults(results = []) {
   if (!marketScannerResultsEl) return;
   if (!results.length) {
-    marketScannerResultsEl.innerHTML = "<div class=\"trade-meta\">No active setup found for this indicator.</div>";
+    marketScannerResultsEl.innerHTML = "<div class=\"trade-meta\">No active setup found for the scanned indicator set.</div>";
     return;
   }
   marketScannerResultsEl.innerHTML = results.slice(0, 10).map((result, index) => {
@@ -11255,11 +11313,15 @@ function renderMarketScannerResults(results = []) {
     const sideText = result.direction === "CALL" ? "Rise / BUY" : "Fall / SELL";
     const title = escapeHtml(result.displayName);
     const reason = escapeHtml(result.reason);
+    const indicatorLabels = Array.isArray(result.indicatorLabels) && result.indicatorLabels.length
+      ? result.indicatorLabels.join(" + ")
+      : result.indicatorLabel || "Indicator";
+    const indicatorsAttr = Array.isArray(result.indicators) ? result.indicators.join(",") : (result.indicator || "");
     return `
-      <button class="market-scan-row ${sideClass}" type="button" data-scan-symbol="${escapeHtml(result.symbol)}" data-scan-timeframe="${result.timeframeSeconds || 60}">
+      <button class="market-scan-row ${sideClass}" type="button" data-scan-symbol="${escapeHtml(result.symbol)}" data-scan-timeframe="${result.timeframeSeconds || 60}" data-scan-indicators="${escapeHtml(indicatorsAttr)}">
         <div>
           <div class="market-scan-title">${index + 1}. ${title} - ${sideText}</div>
-          <div class="market-scan-meta">${result.confidence}% confidence • ${result.votes} votes • ${escapeHtml(result.frame)} • ${reason}</div>
+          <div class="market-scan-meta">${result.confidence}% confidence • ${result.votes} votes • ${escapeHtml(result.frame)} • ${escapeHtml(indicatorLabels)} • ${reason}</div>
         </div>
         <div class="market-scan-score">${result.score}</div>
       </button>
@@ -11269,8 +11331,12 @@ function renderMarketScannerResults(results = []) {
 
 async function scanMarketsBySelectedIndicator() {
   if (marketScannerInFlight) return;
-  const indicator = marketScannerIndicatorSelectEl?.value || MARKET_SCANNER_INDICATORS[0];
+  const indicators = getMarketScannerIndicators();
   const symbols = getRiseFallScannerSymbols();
+  if (!indicators.length) {
+    if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No scanner indicator is selected.";
+    return;
+  }
   if (!symbols.length) {
     if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No Rise/Fall markets are loaded yet.";
     return;
@@ -11282,7 +11348,10 @@ async function scanMarketsBySelectedIndicator() {
     scanMarketsBtnEl.textContent = "Scanning...";
   }
   if (marketScannerStatusEl) {
-    marketScannerStatusEl.textContent = `Scanning ${symbols.length} markets with ${getChartIndicatorLabel(indicator)}...`;
+    const label = indicators.length === 1
+      ? getChartIndicatorLabel(indicators[0])
+      : `${indicators.length} attached indicators`;
+    marketScannerStatusEl.textContent = `Scanning ${symbols.length} markets with ${label}...`;
   }
   renderMarketScannerResults([]);
 
@@ -11294,7 +11363,7 @@ async function scanMarketsBySelectedIndicator() {
       const batchResults = await Promise.all(batch.map(async (symbolInfo) => {
         try {
           const candles = await getMainSignalCandles(symbolInfo.symbol);
-          const score = scoreIndicatorMarket(indicator, candles);
+          const score = scoreMarketWithIndicators(indicators, candles);
           if (!score) return null;
           return {
             ...score,
@@ -11316,7 +11385,7 @@ async function scanMarketsBySelectedIndicator() {
     if (marketScannerStatusEl) {
       marketScannerStatusEl.textContent = results.length
         ? `Scan complete. Best market: ${results[0].displayName} (${results[0].direction === "CALL" ? "Rise" : "Fall"}, ${results[0].confidence}%).`
-        : `Scan complete. No current setup from ${getChartIndicatorLabel(indicator)}.`;
+        : `Scan complete. No current setup from ${indicators.length === 1 ? getChartIndicatorLabel(indicators[0]) : "the attached indicators"}.`;
     }
   } finally {
     marketScannerInFlight = false;
@@ -12442,6 +12511,7 @@ function setActiveTab(tabName) {
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
   syncTradeTypeControls(tabName);
   rebuildSymbolsForTradeMode();
+  buildExpiries();
   updateProposalDirectionButtons();
   updateTradeProfitSummary();
   renderTradeList();
@@ -13232,12 +13302,32 @@ function setExpiryMinutes(minutes) {
   buildExpiries();
 }
 
+function isRiseFallCandleEndExpiry() {
+  return getActiveTradeMode() === "rise_fall"
+    && parseRiseFallExpiryChoice(getRiseFallExpiryValue()).mode === "candle_end";
+}
+
+function buildCandleEndExpiries(now, step) {
+  let firstAligned = Math.ceil(now / step) * step;
+  if (firstAligned <= now) firstAligned += step;
+  while (firstAligned - now <= minDurationSec) {
+    firstAligned += step;
+  }
+  return Array.from({ length: 3 }, (_, i) => firstAligned + step * i);
+}
+
 function buildExpiries() {
   const now = Math.floor(Date.now() / 1000);
-  const step = baseMinutes * 60;
-  const minHold = Math.max(minDurationSec, step);
-  const firstAligned = Math.ceil((now + minHold) / step) * step;
-  proposalExpiries = Array.from({ length: 3 }, (_, i) => firstAligned + step * i);
+  const step = isRiseFallCandleEndExpiry()
+    ? Math.max(1, getChartTimeframeSeconds())
+    : baseMinutes * 60;
+  if (isRiseFallCandleEndExpiry()) {
+    proposalExpiries = buildCandleEndExpiries(now, step);
+  } else {
+    const minHold = Math.max(minDurationSec, step);
+    const firstAligned = Math.ceil((now + minHold) / step) * step;
+    proposalExpiries = Array.from({ length: 3 }, (_, i) => firstAligned + step * i);
+  }
   renderTradeList();
   scheduleProposalRefresh(true);
 }
@@ -13249,7 +13339,10 @@ function rollExpiries() {
   while (proposalExpiries.length && proposalExpiries[0] - now <= minDurationSec) {
     proposalExpiries.shift();
     const last = proposalExpiries[proposalExpiries.length - 1] || now;
-    proposalExpiries.push(last + baseMinutes * 60);
+    const step = isRiseFallCandleEndExpiry()
+      ? Math.max(1, getChartTimeframeSeconds())
+      : baseMinutes * 60;
+    proposalExpiries.push(last + step);
     changed = true;
   }
   return changed;
@@ -13352,10 +13445,12 @@ async function refreshProposals() {
           }
         }
       } else if (primaryExpiry && stake) {
-        const nowSec = Math.floor(Date.now() / 1000);
         const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
         const durationSec = effectiveExpiry.seconds;
         const durationUnit = effectiveExpiry.unit;
+        const displayExpiry = durationUnit === "s"
+          ? Math.floor(Date.now() / 1000) + durationSec
+          : null;
         for (const direction of ["CALL", "PUT"]) {
           try {
             const proposal = await getProposal({
@@ -13374,7 +13469,7 @@ async function refreshProposals() {
               askPrice: proposal.ask_price ?? proposal.buy_price ?? stake,
               barrier: null,
               offset: null,
-              expiry: primaryExpiry,
+              expiry: displayExpiry,
               expiryLabel: durationUnit === "t" ? expiryChoice.label : formatDurationLabel(durationSec),
             };
             proposals.push({
@@ -13574,11 +13669,6 @@ function renderTradeList() {
 
   if (isRiseFall && calcInFlight && !listItems.length) {
     tradeListEl.innerHTML = "";
-    return;
-  }
-
-  if (isRiseFall) {
-    tradeListEl.innerHTML = errorBanner;
     return;
   }
 
@@ -14610,12 +14700,12 @@ function init() {
   riseFallExpirySelectEl?.addEventListener("change", () => {
     syncRiseFallExpiryControls(riseFallExpirySelectEl);
     if (getActiveTradeMode() !== "rise_fall") return;
-    scheduleProposalRefresh(true);
+    buildExpiries();
   });
   mainRiseFallExpirySelectEl?.addEventListener("change", () => {
     syncRiseFallExpiryControls(mainRiseFallExpirySelectEl);
     if (getActiveTradeMode() !== "rise_fall") return;
-    scheduleProposalRefresh(true);
+    buildExpiries();
   });
   generateBacktestSignalBtn?.addEventListener("click", handleGenerateBacktestSignalClick);
   runBacktestNowBtn?.addEventListener("click", handleRunBacktestNowClick);
@@ -14626,7 +14716,10 @@ function init() {
     const symbol = target?.getAttribute("data-scan-symbol");
     if (!symbol) return;
     const suggestedTimeframe = Number(target.getAttribute("data-scan-timeframe") || "60");
-    const scannerIndicator = marketScannerIndicatorSelectEl?.value || "";
+    const scannerIndicators = String(target.getAttribute("data-scan-indicators") || "")
+      .split(",")
+      .map((value) => value.trim())
+      .filter((value) => MARKET_SCANNER_INDICATORS.includes(value));
     const marketEntry = Array.from(symbolsByTradeMode.rise_fall?.values?.() || [])
       .find((entry) => entry.symbols?.some((item) => item.symbol === symbol));
     if (marketEntry && marketSelect && symbolSelect) {
@@ -14637,7 +14730,7 @@ function init() {
       }
       marketSelect.value = marketEntry.market;
       await updateSymbols({ preferredSymbol: symbol, awaitHistory: true });
-      if (scannerIndicator) addChartIndicator(scannerIndicator);
+      scannerIndicators.forEach((indicator) => addChartIndicator(indicator));
       await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
       scheduleChartResize();
       renderMiniChart(getBuiltCandles());
