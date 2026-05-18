@@ -117,6 +117,7 @@ let autoTradeTimeframeSeconds = 60;
 let autoScannerInFlight = false;
 let autoOpenContractId = null;
 let autoScanTimer = null;
+let autoContractCloseTimer = null;
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -6664,6 +6665,13 @@ function clearAutoScanTimer() {
   }
 }
 
+function clearAutoContractCloseTimer() {
+  if (autoContractCloseTimer) {
+    clearTimeout(autoContractCloseTimer);
+    autoContractCloseTimer = null;
+  }
+}
+
 function scheduleAutoScanner(delayMs = AUTO_SCANNER_RETRY_MS) {
   clearAutoScanTimer();
   if (!autoTradeEnabled || autoOpenContractId) return;
@@ -6674,6 +6682,41 @@ function scheduleAutoScanner(delayMs = AUTO_SCANNER_RETRY_MS) {
       scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
     });
   }, Math.max(0, delayMs));
+}
+
+function scheduleAutoContractCloseCheck(contractId, expiry) {
+  clearAutoContractCloseTimer();
+  if (!contractId || !expiry) return;
+  const delayMs = Math.max(1500, ((Number(expiry) || 0) - Math.floor(Date.now() / 1000) + 3) * 1000);
+  autoContractCloseTimer = setTimeout(() => {
+    autoContractCloseTimer = null;
+    checkAutoOpenContractClosed(contractId).catch(() => {
+      if (String(autoOpenContractId || "") === String(contractId)) {
+        scheduleAutoContractCloseCheck(contractId, Math.floor(Date.now() / 1000) + 5);
+      }
+    });
+  }, delayMs);
+}
+
+async function checkAutoOpenContractClosed(contractId) {
+  if (!contractId || String(autoOpenContractId || "") !== String(contractId)) return;
+  const res = await wsRequest({ proposal_open_contract: 1, contract_id: contractId });
+  const contract = res.proposal_open_contract;
+  if (contract) {
+    handleOpenContractUpdate(contract, null);
+  }
+  if (String(autoOpenContractId || "") === String(contractId)) {
+    const autoTrade = autoTradeResults.find((item) => String(item.contractId || "") === String(contractId));
+    const expiry = Number(autoTrade?.expiry || 0);
+    const nowSec = Math.floor(Date.now() / 1000);
+    if (expiry && nowSec >= expiry + 8) {
+      autoOpenContractId = null;
+      renderAutoTradeResults();
+      if (autoTradeEnabled) scheduleAutoScanner(AUTO_SCANNER_AFTER_CLOSE_MS);
+    } else {
+      scheduleAutoContractCloseCheck(contractId, nowSec + 5);
+    }
+  }
 }
 
 function getCurrentCandleEndDuration(timeframeSeconds) {
@@ -6768,6 +6811,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
   autoTradeResults = autoTradeResults.slice(0, 20);
   renderAutoTradeResults();
   subscribeOpenContract(contractId);
+  scheduleAutoContractCloseCheck(contractId, currentCandle.expiry);
   autoTradeSessionCount += 1;
   setAutoTradeStatus(`opened ${signal.displayName || signal.symbol} ${signal.direction === "CALL" ? "Rise" : "Fall"} until candle end`);
 }
@@ -13046,8 +13090,8 @@ function handleOpenContractUpdate(contract, subscriptionId) {
     openContractSubs.set(contractId, subscriptionId);
   }
 
-  const index = tradeResults.findIndex((t) => t.contractId === contractId);
-  const autoIndex = autoTradeResults.findIndex((t) => t.contractId === contractId);
+  const index = tradeResults.findIndex((t) => String(t.contractId || "") === String(contractId));
+  const autoIndex = autoTradeResults.findIndex((t) => String(t.contractId || "") === String(contractId));
   if (index === -1 && autoIndex === -1) return;
 
   const previousTrade = index !== -1 ? tradeResults[index] : autoIndex !== -1 ? autoTradeResults[autoIndex] : null;
@@ -13078,6 +13122,7 @@ function handleOpenContractUpdate(contract, subscriptionId) {
     };
     if (isSold && String(autoOpenContractId || "") === String(contractId)) {
       autoOpenContractId = null;
+      clearAutoContractCloseTimer();
       if (autoTradeEnabled) {
         scheduleAutoScanner(AUTO_SCANNER_AFTER_CLOSE_MS);
       }
@@ -14889,6 +14934,8 @@ function init() {
       scheduleAutoScanner(0);
     } else {
       clearAutoScanTimer();
+      clearAutoContractCloseTimer();
+      autoOpenContractId = null;
       setAutoTradeStatus("disabled");
     }
   });
