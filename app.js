@@ -111,6 +111,11 @@ let autoTradeResults = [];
 let autoTradeEnabled = false;
 let autoTradeLoginId = "";
 let lastAutoTradeCandle = null;
+let autoTradeStake = 1;
+let autoTradeTimeframeSeconds = 60;
+let autoScannerInFlight = false;
+let autoOpenContractId = null;
+let autoScanTimer = null;
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -166,6 +171,8 @@ let zoomOutBtn;
 let resetChartBtn;
 let autoToggleEl;
 let autoAccountSelect;
+let autoStakeInputEl;
+let autoTimeframeSelectEl;
 let autoResultsEl;
 let autoBodyEl;
 let autoSectionEl;
@@ -397,6 +404,9 @@ const MARKET_SCANNER_INDICATORS = [
   "TREND_VOLUME_ACCUM",
   "EMA",
 ];
+const MARKET_SCANNER_MIN_ENTRY_CANDLES = 120;
+const MARKET_SCANNER_MIN_ALIGN_CANDLES = 45;
+const MARKET_SCANNER_MIN_MAIN_CANDLES = 30;
 const activeChartIndicators = new Set();
 const CHART_MARKET_FAVORITES_KEY = "deriv_chart_market_favorites_v1";
 
@@ -502,6 +512,9 @@ const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
 const MAX_AUTO_TRADES_PER_SESSION = 5;
+const AUTO_SCANNER_MIN_CONFIDENCE = 70;
+const AUTO_SCANNER_RETRY_MS = 15000;
+const AUTO_SCANNER_AFTER_CLOSE_MS = 3000;
 const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK", "SMC", "HEIKEN", "RENKO", "MACD", "STOCH"];
 const DRAWING_TOOL_OPTIONS = ["SELECT", "TRENDLINE", "HLINE", "HRAY", "RECT", "FIB"];
 const DRAWING_STORAGE_KEY = "deriv_chart_drawings_v1";
@@ -6629,81 +6642,185 @@ function setDirection(direction, { refresh = true } = {}) {
   if (refresh) scheduleProposalRefresh(true);
 }
 
-async function tryAutoTrade() {
-  if (!autoTradeEnabled) return;
+function getAutoTradeStake() {
+  const value = Number(autoStakeInputEl?.value || autoTradeStake || "1");
+  return Number.isFinite(value) && value > 0 ? value : 1;
+}
+
+function getAutoTradeTimeframeSeconds() {
+  const value = Number(autoTimeframeSelectEl?.value || autoTradeTimeframeSeconds || DEFAULT_TIMEFRAME_SEC);
+  return TIMEFRAME_OPTIONS.some((option) => option.seconds === value) ? value : DEFAULT_TIMEFRAME_SEC;
+}
+
+function setAutoTradeStatus(message, isError = false) {
+  setStatus(`Auto scanner: ${message}`, isError);
+}
+
+function clearAutoScanTimer() {
+  if (autoScanTimer) {
+    clearTimeout(autoScanTimer);
+    autoScanTimer = null;
+  }
+}
+
+function scheduleAutoScanner(delayMs = AUTO_SCANNER_RETRY_MS) {
+  clearAutoScanTimer();
+  if (!autoTradeEnabled || autoOpenContractId) return;
+  autoScanTimer = setTimeout(() => {
+    autoScanTimer = null;
+    runAutoScannerCycle().catch((err) => {
+      setAutoTradeStatus(err?.message || "scan failed", true);
+      scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+    });
+  }, Math.max(0, delayMs));
+}
+
+function getCurrentCandleEndDuration(timeframeSeconds) {
+  const nowSec = Math.floor(Date.now() / 1000);
+  const step = Math.max(1, Number(timeframeSeconds) || DEFAULT_TIMEFRAME_SEC);
+  let expiry = Math.ceil(nowSec / step) * step;
+  if (expiry <= nowSec) expiry += step;
+  const durationSec = expiry - nowSec;
+  if (durationSec <= minDurationSec) return null;
+  return { expiry, durationSec };
+}
+
+async function scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds) {
+  const candles = await getMainSignalCandles(symbolInfo.symbol, timeframeSeconds);
+  const readiness = getScannerHistoryReadiness(candles, timeframeSeconds);
+  if (!readiness.ready) return null;
+  const score = scoreMarketWithIndicators(indicators, candles, timeframeSeconds);
+  if (!score || score.confidence < AUTO_SCANNER_MIN_CONFIDENCE) return null;
+  return {
+    ...score,
+    symbol: symbolInfo.symbol,
+    displayName: symbolInfo.display_name || symbolInfo.symbol,
+    market: symbolInfo.market_display_name || symbolInfo.market || "Market",
+  };
+}
+
+async function findAutoScannerBestMarket(indicators, timeframeSeconds) {
+  const symbols = getRiseFallScannerSymbols();
+  const results = [];
+  const batchSize = 4;
+  for (let i = 0; i < symbols.length; i += batchSize) {
+    const batch = symbols.slice(i, i + batchSize);
+    const batchResults = await Promise.all(batch.map(async (symbolInfo) => {
+      try {
+        return await scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds);
+      } catch {
+        return null;
+      }
+    }));
+    batchResults.filter(Boolean).forEach((item) => results.push(item));
+    results.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
+    setAutoTradeStatus(`scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best ${results[0]?.displayName || "--"}`);
+  }
+  return results[0] || null;
+}
+
+async function confirmAutoScannerMarket(candidate, indicators, timeframeSeconds) {
+  if (!candidate?.symbol) return null;
+  const symbolInfo = getRiseFallScannerSymbols().find((item) => item.symbol === candidate.symbol) || {
+    symbol: candidate.symbol,
+    display_name: candidate.displayName,
+    market_display_name: candidate.market,
+  };
+  const confirmed = await scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds);
+  if (!confirmed) return null;
+  if (confirmed.direction !== candidate.direction) return null;
+  return confirmed;
+}
+
+async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) {
+  const currentCandle = getCurrentCandleEndDuration(timeframeSeconds);
+  if (!currentCandle) {
+    throw new Error("current candle is too close to expiry");
+  }
+  const proposal = await getProposal({
+    symbol: signal.symbol,
+    contractType: signal.direction,
+    barrier: null,
+    stake,
+    durationSec: currentCandle.durationSec,
+    durationUnit: "s",
+  });
+  const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
+  await authorizeWithToken(account.token);
+  const res = await wsRequest({ buy: proposal.id, price: askPrice });
+  const buy = res.buy;
+  const contractId = buy?.contract_id ?? null;
+  const buyPrice = buy?.buy_price ?? askPrice;
+  if (!contractId) throw new Error("buy did not return a contract id");
+  autoOpenContractId = contractId;
+  autoTradeResults.unshift({
+    time: Date.now(),
+    success: true,
+    contractId,
+    price: buyPrice,
+    profit: null,
+    direction: signal.direction,
+    isSold: false,
+    expiry: currentCandle.expiry,
+    symbol: signal.displayName || signal.symbol,
+  });
+  autoTradeResults = autoTradeResults.slice(0, 20);
+  renderAutoTradeResults();
+  subscribeOpenContract(contractId);
+  autoTradeSessionCount += 1;
+  setAutoTradeStatus(`opened ${signal.displayName || signal.symbol} ${signal.direction === "CALL" ? "Rise" : "Fall"} until candle end`);
+}
+
+async function runAutoScannerCycle() {
+  if (!autoTradeEnabled || autoScannerInFlight || autoOpenContractId) return;
   if (autoTradeSessionCount >= MAX_AUTO_TRADES_PER_SESSION) {
-    setStatus(`Auto trade session limit reached (${MAX_AUTO_TRADES_PER_SESSION})`, true);
+    setAutoTradeStatus(`session limit reached (${MAX_AUTO_TRADES_PER_SESSION})`, true);
     return;
   }
   if (!autoTradeLoginId) {
-    setStatus("Select an account for auto trade", true);
+    setAutoTradeStatus("select an account first", true);
     return;
   }
-  const signal = lastSignalState.signal;
-  const confidence = Number(lastSignalState.confidence || 0);
-  const direction = lastSignalState.tradeDirection;
-
-  if (!lastSignalState.allowEntry || !signal.startsWith("ENTER NOW") || !direction || confidence < 60) return;
-  if (calcInFlight) return;
-
-  if (currentDirection !== direction) {
-    setDirection(direction, { refresh: false });
-    await refreshProposals();
-  }
-
-  const proposal = proposals[0];
-  if (!proposal || !proposal.proposalId) {
-    setStatus("Auto trade: proposal not ready", true);
-    return;
-  }
-
   const account = storedAccounts.find((acc) => acc.loginid === autoTradeLoginId);
   if (!account) {
-    setStatus("Auto trade: account not found", true);
+    setAutoTradeStatus("account not found", true);
+    return;
+  }
+  const indicators = getMarketScannerIndicators();
+  if (!indicators.length) {
+    setAutoTradeStatus("no scanner indicator is selected", true);
     return;
   }
 
-  const price = proposal.askPrice ?? Number(stakeInput?.value || "0");
-  setStatus("Auto trade: placing...");
-  authorizeWithToken(account.token)
-    .then(() => wsRequest({ buy: proposal.proposalId, price }))
-    .then((res) => {
-      const buy = res.buy;
-      const contractId = buy?.contract_id ?? "--";
-      const buyPrice = buy?.buy_price ?? price;
-      autoTradeResults.unshift({
-        time: Date.now(),
-        success: true,
-        contractId,
-        price: buyPrice,
-        profit: null,
-        direction,
-        isSold: false,
-        expiry: null,
-      });
-      autoTradeResults = autoTradeResults.slice(0, 20);
-      renderAutoTradeResults();
-      if (contractId && contractId !== "--") {
-        subscribeOpenContract(contractId);
-      }
-      autoTradeSessionCount += 1;
-      setStatus(`Auto trade opened. Contract ${contractId}`);
-    })
-    .catch((err) => {
-      autoTradeResults.unshift({
-        time: Date.now(),
-        success: false,
-        contractId: null,
-        price: price,
-        profit: null,
-        direction,
-        isSold: true,
-        expiry: null,
-      });
-      autoTradeResults = autoTradeResults.slice(0, 20);
-      renderAutoTradeResults();
-      setStatus(err?.message || "Auto trade failed", true);
-    });
+  autoScannerInFlight = true;
+  try {
+    const stake = getAutoTradeStake();
+    const timeframeSeconds = getAutoTradeTimeframeSeconds();
+    const candidate = await findAutoScannerBestMarket(indicators, timeframeSeconds);
+    if (!candidate) {
+      setAutoTradeStatus("no valid scanner signal yet");
+      scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+      return;
+    }
+    setAutoTradeStatus(`confirming ${candidate.displayName || candidate.symbol}`);
+    const confirmed = await confirmAutoScannerMarket(candidate, indicators, timeframeSeconds);
+    if (!confirmed) {
+      setAutoTradeStatus("best signal changed on confirmation; waiting");
+      scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+      return;
+    }
+    await buyAutoScannerProposal(confirmed, account, stake, timeframeSeconds);
+  } catch (err) {
+    setAutoTradeStatus(err?.message || "trade failed", true);
+    scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+  } finally {
+    autoScannerInFlight = false;
+  }
+}
+
+async function tryAutoTrade() {
+  if (!autoTradeEnabled) return;
+  scheduleAutoScanner(0);
 }
 
 function renderMiniChart(candles) {
@@ -9616,6 +9733,14 @@ function populateTimeframeOptions() {
   updateTimeframeUI();
 }
 
+function populateAutoTimeframeOptions() {
+  if (!autoTimeframeSelectEl) return;
+  autoTimeframeSelectEl.innerHTML = TIMEFRAME_OPTIONS
+    .map((option) => `<option value="${option.seconds}">${option.label}</option>`)
+    .join("");
+  autoTimeframeSelectEl.value = String(autoTradeTimeframeSeconds);
+}
+
 function populateMarketScannerIndicators() {
   if (!marketScannerIndicatorSelectEl) return;
   marketScannerIndicatorSelectEl.innerHTML = MARKET_SCANNER_INDICATORS
@@ -11206,11 +11331,18 @@ function getRiseFallScannerSymbols() {
 
 function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimeframeSeconds()) {
   const sourceCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
-  if (sourceCandles.length < 90) return null;
+  if (sourceCandles.length < MARKET_SCANNER_MIN_ENTRY_CANDLES) return null;
   const frameSet = getMtfTimeframeSet(baseSeconds);
   const main = aggregateCandlesByTimeframe(sourceCandles, frameSet.mainSeconds);
   const align = aggregateCandlesByTimeframe(sourceCandles, frameSet.alignSeconds);
   const entry = sourceCandles;
+  if (
+    entry.length < MARKET_SCANNER_MIN_ENTRY_CANDLES ||
+    align.length < MARKET_SCANNER_MIN_ALIGN_CANDLES ||
+    main.length < MARKET_SCANNER_MIN_MAIN_CANDLES
+  ) {
+    return null;
+  }
   const mainFrame = getMtfFrameLabel(frameSet.mainSeconds);
   const alignFrame = getMtfFrameLabel(frameSet.alignSeconds);
   const entryFrame = getMtfFrameLabel(frameSet.entrySeconds);
@@ -11302,6 +11434,72 @@ function scoreMarketWithIndicators(indicators, candles, baseSeconds = getChartTi
   };
 }
 
+function getScannerHistoryReadiness(candles, baseSeconds = getChartTimeframeSeconds()) {
+  const sourceCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  const frameSet = getMtfTimeframeSet(baseSeconds);
+  const align = aggregateCandlesByTimeframe(sourceCandles, frameSet.alignSeconds);
+  const main = aggregateCandlesByTimeframe(sourceCandles, frameSet.mainSeconds);
+  const ready = sourceCandles.length >= MARKET_SCANNER_MIN_ENTRY_CANDLES
+    && align.length >= MARKET_SCANNER_MIN_ALIGN_CANDLES
+    && main.length >= MARKET_SCANNER_MIN_MAIN_CANDLES;
+  return {
+    ready,
+    entryCount: sourceCandles.length,
+    alignCount: align.length,
+    mainCount: main.length,
+  };
+}
+
+async function fetchLatestScannerTick(symbol) {
+  const res = await wsRequest({
+    ticks_history: symbol,
+    end: "latest",
+    count: 1,
+    style: "ticks",
+  });
+  const history = res.history || {};
+  const prices = Array.isArray(history.prices) ? history.prices : [];
+  const times = Array.isArray(history.times) ? history.times : [];
+  const quote = Number(prices[prices.length - 1]);
+  const epoch = Number(times[times.length - 1]);
+  return Number.isFinite(quote) && Number.isFinite(epoch) ? { quote, epoch } : null;
+}
+
+function applyLatestTickToCandles(candles, tick, timeframeSeconds = getChartTimeframeSeconds()) {
+  const normalized = (Array.isArray(candles) ? candles : [])
+    .map(normalizeHistoryCandle)
+    .filter(Boolean)
+    .sort((a, b) => a.time - b.time);
+  if (!tick || !Number.isFinite(tick.epoch) || !Number.isFinite(tick.quote)) {
+    return normalized;
+  }
+  const timeframe = Math.max(1, Number(timeframeSeconds) || DEFAULT_TIMEFRAME_SEC);
+  const tickTime = Math.floor(tick.epoch / timeframe) * timeframe;
+  const last = normalized[normalized.length - 1];
+  if (last && tickTime < last.time) return normalized;
+  if (last && tickTime === last.time) {
+    return [
+      ...normalized.slice(0, -1),
+      {
+        ...last,
+        high: Math.max(last.high, tick.quote),
+        low: Math.min(last.low, tick.quote),
+        close: tick.quote,
+      },
+    ];
+  }
+  return [
+    ...normalized,
+    {
+      time: tickTime,
+      open: tick.quote,
+      high: tick.quote,
+      low: tick.quote,
+      close: tick.quote,
+    },
+  ];
+}
+
 function renderMarketScannerResults(results = []) {
   if (!marketScannerResultsEl) return;
   if (!results.length) {
@@ -11327,6 +11525,25 @@ function renderMarketScannerResults(results = []) {
       </button>
     `;
   }).join("");
+}
+
+async function revalidateMarketScannerResults(results, indicators) {
+  const candidates = results.slice(0, 10);
+  const revalidated = [];
+  for (const result of candidates) {
+    try {
+      const candles = await getMainSignalCandles(result.symbol);
+      const readiness = getScannerHistoryReadiness(candles);
+      if (!readiness.ready) continue;
+      const score = scoreMarketWithIndicators(indicators, candles);
+      if (!score) continue;
+      revalidated.push({
+        ...result,
+        ...score,
+      });
+    } catch {}
+  }
+  return revalidated.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
 }
 
 async function scanMarketsBySelectedIndicator() {
@@ -11356,6 +11573,7 @@ async function scanMarketsBySelectedIndicator() {
   renderMarketScannerResults([]);
 
   const results = [];
+  let skippedForHistory = 0;
   const batchSize = 4;
   try {
     for (let i = 0; i < symbols.length; i += batchSize) {
@@ -11363,6 +11581,10 @@ async function scanMarketsBySelectedIndicator() {
       const batchResults = await Promise.all(batch.map(async (symbolInfo) => {
         try {
           const candles = await getMainSignalCandles(symbolInfo.symbol);
+          const readiness = getScannerHistoryReadiness(candles);
+          if (!readiness.ready) {
+            return { skipped: true };
+          }
           const score = scoreMarketWithIndicators(indicators, candles);
           if (!score) return null;
           return {
@@ -11375,17 +11597,35 @@ async function scanMarketsBySelectedIndicator() {
           return null;
         }
       }));
-      batchResults.filter(Boolean).forEach((item) => results.push(item));
+      batchResults.filter(Boolean).forEach((item) => {
+        if (item.skipped) {
+          skippedForHistory += 1;
+        } else {
+          results.push(item);
+        }
+      });
       results.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
       renderMarketScannerResults(results);
       if (marketScannerStatusEl) {
-        marketScannerStatusEl.textContent = `Scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best: ${results[0]?.displayName || "--"}.`;
+        const skipText = skippedForHistory ? ` • skipped ${skippedForHistory} loading` : "";
+        marketScannerStatusEl.textContent = `Scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best: ${results[0]?.displayName || "--"}.${skipText}`;
       }
+    }
+    if (results.length) {
+      if (marketScannerStatusEl) {
+        marketScannerStatusEl.textContent = "Validating top scan results with latest ticks...";
+      }
+      const revalidated = await revalidateMarketScannerResults(results, indicators);
+      results.length = 0;
+      revalidated.forEach((item) => results.push(item));
+      renderMarketScannerResults(results);
     }
     if (marketScannerStatusEl) {
       marketScannerStatusEl.textContent = results.length
         ? `Scan complete. Best market: ${results[0].displayName} (${results[0].direction === "CALL" ? "Rise" : "Fall"}, ${results[0].confidence}%).`
-        : `Scan complete. No current setup from ${indicators.length === 1 ? getChartIndicatorLabel(indicators[0]) : "the attached indicators"}.`;
+        : skippedForHistory
+          ? `Scan complete. ${skippedForHistory} markets did not have enough loaded history yet.`
+          : `Scan complete. No current setup from ${indicators.length === 1 ? getChartIndicatorLabel(indicators[0]) : "the attached indicators"}.`;
     }
   } finally {
     marketScannerInFlight = false;
@@ -11396,9 +11636,8 @@ async function scanMarketsBySelectedIndicator() {
   }
 }
 
-async function getMainSignalCandles(symbol) {
-  const live = currentSymbol === symbol ? getBuiltCandles() : [];
-  const baseSeconds = getChartTimeframeSeconds();
+async function getMainSignalCandles(symbol, baseSeconds = getChartTimeframeSeconds()) {
+  const live = currentSymbol === symbol && Number(baseSeconds) === getChartTimeframeSeconds() ? getBuiltCandles() : [];
   const historical = live.length >= 700 ? [] : await fetchCandlesForGranularity(symbol, baseSeconds, 900);
   const combined = [...historical, ...live];
   const byTime = new Map();
@@ -11406,7 +11645,15 @@ async function getMainSignalCandles(symbol) {
     const normalized = normalizeHistoryCandle(candle);
     if (normalized) byTime.set(normalized.time, normalized);
   });
-  return [...byTime.values()].sort((a, b) => a.time - b.time).slice(-900);
+  const sorted = [...byTime.values()].sort((a, b) => a.time - b.time).slice(-900);
+  try {
+    const latestTick = await fetchLatestScannerTick(symbol);
+    const withLatestTick = applyLatestTickToCandles(sorted, latestTick, baseSeconds).slice(-900);
+    if (withLatestTick.length) setCachedCandles(symbol, baseSeconds, withLatestTick);
+    return withLatestTick;
+  } catch {
+    return sorted;
+  }
 }
 
 async function lockMainSignal() {
@@ -12800,11 +13047,12 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   const autoIndex = autoTradeResults.findIndex((t) => t.contractId === contractId);
   if (index === -1 && autoIndex === -1) return;
 
-  const buyPrice = contract.buy_price ?? tradeResults[index].price ?? null;
+  const previousTrade = index !== -1 ? tradeResults[index] : autoIndex !== -1 ? autoTradeResults[autoIndex] : null;
+  const buyPrice = contract.buy_price ?? previousTrade?.price ?? null;
   const sellPrice = contract.sell_price ?? null;
-  const profit = contract.profit ?? (sellPrice != null && buyPrice != null ? sellPrice - buyPrice : tradeResults[index].profit ?? null);
+  const profit = contract.profit ?? (sellPrice != null && buyPrice != null ? sellPrice - buyPrice : previousTrade?.profit ?? null);
   const isSold = contract.is_sold ?? contract.status === "sold";
-  const expiry = contract.date_expiry ?? tradeResults[index].expiry ?? null;
+  const expiry = contract.date_expiry ?? previousTrade?.expiry ?? null;
 
   if (index !== -1) {
     tradeResults[index] = {
@@ -12825,6 +13073,12 @@ function handleOpenContractUpdate(contract, subscriptionId) {
       expiry,
       success: isSold ? (profit != null ? profit >= 0 : autoTradeResults[autoIndex].success) : autoTradeResults[autoIndex].success,
     };
+    if (isSold && String(autoOpenContractId || "") === String(contractId)) {
+      autoOpenContractId = null;
+      if (autoTradeEnabled) {
+        scheduleAutoScanner(AUTO_SCANNER_AFTER_CLOSE_MS);
+      }
+    }
   }
 
   if (isSold && subscriptionId) {
@@ -13728,6 +13982,7 @@ function renderTradeResults() {
     return `
       <div class="trade-btn ${item.direction === "CALL" ? "higher" : "lower"}">
         <div class="trade-title">${status} • ${time}${timeLeft}</div>
+        <div class="trade-meta">Market: ${escapeHtml(item.symbol || "--")}</div>
         <div class="trade-meta">Contract: ${item.contractId || "--"}</div>
         <div class="trade-meta">Price: ${priceText} • Profit: ${profitText}</div>
       </div>
@@ -13874,6 +14129,8 @@ function init() {
   resetChartBtn = document.getElementById("resetChart");
   autoToggleEl = document.getElementById("autoToggle");
   autoAccountSelect = document.getElementById("autoAccountSelect");
+  autoStakeInputEl = document.getElementById("autoStakeInput");
+  autoTimeframeSelectEl = document.getElementById("autoTimeframeSelect");
   autoResultsEl = document.getElementById("autoResults");
   autoBodyEl = document.getElementById("autoBody");
   autoSectionEl = document.getElementById("autoSection");
@@ -13931,6 +14188,7 @@ function init() {
   symbolSelect.addEventListener("change", onSymbolChange);
   populateRiseFallExpiryOptions();
   populateTimeframeOptions();
+  populateAutoTimeframeOptions();
   populateMarketScannerIndicators();
   populateTrendModeOptions();
   chartDrawingStore = loadChartDrawingStore();
@@ -14607,6 +14865,26 @@ function init() {
     autoTradeEnabled = autoToggleEl.checked;
     if (autoTradeEnabled && !storedAccounts.length) {
       window.location.href = OAUTH_URL;
+      return;
+    }
+    if (autoTradeEnabled) {
+      autoTradeStake = getAutoTradeStake();
+      autoTradeTimeframeSeconds = getAutoTradeTimeframeSeconds();
+      scheduleAutoScanner(0);
+    } else {
+      clearAutoScanTimer();
+      setAutoTradeStatus("disabled");
+    }
+  });
+
+  autoStakeInputEl?.addEventListener("input", () => {
+    autoTradeStake = getAutoTradeStake();
+  });
+
+  autoTimeframeSelectEl?.addEventListener("change", () => {
+    autoTradeTimeframeSeconds = getAutoTradeTimeframeSeconds();
+    if (autoTradeEnabled && !autoOpenContractId) {
+      scheduleAutoScanner(0);
     }
   });
 
@@ -14619,6 +14897,9 @@ function init() {
         activeToken = account.token;
         authorizeWithToken(activeToken).catch(() => {});
         renderAccountList();
+        if (autoTradeEnabled && !autoOpenContractId) {
+          scheduleAutoScanner(0);
+        }
       }
     }
   });

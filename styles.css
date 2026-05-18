@@ -1496,7 +1496,7 @@ button.chart-indicator-select {
   display: grid;
   gap: 10px;
   transition: max-height 200ms ease, opacity 200ms ease;
-  max-height: 160px;
+  max-height: 260px;
   opacity: 1;
   overflow: hidden;
 }
