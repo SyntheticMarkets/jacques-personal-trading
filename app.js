@@ -105,6 +105,7 @@ let storedAccounts = [];
 let activeToken = null;
 let activeLoginId = null;
 let isAuthorized = false;
+let balanceSubscriptionLoginId = null;
 let tradeResults = [];
 let openContractSubs = new Map();
 let autoTradeResults = [];
@@ -6746,7 +6747,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
     durationUnit: "s",
   });
   const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
-  await authorizeWithToken(account.token);
+  await authorizeWithToken(account.token, { subscribeBalance: false });
   const res = await wsRequest({ buy: proposal.id, price: askPrice });
   const buy = res.buy;
   const contractId = buy?.contract_id ?? null;
@@ -10031,6 +10032,7 @@ function connectWS() {
     stopPing();
     stopTickWatchdog();
     tickStreamId = null;
+    balanceSubscriptionLoginId = null;
     scheduleReconnect();
   });
 
@@ -10039,6 +10041,7 @@ function connectWS() {
     stopPing();
     stopTickWatchdog();
     tickStreamId = null;
+    balanceSubscriptionLoginId = null;
     scheduleReconnect(true);
   });
 
@@ -13090,11 +13093,24 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   renderAutoTradeResults();
 }
 
-async function authorizeWithToken(token) {
+async function authorizeWithToken(token, options = {}) {
   if (!token) return;
-  await wsRequest({ authorize: token });
+  const res = await wsRequest({ authorize: token });
+  const loginId = res.authorize?.loginid || activeLoginId || "";
   isAuthorized = true;
-  await wsRequest({ balance: 1, subscribe: 1 });
+  if (options.subscribeBalance === false) return res.authorize;
+  if (loginId && balanceSubscriptionLoginId === loginId) return res.authorize;
+  try {
+    await wsRequest({ balance: 1, subscribe: 1 });
+    balanceSubscriptionLoginId = loginId;
+  } catch (err) {
+    const message = err?.message || "";
+    if (!message.toLowerCase().includes("already subscribed to balance")) {
+      throw err;
+    }
+    balanceSubscriptionLoginId = loginId;
+  }
+  return res.authorize;
 }
 
 function updateAccountSummary(balance) {
@@ -14940,6 +14956,7 @@ function init() {
     activeToken = null;
     activeLoginId = null;
     isAuthorized = false;
+    balanceSubscriptionLoginId = null;
     if (accountSummary) {
       accountSummary.innerHTML = "<span class=\"acct-label\">Log in</span>";
     }
