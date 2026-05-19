@@ -118,6 +118,7 @@ let autoScannerInFlight = false;
 let autoOpenContractId = null;
 let autoScanTimer = null;
 let autoContractCloseTimer = null;
+let autoScannerWatchdogTimer = null;
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -6665,6 +6666,26 @@ function clearAutoScanTimer() {
   }
 }
 
+function clearAutoScannerWatchdog() {
+  if (autoScannerWatchdogTimer) {
+    clearInterval(autoScannerWatchdogTimer);
+    autoScannerWatchdogTimer = null;
+  }
+}
+
+function ensureAutoScannerWatchdog() {
+  if (autoScannerWatchdogTimer) return;
+  autoScannerWatchdogTimer = setInterval(() => {
+    if (!autoTradeEnabled) {
+      clearAutoScannerWatchdog();
+      return;
+    }
+    if (!autoOpenContractId && !autoScannerInFlight && !autoScanTimer) {
+      scheduleAutoScanner(0);
+    }
+  }, 5000);
+}
+
 function clearAutoContractCloseTimer() {
   if (autoContractCloseTimer) {
     clearTimeout(autoContractCloseTimer);
@@ -6673,8 +6694,8 @@ function clearAutoContractCloseTimer() {
 }
 
 function scheduleAutoScanner(delayMs = AUTO_SCANNER_RETRY_MS) {
-  clearAutoScanTimer();
   if (!autoTradeEnabled || autoOpenContractId) return;
+  if (autoScanTimer) return;
   autoScanTimer = setTimeout(() => {
     autoScanTimer = null;
     runAutoScannerCycle().catch((err) => {
@@ -6844,20 +6865,35 @@ async function runAutoScannerCycle() {
     const candidate = await findAutoScannerBestMarket(indicators, timeframeSeconds);
     if (!candidate) {
       setAutoTradeStatus("no valid scanner signal yet");
-      scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+      autoScanTimer = setTimeout(() => {
+        autoScanTimer = null;
+        runAutoScannerCycle().catch((err) => {
+          setAutoTradeStatus(err?.message || "scan failed", true);
+        });
+      }, AUTO_SCANNER_RETRY_MS);
       return;
     }
     setAutoTradeStatus(`confirming ${candidate.displayName || candidate.symbol}`);
     const confirmed = await confirmAutoScannerMarket(candidate, indicators, timeframeSeconds);
     if (!confirmed) {
       setAutoTradeStatus("best signal changed on confirmation; waiting");
-      scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+      autoScanTimer = setTimeout(() => {
+        autoScanTimer = null;
+        runAutoScannerCycle().catch((err) => {
+          setAutoTradeStatus(err?.message || "scan failed", true);
+        });
+      }, AUTO_SCANNER_RETRY_MS);
       return;
     }
     await buyAutoScannerProposal(confirmed, account, stake, timeframeSeconds);
   } catch (err) {
     setAutoTradeStatus(err?.message || "trade failed", true);
-    scheduleAutoScanner(AUTO_SCANNER_RETRY_MS);
+    autoScanTimer = setTimeout(() => {
+      autoScanTimer = null;
+      runAutoScannerCycle().catch((scanErr) => {
+        setAutoTradeStatus(scanErr?.message || "scan failed", true);
+      });
+    }, AUTO_SCANNER_RETRY_MS);
   } finally {
     autoScannerInFlight = false;
   }
@@ -14931,10 +14967,12 @@ function init() {
     if (autoTradeEnabled) {
       autoTradeStake = getAutoTradeStake();
       autoTradeTimeframeSeconds = getAutoTradeTimeframeSeconds();
+      ensureAutoScannerWatchdog();
       scheduleAutoScanner(0);
     } else {
       clearAutoScanTimer();
       clearAutoContractCloseTimer();
+      clearAutoScannerWatchdog();
       autoOpenContractId = null;
       setAutoTradeStatus("disabled");
     }
