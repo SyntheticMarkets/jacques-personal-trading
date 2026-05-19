@@ -1483,9 +1483,9 @@ button.chart-indicator-select {
   display: grid;
   gap: 10px;
   transition: max-height 200ms ease, opacity 200ms ease;
-  max-height: 520px;
+  max-height: 760px;
   opacity: 1;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .auto-section.collapsed {
@@ -1535,10 +1535,11 @@ button.chart-indicator-select {
 }
 
 .auto-results-list {
-  max-height: 160px;
+  max-height: 420px;
   transition: max-height 200ms ease, opacity 200ms ease;
   opacity: 1;
-  overflow: hidden;
+  overflow-y: auto;
+  padding-right: 2px;
 }
 
 .auto-results-list.collapsed {
@@ -1781,6 +1782,16 @@ button.chart-indicator-select {
   .phone.desktop-chart-layout .desktop-sidebar-extra > #proposalsCard.mode-rise-fall .trade-list {
     display: grid !important;
     max-height: 280px;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra .auto-section {
+    max-height: none;
+    overflow: visible;
+  }
+
+  .phone.desktop-chart-layout .desktop-sidebar-extra .auto-results-list {
+    max-height: 460px;
+    overflow-y: auto;
   }
 
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
