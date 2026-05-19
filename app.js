@@ -515,7 +515,6 @@ const TOP_DOWN_CACHE_MAX_AGE_MS = 45000;
 const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
-const MAX_AUTO_TRADES_PER_SESSION = 100;
 const AUTO_SCANNER_MIN_CONFIDENCE = 70;
 const AUTO_SCANNER_RETRY_MS = 15000;
 const AUTO_SCANNER_AFTER_CLOSE_MS = 3000;
@@ -6873,7 +6872,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
     expiry: currentCandle.expiry,
     symbol: signal.displayName || signal.symbol,
   });
-  autoTradeResults = autoTradeResults.slice(0, 20);
+  autoTradeResults = autoTradeResults.slice(0, 100);
   renderAutoTradeResults();
   subscribeOpenContract(contractId);
   scheduleAutoContractCloseCheck(contractId, currentCandle.expiry);
@@ -6883,10 +6882,6 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
 
 async function runAutoScannerCycle() {
   if (!autoTradeEnabled || autoScannerInFlight || autoOpenContractId) return;
-  if (autoTradeSessionCount >= MAX_AUTO_TRADES_PER_SESSION) {
-    setAutoTradeStatus(`session limit reached (${MAX_AUTO_TRADES_PER_SESSION})`, true);
-    return;
-  }
   if (!autoTradeLoginId) {
     setAutoTradeStatus("select an account first", true);
     return;
