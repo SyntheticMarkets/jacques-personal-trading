@@ -119,6 +119,7 @@ let autoOpenContractId = null;
 let autoScanTimer = null;
 let autoContractCloseTimer = null;
 let autoScannerWatchdogTimer = null;
+let autoContractDurationCache = new Map();
 let sigTrendEl;
 let sigDivEl;
 let sigSweepEl;
@@ -518,6 +519,7 @@ const MAX_AUTO_TRADES_PER_SESSION = 5;
 const AUTO_SCANNER_MIN_CONFIDENCE = 70;
 const AUTO_SCANNER_RETRY_MS = 15000;
 const AUTO_SCANNER_AFTER_CLOSE_MS = 3000;
+const AUTO_CONTRACT_DURATION_CACHE_MS = 10 * 60 * 1000;
 const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK", "SMC", "HEIKEN", "RENKO", "MACD", "STOCH"];
 const DRAWING_TOOL_OPTIONS = ["SELECT", "TRENDLINE", "HLINE", "HRAY", "RECT", "FIB"];
 const DRAWING_STORAGE_KEY = "deriv_chart_drawings_v1";
@@ -6740,17 +6742,57 @@ async function checkAutoOpenContractClosed(contractId) {
   }
 }
 
-function getCurrentCandleEndDuration(timeframeSeconds) {
+function getCurrentCandleEndDuration(timeframeSeconds, durationLimits = null) {
   const nowSec = Math.floor(Date.now() / 1000);
   const step = Math.max(1, Number(timeframeSeconds) || DEFAULT_TIMEFRAME_SEC);
   let expiry = Math.ceil(nowSec / step) * step;
   if (expiry <= nowSec) expiry += step;
   const durationSec = expiry - nowSec;
-  if (durationSec <= minDurationSec) return null;
+  const minSec = Number(durationLimits?.minSec ?? minDurationSec);
+  const maxSec = Number(durationLimits?.maxSec ?? Infinity);
+  if (durationSec < minSec) return null;
+  if (Number.isFinite(maxSec) && durationSec > maxSec) return null;
   return { expiry, durationSec };
 }
 
+function extractRiseFallDurationLimits(contracts) {
+  const list = Array.isArray(contracts) ? contracts : [];
+  let minSec = Infinity;
+  let maxSec = 0;
+  list.forEach((item) => {
+    if (item?.contract_type !== "CALL" && item?.contract_type !== "PUT") return;
+    const min = parseApiDuration(item.min_contract_duration ?? item.min_duration ?? item.minimum_duration);
+    const max = parseApiDuration(item.max_contract_duration ?? item.max_duration ?? item.maximum_duration);
+    if (min?.unit !== "t" && Number.isFinite(min?.seconds)) {
+      minSec = Math.min(minSec, min.seconds);
+    }
+    if (max?.unit !== "t" && Number.isFinite(max?.seconds)) {
+      maxSec = Math.max(maxSec, max.seconds);
+    }
+  });
+  return {
+    minSec: Number.isFinite(minSec) ? minSec : minDurationSec,
+    maxSec: maxSec > 0 ? maxSec : Infinity,
+  };
+}
+
+async function getAutoContractDurationLimits(symbol) {
+  if (!symbol) return { minSec: minDurationSec, maxSec: Infinity };
+  const cached = autoContractDurationCache.get(symbol);
+  if (cached && Date.now() - cached.updatedAt < AUTO_CONTRACT_DURATION_CACHE_MS) {
+    return cached.limits;
+  }
+  const res = await wsRequest({ contracts_for: symbol });
+  const list = res.contracts_for?.available || res.contracts_for?.contracts || res.contracts_for?.available_contracts || [];
+  const limits = extractRiseFallDurationLimits(list);
+  autoContractDurationCache.set(symbol, { limits, updatedAt: Date.now() });
+  return limits;
+}
+
 async function scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds) {
+  const durationLimits = await getAutoContractDurationLimits(symbolInfo.symbol);
+  const tradeWindow = getCurrentCandleEndDuration(timeframeSeconds, durationLimits);
+  if (!tradeWindow) return null;
   const candles = await getMainSignalCandles(symbolInfo.symbol, timeframeSeconds);
   const readiness = getScannerHistoryReadiness(candles, timeframeSeconds);
   if (!readiness.ready) return null;
@@ -6761,6 +6803,7 @@ async function scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds) 
     symbol: symbolInfo.symbol,
     displayName: symbolInfo.display_name || symbolInfo.symbol,
     market: symbolInfo.market_display_name || symbolInfo.market || "Market",
+    durationLimits,
   };
 }
 
@@ -6798,9 +6841,10 @@ async function confirmAutoScannerMarket(candidate, indicators, timeframeSeconds)
 }
 
 async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) {
-  const currentCandle = getCurrentCandleEndDuration(timeframeSeconds);
+  const durationLimits = signal.durationLimits || await getAutoContractDurationLimits(signal.symbol);
+  const currentCandle = getCurrentCandleEndDuration(timeframeSeconds, durationLimits);
   if (!currentCandle) {
-    throw new Error("current candle is too close to expiry");
+    throw new Error(`current candle end is below this market's minimum duration (${formatDurationLabel(durationLimits.minSec)})`);
   }
   const proposal = await getProposal({
     symbol: signal.symbol,
