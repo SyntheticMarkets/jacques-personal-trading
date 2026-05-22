@@ -1483,7 +1483,7 @@ button.chart-indicator-select {
   display: grid;
   gap: 10px;
   transition: max-height 200ms ease, opacity 200ms ease;
-  max-height: 760px;
+  max-height: none;
   opacity: 1;
   overflow: visible;
 }
@@ -1494,11 +1494,11 @@ button.chart-indicator-select {
 
 .auto-row {
   display: grid;
-  gap: 10px;
+  gap: 8px;
   transition: max-height 200ms ease, opacity 200ms ease;
-  max-height: 260px;
+  max-height: none;
   opacity: 1;
-  overflow: hidden;
+  overflow: visible;
 }
 
 .auto-row.collapsed {
