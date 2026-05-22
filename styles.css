@@ -808,7 +808,7 @@ button.small {
 
 .market-scanner-controls {
   display: grid;
-  grid-template-columns: 1fr minmax(120px, 0.42fr);
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr) minmax(120px, 0.42fr);
   gap: 8px;
 }
 

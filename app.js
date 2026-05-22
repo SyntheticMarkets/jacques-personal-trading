@@ -135,6 +135,7 @@ let sigWhiteEl;
 let generateMainSignalBtn;
 let mainSignalStatusEl;
 let marketScannerIndicatorSelectEl;
+let marketScannerScopeSelectEl;
 let scanMarketsBtnEl;
 let marketScannerStatusEl;
 let marketScannerResultsEl;
@@ -177,6 +178,7 @@ let autoToggleEl;
 let autoAccountSelect;
 let autoStakeInputEl;
 let autoTimeframeSelectEl;
+let autoMarketScopeSelectEl;
 let autoResultsEl;
 let autoBodyEl;
 let autoSectionEl;
@@ -266,6 +268,7 @@ const TIMEFRAME_OPTIONS = [
 const DEFAULT_TIMEFRAME_SEC = 60;
 const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
+  { value: "INSTITUTIONAL_FOREX_ENGINE", label: "15m Institutional Forex Engine" },
   { value: "INST_EXECUTION_MODEL", label: "Institutional Model" },
   { value: "INST_LEVEL_BEHAVIOR", label: "Institutional Level Behavior" },
   { value: "ALGO_BEHAVIOR_ENGINE", label: "Algo Behavior Engine" },
@@ -299,7 +302,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "IEM",
     label: "Institutional",
     category: "SIGNALS",
-    items: ["INST_EXECUTION_MODEL", "INST_LEVEL_BEHAVIOR"],
+    items: ["INSTITUTIONAL_FOREX_ENGINE", "INST_EXECUTION_MODEL", "INST_LEVEL_BEHAVIOR"],
   },
   {
     key: "AB",
@@ -387,6 +390,7 @@ const CHART_INDICATOR_GROUPS = [
   },
 ];
 const MARKET_SCANNER_INDICATORS = [
+  "INSTITUTIONAL_FOREX_ENGINE",
   "INST_EXECUTION_MODEL",
   "INST_LEVEL_BEHAVIOR",
   "ALGO_BEHAVIOR_ENGINE",
@@ -515,6 +519,9 @@ const TOP_DOWN_CACHE_MAX_AGE_MS = 45000;
 const SIGNAL_STRUCTURE_LOOKBACK = 20;
 const SIGNAL_EQUAL_LEVEL_LOOKBACK = 12;
 const SIGNAL_ENTRY_SECOND = 50;
+const INSTITUTIONAL_SIGNAL_DB_KEY = "institutional_signal_engine_v1";
+const INSTITUTIONAL_EXPIRY_SECONDS = 15 * 60;
+const INSTITUTIONAL_MAX_DB_RECORDS = 500;
 const AUTO_SCANNER_MIN_CONFIDENCE = 70;
 const AUTO_SCANNER_RETRY_MS = 15000;
 const AUTO_SCANNER_AFTER_CLOSE_MS = 3000;
@@ -4211,6 +4218,442 @@ function buildInstitutionalLevelBehaviorModel(candles, config = {}) {
   return result;
 }
 
+function loadInstitutionalSignalDb() {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(INSTITUTIONAL_SIGNAL_DB_KEY) || "[]");
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveInstitutionalSignalDb(records) {
+  try {
+    const trimmed = (Array.isArray(records) ? records : [])
+      .slice(-INSTITUTIONAL_MAX_DB_RECORDS);
+    localStorage.setItem(INSTITUTIONAL_SIGNAL_DB_KEY, JSON.stringify(trimmed));
+  } catch {
+    // Ignore storage failures; the signal engine still runs without learning history.
+  }
+}
+
+function getInstitutionalSessionState(epochSec = Math.floor(Date.now() / 1000)) {
+  const key = getKillzoneKey(epochSec);
+  const active = key === "LONDON" || key === "NYAM" || key === "NYPM";
+  const label =
+    key === "LONDON" ? "London" :
+    key === "NYAM" || key === "NYPM" ? "New York" :
+    key === "ASIA" ? "Asia" :
+    "Low liquidity";
+  const score = key === "LONDON" ? 1 : key === "NYAM" ? 0.95 : key === "NYPM" ? 0.82 : key === "ASIA" ? 0.35 : 0.2;
+  return { key, label, active, score };
+}
+
+function buildInstitutionalBias(candles) {
+  if (!Array.isArray(candles) || candles.length < 18) {
+    return { trend: "RANGE", strength: 0, label: "building" };
+  }
+  const structure = buildICTStructureAnalysis(candles, 3);
+  const latestEvents = structure.events.slice(-4);
+  const lastHigh = structure.pivotHighs[structure.pivotHighs.length - 1] || null;
+  const prevHigh = structure.pivotHighs[structure.pivotHighs.length - 2] || null;
+  const lastLow = structure.pivotLows[structure.pivotLows.length - 1] || null;
+  const prevLow = structure.pivotLows[structure.pivotLows.length - 2] || null;
+  const closeStructure = assessCloseStructure(candles);
+  const emaTrend = detectEmaTrend(candles);
+  let bull = 0;
+  let bear = 0;
+
+  latestEvents.forEach((event) => {
+    const weight = event.type === "MSS" ? 1.25 : 1;
+    if (event.direction === "UP") bull += weight;
+    if (event.direction === "DOWN") bear += weight;
+  });
+  if (lastHigh && prevHigh && lastHigh.price > prevHigh.price) bull += 0.8;
+  if (lastLow && prevLow && lastLow.price > prevLow.price) bull += 0.8;
+  if (lastHigh && prevHigh && lastHigh.price < prevHigh.price) bear += 0.8;
+  if (lastLow && prevLow && lastLow.price < prevLow.price) bear += 0.8;
+  if (closeStructure.bias === "UP") bull += 0.7;
+  if (closeStructure.bias === "DOWN") bear += 0.7;
+  if (emaTrend.trend === "UP") bull += 0.45;
+  if (emaTrend.trend === "DOWN") bear += 0.45;
+
+  const total = bull + bear;
+  const edge = total ? Math.abs(bull - bear) / total : 0;
+  const trend = edge < 0.16 ? "RANGE" : bull > bear ? "UP" : "DOWN";
+  const lastEvent = latestEvents[latestEvents.length - 1];
+  return {
+    trend,
+    strength: clamp(edge, 0, 1),
+    bull,
+    bear,
+    label: lastEvent ? `${lastEvent.type} ${lastEvent.direction}` : closeStructure.bias,
+    structure,
+    closeStructure,
+  };
+}
+
+function enrichInstitutionalLevel(candles, level, tolerance, currentPrice) {
+  const touchState = countInstitutionalLevelTouches(candles, level, tolerance);
+  const recent = candles.slice(-80);
+  let rejectionStrength = 0;
+  let lastInteraction = touchState.lastTouchIndex;
+  recent.forEach((candle, localIndex) => {
+    const touched = candle.high >= level.price - tolerance && candle.low <= level.price + tolerance;
+    if (!touched) return;
+    const rejection = analyzeRejection(candle);
+    const range = Math.max(candle.high - candle.low, currentPip || 0.0001);
+    const wick = level.price >= currentPrice ? rejection.upperWick : rejection.lowerWick;
+    rejectionStrength = Math.max(rejectionStrength, clamp(wick / range, 0, 1));
+    lastInteraction = candles.length - recent.length + localIndex;
+  });
+  const touches = Math.max(touchState.touches, level.strength || 1);
+  return {
+    ...level,
+    touches,
+    rejectionStrength,
+    lastInteraction,
+    recentInteractionBars: lastInteraction == null ? null : candles.length - 1 - lastInteraction,
+    distance: Math.abs(currentPrice - level.price),
+    behavior: touches >= 3 ? "breakout risk" : "reversal zone",
+  };
+}
+
+function buildInstitutionalReactionZones(entryCandles, alignCandles, currentPrice) {
+  const avgRange = averageRange(entryCandles, 40) || averageRange(alignCandles, 30) || Math.max(Math.abs(currentPrice) * 0.0005, currentPip || 0.0001);
+  const tolerance = Math.max(currentPip || 0.0001, avgRange * 0.35);
+  const alignLevels = getInstitutionalReactionPoiLevels(alignCandles.slice(-160), Math.max(tolerance, (averageRange(alignCandles, 30) || avgRange) * 0.28), {
+    pivotLen: 3,
+    minTouches: 2,
+    source: "5M",
+  });
+  const entryLevels = getInstitutionalReactionPoiLevels(entryCandles.slice(-360), tolerance, {
+    pivotLen: 3,
+    minTouches: 2,
+    source: "1M",
+  });
+  const previousHighLow = [];
+  const recent = entryCandles.slice(-90);
+  if (recent.length) {
+    previousHighLow.push({ price: Math.max(...recent.slice(0, -1).map((c) => c.high)), strength: 2, source: "1M", kind: "previous-high" });
+    previousHighLow.push({ price: Math.min(...recent.slice(0, -1).map((c) => c.low)), strength: 2, source: "1M", kind: "previous-low" });
+  }
+  const merged = mergeInstitutionalPoiCandidates([alignLevels, entryLevels, previousHighLow], tolerance);
+  const levels = merged
+    .map((level) => enrichInstitutionalLevel(entryCandles.slice(-420), level, tolerance, currentPrice))
+    .sort((a, b) => a.distance - b.distance || b.touches - a.touches)
+    .slice(0, 10);
+  const activePoi = levels.find((level) => level.distance <= tolerance * 1.6) || levels[0] || null;
+  return { levels, activePoi, tolerance, avgRange };
+}
+
+function detectInstitutionalCandlePattern(candles, direction, avgRange) {
+  if (!Array.isArray(candles) || candles.length < 2 || !direction) {
+    return { confirmed: false, label: "--", quality: 0 };
+  }
+  const current = candles[candles.length - 1];
+  const previous = candles[candles.length - 2];
+  const range = Math.max(current.high - current.low, currentPip || 0.0001);
+  const body = Math.abs(current.close - current.open);
+  const upper = current.high - Math.max(current.open, current.close);
+  const lower = Math.min(current.open, current.close) - current.low;
+  const bodyRatio = body / range;
+  const momentum = clamp(body / Math.max(avgRange || range, currentPip || 0.0001), 0, 1);
+  const bullishEngulf = current.close > current.open && current.close > previous.open && current.open <= previous.close;
+  const bearishEngulf = current.close < current.open && current.close < previous.open && current.open >= previous.close;
+  const doji = bodyRatio <= 0.22 && Math.max(upper, lower) >= body * 1.6;
+  const hammer = lower >= body * 1.8 && upper <= range * 0.35 && current.close > current.open;
+  const shootingStar = upper >= body * 1.8 && lower <= range * 0.35 && current.close < current.open;
+  const strongBull = current.close > current.open && bodyRatio >= 0.62 && momentum >= 0.55;
+  const strongBear = current.close < current.open && bodyRatio >= 0.62 && momentum >= 0.55;
+
+  if (direction === "BUY") {
+    if (bullishEngulf) return { confirmed: true, label: "bullish engulfing", quality: 1 };
+    if (hammer) return { confirmed: true, label: "hammer rejection", quality: 0.86 };
+    if (strongBull) return { confirmed: true, label: "bullish momentum", quality: 0.78 };
+    if (doji && lower > upper) return { confirmed: true, label: "bullish indecision reject", quality: 0.58 };
+  }
+  if (direction === "SELL") {
+    if (bearishEngulf) return { confirmed: true, label: "bearish engulfing", quality: 1 };
+    if (shootingStar) return { confirmed: true, label: "shooting star rejection", quality: 0.86 };
+    if (strongBear) return { confirmed: true, label: "bearish momentum", quality: 0.78 };
+    if (doji && upper > lower) return { confirmed: true, label: "bearish indecision reject", quality: 0.58 };
+  }
+  return { confirmed: false, label: "--", quality: 0 };
+}
+
+function getAdaptiveInstitutionalStats(features) {
+  const records = loadInstitutionalSignalDb().filter((record) => record.outcome === "WIN" || record.outcome === "LOSS");
+  const base = { scoreAdjustment: 0, take: true, label: "learning neutral", samples: records.length, rollingWinRate: null };
+  if (!records.length) return base;
+  const recent = records.slice(-80);
+  const wins = recent.filter((record) => record.outcome === "WIN").length;
+  const rollingWinRate = Math.round((wins / recent.length) * 100);
+  const featureDirection = features.direction === "BUY" ? "CALL" : features.direction === "SELL" ? "PUT" : features.direction;
+  const similar = recent.filter((record) => (
+    record.direction === featureDirection &&
+    record.sessionKey === features.sessionKey &&
+    record.poiBehavior === features.poiBehavior &&
+    record.pattern === features.pattern
+  ));
+  if (similar.length < 6) {
+    return {
+      ...base,
+      scoreAdjustment: rollingWinRate >= 58 ? 3 : rollingWinRate <= 42 ? -4 : 0,
+      label: `rolling ${rollingWinRate}%`,
+      rollingWinRate,
+    };
+  }
+  const similarWins = similar.filter((record) => record.outcome === "WIN").length;
+  const similarRate = Math.round((similarWins / similar.length) * 100);
+  return {
+    scoreAdjustment: similarRate >= 62 ? 8 : similarRate >= 55 ? 4 : similarRate <= 38 ? -12 : similarRate <= 45 ? -7 : 0,
+    take: similarRate >= 40,
+    label: `similar ${similarRate}% (${similar.length})`,
+    samples: records.length,
+    rollingWinRate,
+  };
+}
+
+function getInstitutionalSignalStats(symbol = currentSymbol) {
+  const records = loadInstitutionalSignalDb()
+    .filter((record) => !symbol || !record.symbol || record.symbol === symbol);
+  const scored = records.filter((record) => record.outcome === "WIN" || record.outcome === "LOSS");
+  const recent = scored.slice(-30);
+  const wins = recent.filter((record) => record.outcome === "WIN").length;
+  const lastSignals = records.slice(-3).reverse().map((record) => {
+    const side = record.direction === "CALL" ? "BUY" : "SELL";
+    return `${side} ${record.outcome || "PENDING"} ${Number.isFinite(record.confidence) ? record.confidence + "%" : ""}`.trim();
+  });
+  return {
+    total: records.length,
+    scored: scored.length,
+    wins,
+    losses: recent.length - wins,
+    winRate: recent.length ? Math.round((wins / recent.length) * 100) : null,
+    lastSignals,
+  };
+}
+
+function buildInstitutionalForexSignalEngine(sourceCandles, options = {}) {
+  const candles = Array.isArray(sourceCandles) ? sourceCandles.filter(Boolean) : [];
+  const baseSeconds = Math.max(1, Number(options.baseSeconds || getChartTimeframeSeconds()) || DEFAULT_TIMEFRAME_SEC);
+  if (candles.length < 120) {
+    return {
+      direction: null,
+      confidence: 0,
+      signal: "--",
+      htfTrend: "BUILDING",
+      currentPoi: "--",
+      liquidityStatus: "--",
+      confirmationStatus: "--",
+      sessionStatus: "--",
+      reason: "Need more 1m history for 15m/5m confirmation",
+      rollingWinRate: null,
+      entryPrice: null,
+    };
+  }
+
+  const entryCandles = baseSeconds === 60 ? candles : aggregateCandlesByTimeframe(candles, 60);
+  const m5 = aggregateCandlesByTimeframe(candles, 300);
+  const m15 = aggregateCandlesByTimeframe(candles, 900);
+  const current = entryCandles[entryCandles.length - 1];
+  if (!current || entryCandles.length < 60 || m5.length < 18 || m15.length < 10) {
+    return {
+      direction: null,
+      confidence: 0,
+      signal: "--",
+      htfTrend: "BUILDING",
+      currentPoi: "--",
+      liquidityStatus: "--",
+      confirmationStatus: "--",
+      sessionStatus: "--",
+      reason: "Building 15m/5m/1m history",
+      rollingWinRate: null,
+      entryPrice: null,
+    };
+  }
+
+  const bias15 = buildInstitutionalBias(m15);
+  const bias5 = buildInstitutionalBias(m5);
+  const htfAligned = bias15.trend !== "RANGE" && bias15.trend === bias5.trend;
+  const zones = buildInstitutionalReactionZones(entryCandles, m5, current.close);
+  const poi = zones.activePoi;
+  const atPoi = Boolean(poi && poi.distance <= zones.tolerance * 1.6);
+  const sweepState = poi
+    ? {
+        direction: getInstitutionalFakeBreakDirection(current, poi, zones.tolerance),
+        level: poi.price,
+        rejection: analyzeRejection(current),
+      }
+    : { direction: null, level: null, rejection: null };
+  const expectedDirection = bias15.trend === "UP" ? "BUY" : bias15.trend === "DOWN" ? "SELL" : null;
+  const liquidityDirection = sweepState.direction;
+  const direction = htfAligned && expectedDirection && liquidityDirection === expectedDirection ? expectedDirection : null;
+  const candlePattern = detectInstitutionalCandlePattern(entryCandles, direction, zones.avgRange);
+  const session = getInstitutionalSessionState(current.time || Math.floor(Date.now() / 1000));
+  const volatility = zones.avgRange ? clamp((current.high - current.low) / zones.avgRange, 0, 2) / 2 : 0;
+  const rejectionStrength = direction === "BUY"
+    ? clamp((sweepState.rejection?.lowerWick || 0) / Math.max(zones.avgRange, currentPip || 0.0001), 0, 1)
+    : direction === "SELL"
+      ? clamp((sweepState.rejection?.upperWick || 0) / Math.max(zones.avgRange, currentPip || 0.0001), 0, 1)
+      : 0;
+  const distanceScore = poi ? clamp(1 - (poi.distance / Math.max(zones.tolerance * 1.6, currentPip || 0.0001)), 0, 1) : 0;
+  const poiStrength = poi ? clamp((poi.touches <= 2 ? 0.75 : 0.45) + Math.min(0.25, poi.rejectionStrength * 0.25), 0, 1) : 0;
+  const momentum = direction === "BUY"
+    ? assessCloseStructure(entryCandles).bullScore
+    : direction === "SELL"
+      ? assessCloseStructure(entryCandles).bearScore
+      : 0;
+  const sweepQuality = direction ? clamp((rejectionStrength * 0.65) + (distanceScore * 0.35), 0, 1) : 0;
+  const rawScore = Math.round(clamp(
+    (htfAligned ? 0.18 : 0) +
+    (poiStrength * 0.16) +
+    (sweepQuality * 0.18) +
+    (candlePattern.quality * 0.16) +
+    (momentum * 0.1) +
+    (session.score * 0.08) +
+    (volatility * 0.06) +
+    (distanceScore * 0.04) +
+    (rejectionStrength * 0.04),
+    0,
+    1,
+  ) * 100);
+  const adaptive = getAdaptiveInstitutionalStats({
+    direction,
+    sessionKey: session.key,
+    poiBehavior: poi?.behavior,
+    pattern: candlePattern.label,
+  });
+  const confidence = clamp(rawScore + adaptive.scoreAdjustment, 0, 100);
+  const takeSetup = Boolean(
+    direction &&
+    htfAligned &&
+    atPoi &&
+    session.active &&
+    candlePattern.confirmed &&
+    confidence >= 70 &&
+    adaptive.take
+  );
+  const expirySeconds = Number(options.expirySeconds || INSTITUTIONAL_EXPIRY_SECONDS);
+  const expiryBars = Math.max(1, Math.round(expirySeconds / 60));
+  const signalDirection = direction === "BUY" ? "CALL" : direction === "SELL" ? "PUT" : null;
+  const signal = takeSetup ? `${direction} ${Math.round(expirySeconds / 60)}M` : "--";
+  const currentPoi = poi
+    ? `${formatPrice(poi.price, currentPip)} ${poi.touches}t ${poi.behavior}`
+    : "--";
+  const liquidityStatus = sweepState.direction
+    ? `${sweepState.direction} sweep @ ${formatPrice(sweepState.level, currentPip)}`
+    : poi ? "At POI, waiting sweep" : "No POI touch";
+  const reasonParts = [
+    htfAligned ? `15m/5m ${bias15.trend}` : `HTF mismatch 15m ${bias15.trend} / 5m ${bias5.trend}`,
+    poi ? `POI ${poi.touches} touch ${poi.behavior}` : "no POI",
+    sweepState.direction ? `${sweepState.direction} liquidity sweep` : "no sweep",
+    candlePattern.confirmed ? candlePattern.label : "no candle confirmation",
+    session.label,
+    adaptive.label,
+  ];
+
+  return {
+    direction: takeSetup ? signalDirection : null,
+    rawDirection: signalDirection,
+    tradeDirection: signalDirection,
+    institutionalDirection: direction,
+    confidence,
+    rawScore,
+    signal,
+    htfTrend: htfAligned ? `${bias15.trend} 15m + 5m` : `NO TRADE ${bias15.trend}/${bias5.trend}`,
+    currentPoi,
+    poi,
+    liquidityStatus,
+    sweepDetected: Boolean(sweepState.direction),
+    confirmationStatus: candlePattern.confirmed ? candlePattern.label : "--",
+    sessionStatus: `${session.label}${session.active ? " active" : " avoid"}`,
+    session,
+    reason: reasonParts.join(" | "),
+    rollingWinRate: adaptive.rollingWinRate,
+    entryPrice: Number(current.close),
+    entryTime: Number(current.time || Math.floor(Date.now() / 1000)),
+    expirySeconds,
+    expiryBars,
+    expiryTime: Number(current.time || Math.floor(Date.now() / 1000)) + expirySeconds,
+    features: {
+      htf15: bias15.trend,
+      htf5: bias5.trend,
+      poiPrice: poi?.price ?? null,
+      poiTouches: poi?.touches ?? null,
+      poiBehavior: poi?.behavior ?? null,
+      sweepDirection: sweepState.direction,
+      pattern: candlePattern.label,
+      sessionKey: session.key,
+      sessionLabel: session.label,
+      volatility,
+      distanceScore,
+      rejectionStrength,
+      momentum,
+      confidence,
+    },
+  };
+}
+
+function persistInstitutionalSignal(engine, symbol = currentSymbol) {
+  if (!engine?.direction || !Number.isFinite(engine.entryTime) || !Number.isFinite(engine.entryPrice)) return;
+  const records = loadInstitutionalSignalDb();
+  const key = [
+    symbol || "symbol",
+    engine.direction,
+    engine.entryTime,
+    Math.round((engine.poi?.price || engine.entryPrice) / Math.max(currentPip || 0.0001, 0.0000001)),
+  ].join("|");
+  if (records.some((record) => record.key === key)) return;
+  records.push({
+    key,
+    symbol: symbol || "",
+    direction: engine.direction,
+    institutionalDirection: engine.institutionalDirection,
+    entryPrice: engine.entryPrice,
+    entryTime: engine.entryTime,
+    timeframe: "1m",
+    expirySeconds: engine.expirySeconds,
+    expiryTime: engine.expiryTime,
+    htfTrend: engine.htfTrend,
+    poi: engine.currentPoi,
+    liquidity: engine.liquidityStatus,
+    pattern: engine.confirmationStatus,
+    confidence: engine.confidence,
+    outcome: "PENDING",
+    ...engine.features,
+  });
+  saveInstitutionalSignalDb(records);
+}
+
+function evaluateInstitutionalSignalOutcomes(candles, symbol = currentSymbol) {
+  const records = loadInstitutionalSignalDb();
+  if (!records.length || !Array.isArray(candles) || !candles.length) return;
+  let changed = false;
+  records.forEach((record) => {
+    if (record.outcome !== "PENDING") return;
+    if (symbol && record.symbol && record.symbol !== symbol) return;
+    const expiryTime = Number(record.expiryTime);
+    const expiryCandle = candles.find((candle) => Number(candle.time) >= expiryTime);
+    if (!expiryCandle) return;
+    const close = Number(expiryCandle.close);
+    const entry = Number(record.entryPrice);
+    if (!Number.isFinite(close) || !Number.isFinite(entry)) return;
+    if (close === entry) {
+      record.outcome = "LOSS";
+    } else if (record.direction === "CALL") {
+      record.outcome = close > entry ? "WIN" : "LOSS";
+    } else {
+      record.outcome = close < entry ? "WIN" : "LOSS";
+    }
+    record.exitPrice = close;
+    record.evaluatedAt = Math.floor(Date.now() / 1000);
+    changed = true;
+  });
+  if (changed) saveInstitutionalSignalDb(records);
+}
+
 function buildChartPatternsSignals(candles, config = {}) {
   const pivotLen = Math.max(2, config.pivotLen ?? 3);
   const toleranceMult = config.toleranceMult ?? 0.45;
@@ -6399,6 +6842,30 @@ function getSignalState(candles) {
     };
   }
 
+  const institutionalEngine = buildInstitutionalForexSignalEngine(candles, {
+    baseSeconds: getChartTimeframeSeconds(),
+    expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+  });
+  const institutionalAllowEntry = new Date().getSeconds() >= SIGNAL_ENTRY_SECOND;
+  const engineSignal = institutionalEngine.direction
+    ? (institutionalAllowEntry
+        ? `ENTER NOW ${institutionalEngine.direction === "CALL" ? "BUY" : "SELL"}`
+        : `WAIT ${institutionalEngine.direction === "CALL" ? "BUY" : "SELL"}`)
+    : "--";
+  if (institutionalEngine.direction) persistInstitutionalSignal(institutionalEngine, currentSymbol);
+  return {
+    trend: institutionalEngine.htfTrend,
+    divergence: institutionalEngine.rollingWinRate == null ? "Learning --" : `Learning ${institutionalEngine.rollingWinRate}%`,
+    sweep: institutionalEngine.liquidityStatus,
+    confidence: institutionalEngine.confidence,
+    signal: engineSignal,
+    setup: institutionalEngine.reason,
+    time: Date.now(),
+    allowEntry: institutionalAllowEntry,
+    tradeDirection: institutionalEngine.direction,
+    institutionalEngine,
+  };
+
   const trendState = detectTrend(candles);
   const obv = calculateOBV(candles);
   const divergence = detectDivergence(candles, obv);
@@ -6537,6 +7004,24 @@ function getLiquidityPanelState(candles) {
     };
   }
 
+  const institutionalEngine = buildInstitutionalForexSignalEngine(candles, {
+    baseSeconds: getChartTimeframeSeconds(),
+    expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+  });
+  const institutionalEntry = institutionalEngine.direction
+    ? new Date().getSeconds() >= SIGNAL_ENTRY_SECOND
+      ? `ENTER NOW ${institutionalEngine.direction === "CALL" ? "BUY" : "SELL"}`
+      : `WAIT ${institutionalEngine.direction === "CALL" ? "BUY" : "SELL"}`
+    : "WAIT";
+  return {
+    trend: institutionalEngine.htfTrend,
+    sweep: institutionalEngine.liquidityStatus,
+    rejection: `${institutionalEngine.confirmationStatus} | ${institutionalEngine.sessionStatus}`,
+    confidence: institutionalEngine.confidence,
+    entry: institutionalEntry,
+    level: institutionalEngine.currentPoi,
+  };
+
   const trendState = detectTrend(candles);
   const sweepState = detectLiquiditySweepState(candles);
   const closeStructure = assessCloseStructure(candles);
@@ -6595,6 +7080,7 @@ function getLiquidityPanelState(candles) {
 function updateSignalFromCandles(candles, { live = false } = {}) {
   const allCandles = candles;
   const buildPct = Math.min(100, Math.floor((allCandles.length / MIN_SIGNAL_CANDLES) * 100));
+  evaluateInstitutionalSignalOutcomes(allCandles, currentSymbol);
 
   if (allCandles.length >= MIN_SIGNAL_CANDLES) {
     lastSignalState = getSignalState(allCandles);
@@ -6625,6 +7111,11 @@ function updateSignalFromCandles(candles, { live = false } = {}) {
   if (sigEntryEl) sigEntryEl.textContent = lastSweepState.entry || "--";
   if (sigLevelEl) sigLevelEl.textContent = lastSweepState.level || "--";
   renderMiniChart(candles);
+  if (lastSignalState?.institutionalEngine) {
+    const stats = getInstitutionalSignalStats(currentSymbol);
+    if (sigBlueEl) sigBlueEl.textContent = stats.winRate == null ? "--" : `${stats.winRate}%`;
+    if (sigWhiteEl) sigWhiteEl.textContent = stats.lastSignals.length ? stats.lastSignals.join(" | ") : "--";
+  }
   if (live) maybeNotifyIndicatorSignals(candles);
 
   if (autoTradeEnabled && lastSignalState.signal !== "--" && candles.length >= MIN_SIGNAL_CANDLES) {
@@ -6807,9 +7298,14 @@ async function scoreAutoScannerSymbol(symbolInfo, indicators, timeframeSeconds) 
 }
 
 async function findAutoScannerBestMarket(indicators, timeframeSeconds) {
-  const symbols = getRiseFallScannerSymbols();
+  const symbols = getAutoScannerSymbols();
+  const scopeLabel = getAutoScannerScopeLabel();
   const results = [];
   const batchSize = 4;
+  if (!symbols.length) {
+    setAutoTradeStatus(`no markets loaded for ${scopeLabel}`, true);
+    return null;
+  }
   for (let i = 0; i < symbols.length; i += batchSize) {
     const batch = symbols.slice(i, i + batchSize);
     const batchResults = await Promise.all(batch.map(async (symbolInfo) => {
@@ -6821,14 +7317,14 @@ async function findAutoScannerBestMarket(indicators, timeframeSeconds) {
     }));
     batchResults.filter(Boolean).forEach((item) => results.push(item));
     results.sort((a, b) => b.score - a.score || b.confidence - a.confidence);
-    setAutoTradeStatus(`scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best ${results[0]?.displayName || "--"}`);
+    setAutoTradeStatus(`scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length} ${scopeLabel}. Best ${results[0]?.displayName || "--"}`);
   }
   return results[0] || null;
 }
 
 async function confirmAutoScannerMarket(candidate, indicators, timeframeSeconds) {
   if (!candidate?.symbol) return null;
-  const symbolInfo = getRiseFallScannerSymbols().find((item) => item.symbol === candidate.symbol) || {
+  const symbolInfo = getAutoScannerSymbols().find((item) => item.symbol === candidate.symbol) || {
     symbol: candidate.symbol,
     display_name: candidate.displayName,
     market_display_name: candidate.market,
@@ -7038,6 +7534,7 @@ function renderMiniChart(candles) {
   const hasICTFib = activeChartIndicators.has("ICT_FIB");
   const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY");
   const hasAnyICT = hasICTKillzones || hasICTFVG || hasICTBPR || hasICTOB || hasICTStructure || hasICTFib || hasICTLiquidity;
+  const hasInstitutionalForexEngine = activeChartIndicators.has("INSTITUTIONAL_FOREX_ENGINE");
   const hasInstitutionalExecutionModel = activeChartIndicators.has("INST_EXECUTION_MODEL");
   const hasInstitutionalLevelBehavior = activeChartIndicators.has("INST_LEVEL_BEHAVIOR");
   const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
@@ -7160,6 +7657,91 @@ function renderMiniChart(candles) {
       ctx.fillText(isBuy ? "LQ BUY" : "LQ SELL", entryX, isBuy ? entryY + 6 : entryY - 6);
       ctx.restore();
     });
+  }
+
+  if (hasInstitutionalForexEngine) {
+    const engine = buildInstitutionalForexSignalEngine(candles, {
+      baseSeconds: getChartTimeframeSeconds(),
+      expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+    });
+    const levels = engine.poi ? [engine.poi] : [];
+    levels.forEach((level) => {
+      const y = toY(level.price);
+      if (!Number.isFinite(y)) return;
+      const isResistance = level.price >= (candles[candles.length - 1]?.close ?? level.price);
+      ctx.save();
+      ctx.strokeStyle = isResistance ? "rgba(255, 138, 76, 0.85)" : "rgba(125, 255, 136, 0.85)";
+      ctx.fillStyle = isResistance ? "rgba(255, 138, 76, 0.12)" : "rgba(125, 255, 136, 0.12)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([7, 4]);
+      ctx.fillRect(leftPad, y - 5, width - leftPad - rightPad, 10);
+      ctx.beginPath();
+      ctx.moveTo(leftPad, y);
+      ctx.lineTo(width - rightPad, y);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "bottom";
+      ctx.fillStyle = isResistance ? "#ffb07c" : "#7dff88";
+      ctx.fillText(`15m IFE POI ${level.touches || level.strength || 1}t`, width - rightPad - 4, y - 6);
+      ctx.restore();
+    });
+
+    if (engine.entryPrice && engine.rawDirection) {
+      const x = leftPad + ((points.length - 1) * slotW) + (slotW / 2);
+      const y = toY(engine.entryPrice);
+      const isBuy = engine.rawDirection === "CALL";
+      const color = engine.direction ? (isBuy ? "#7dff88" : "#ff8a4c") : "rgba(190, 198, 210, 0.75)";
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.strokeStyle = "#0f1218";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (isBuy) {
+        ctx.moveTo(x, y - 14);
+        ctx.lineTo(x - 8, y + 2);
+        ctx.lineTo(x + 8, y + 2);
+      } else {
+        ctx.moveTo(x, y + 14);
+        ctx.lineTo(x - 8, y - 2);
+        ctx.lineTo(x + 8, y - 2);
+      }
+      ctx.closePath();
+      ctx.stroke();
+      ctx.fill();
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = isBuy ? "top" : "bottom";
+      ctx.fillText(engine.direction ? `${isBuy ? "BUY" : "SELL"} ${engine.confidence}%` : "WAIT", x, isBuy ? y + 6 : y - 6);
+      ctx.restore();
+    }
+
+    const statLines = [
+      `IFE ${engine.confidence}% ${engine.sessionStatus || "--"}`,
+      engine.htfTrend || "--",
+      engine.confirmationStatus === "--" ? engine.liquidityStatus : engine.confirmationStatus,
+    ];
+    const boxW = 150;
+    const boxH = 42;
+    const boxX = leftPad + 4;
+    const boxY = topPad + 4;
+    ctx.save();
+    ctx.fillStyle = "rgba(12, 16, 22, 0.80)";
+    ctx.strokeStyle = "rgba(125, 255, 136, 0.38)";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = "#d9e2ee";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    statLines.forEach((line, index) => {
+      ctx.fillText(String(line || "--").slice(0, 28), boxX + 7, boxY + 6 + (index * 12));
+    });
+    ctx.restore();
   }
 
   if (hasLDMSS) {
@@ -9636,6 +10218,16 @@ function buildIndicatorSignalAlerts(candles) {
     ilb.signals.forEach((signal) => addAlert("INST_LEVEL_BEHAVIOR", signal.entryIndex, signal.direction, signal.behavior));
   }
 
+  if (activeChartIndicators.has("INSTITUTIONAL_FOREX_ENGINE")) {
+    const engine = buildInstitutionalForexSignalEngine(candles, {
+      baseSeconds: getChartTimeframeSeconds(),
+      expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+    });
+    if (engine.direction) {
+      addAlert("INSTITUTIONAL_FOREX_ENGINE", candles.length - 1, engine.direction === "CALL" ? "BUY" : "SELL", `${engine.confidence}% ${engine.confirmationStatus}`);
+    }
+  }
+
   if (activeChartIndicators.has("SMC_PRO_COMBO")) {
     const smc = buildSMCProCombo(candles, {
       leftLen: 5,
@@ -9866,6 +10458,60 @@ function populateMarketScannerIndicators() {
   marketScannerIndicatorSelectEl.innerHTML = MARKET_SCANNER_INDICATORS
     .map((value) => `<option value="${value}">${getChartIndicatorLabel(value)}</option>`)
     .join("");
+  if (MARKET_SCANNER_INDICATORS.includes("INSTITUTIONAL_FOREX_ENGINE")) {
+    marketScannerIndicatorSelectEl.value = "INSTITUTIONAL_FOREX_ENGINE";
+  }
+}
+
+function getMarketScannerScopeOptions() {
+  const tradeable = activeSymbols.filter(isTradableActiveSymbol).filter(isRiseFallEligibleSymbol);
+  const hasText = (symbol, pattern) => [
+    symbol.symbol,
+    symbol.display_name,
+    symbol.market,
+    symbol.market_display_name,
+    symbol.submarket_display_name,
+  ].filter(Boolean).join(" ").toLowerCase().includes(pattern);
+  const countFor = (predicate) => tradeable.filter(predicate).length;
+  const options = [
+    { value: "__rise_fall", label: `All Rise/Fall (${tradeable.length})` },
+    { value: "__current_market", label: "Current market group" },
+    { value: "__forex", label: `Forex (${countFor((symbol) => hasText(symbol, "forex") || hasText(symbol, "fx"))})` },
+    { value: "__crypto", label: `Crypto (${countFor((symbol) => hasText(symbol, "crypto"))})` },
+    { value: "__deriv", label: `Deriv/Synthetic (${countFor(isDerivedMarket)})` },
+  ];
+
+  const groupedMarkets = buildSymbolsByMarket(tradeable, "Markets");
+  Array.from(groupedMarkets.values())
+    .sort((a, b) => a.display.localeCompare(b.display))
+    .forEach((entry) => {
+      options.push({
+        value: `market:${entry.market}`,
+        label: `${entry.display} (${entry.symbols.length})`,
+      });
+    });
+
+  return options;
+}
+
+function populateMarketScannerScopeSelect() {
+  if (!marketScannerScopeSelectEl) return;
+  const previous = marketScannerScopeSelectEl.value || "__rise_fall";
+  const options = getMarketScannerScopeOptions();
+  marketScannerScopeSelectEl.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join("");
+  marketScannerScopeSelectEl.value = options.some((option) => option.value === previous) ? previous : "__rise_fall";
+}
+
+function populateAutoMarketScopeSelect() {
+  if (!autoMarketScopeSelectEl) return;
+  const previous = autoMarketScopeSelectEl.value || marketScannerScopeSelectEl?.value || "__rise_fall";
+  const options = getMarketScannerScopeOptions();
+  autoMarketScopeSelectEl.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join("");
+  autoMarketScopeSelectEl.value = options.some((option) => option.value === previous) ? previous : "__rise_fall";
 }
 
 function isRiseFallExpiryOptionAllowed(option) {
@@ -10938,7 +11584,25 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSe
   };
 
   try {
-    if (indicator === "INST_EXECUTION_MODEL") {
+    if (indicator === "INSTITUTIONAL_FOREX_ENGINE") {
+      const engine = buildInstitutionalForexSignalEngine(candles, {
+        baseSeconds: frameSeconds,
+        expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+      });
+      if (engine.rawDirection) {
+        pushMainIndicatorVote(votes, {
+          direction: engine.rawDirection,
+          weight: frameWeight * Math.max(1.5, engine.confidence / 14),
+          indicator,
+          frame,
+          price: engine.entryPrice,
+          reason: engine.reason,
+          index: count - 1,
+          candleCount: count,
+          isSetup: Boolean(engine.direction),
+        });
+      }
+    } else if (indicator === "INST_EXECUTION_MODEL") {
       const model = buildInstitutionalExecutionModel(candles, { baseSeconds: frameSeconds });
       const latest = latestByIndex(model.signals);
       if (latest) pushMainIndicatorVote(votes, {
@@ -11377,6 +12041,57 @@ function buildTopDownMainSignal(sourceCandles, referencePrice = null, baseSecond
   const mainFrame = getMtfFrameLabel(frameSet.mainSeconds);
   const alignFrame = getMtfFrameLabel(frameSet.alignSeconds);
   const entryFrame = getMtfFrameLabel(frameSet.entrySeconds);
+  const institutionalEngine = buildInstitutionalForexSignalEngine(candles, {
+    baseSeconds,
+    expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
+  });
+  if (institutionalEngine) {
+    const engineDirection = institutionalEngine.rawDirection || institutionalEngine.direction;
+    const callWeight = engineDirection === "CALL" ? institutionalEngine.confidence : Math.max(0, 100 - institutionalEngine.confidence);
+    const putWeight = engineDirection === "PUT" ? institutionalEngine.confidence : Math.max(0, 100 - institutionalEngine.confidence);
+    const reasons = [{
+      direction: engineDirection,
+      weight: institutionalEngine.confidence / 10,
+      indicator: "INSTITUTIONAL_FOREX_ENGINE",
+      system: "Institutional Forex Engine",
+      frame: `${mainFrame}/${alignFrame}/${entryFrame}`,
+      price: institutionalEngine.entryPrice,
+      reason: institutionalEngine.reason,
+      isSetup: true,
+    }];
+    const htfAligned = !String(institutionalEngine.htfTrend || "").startsWith("NO TRADE") && !String(institutionalEngine.htfTrend || "").startsWith("BUILDING");
+    const entryAligned = Boolean(institutionalEngine.sweepDetected && institutionalEngine.confirmationStatus !== "--");
+    const enoughSetups = Boolean(institutionalEngine.poi && institutionalEngine.session?.active);
+    persistInstitutionalSignal(institutionalEngine, currentSymbol);
+    return {
+      direction: institutionalEngine.direction,
+      rawDirection: engineDirection,
+      confidence: institutionalEngine.confidence,
+      trend: institutionalEngine.htfTrend,
+      setup: institutionalEngine.reason,
+      reasons,
+      callWeight,
+      putWeight,
+      systemsChecked: 1,
+      setupSystems: [htfAligned, institutionalEngine.poi, institutionalEngine.sweepDetected, entryAligned, institutionalEngine.session?.active]
+        .filter(Boolean).length,
+      gate: {
+        confidence: institutionalEngine.confidence,
+        margin: Math.abs(callWeight - putWeight) / Math.max(callWeight + putWeight, 1),
+        htfAligned,
+        entryAligned,
+        enoughSetups,
+        mainDirection: engineDirection,
+        alignDirection: htfAligned ? engineDirection : null,
+        entryDirection: entryAligned ? engineDirection : null,
+        mainFrame,
+        alignFrame,
+        entryFrame,
+      },
+      entryPrice: institutionalEngine.entryPrice,
+      institutionalEngine,
+    };
+  }
   const votes = [
     ...scanAllMainSignalIndicators(main, mainFrame, 1.35, frameSet.mainSeconds),
     ...scanAllMainSignalIndicators(align, alignFrame, 1.6, frameSet.alignSeconds),
@@ -11449,6 +12164,59 @@ function getRiseFallScannerSymbols() {
       seen.add(symbol.symbol);
       return isTradableActiveSymbol(symbol) && isRiseFallEligibleSymbol(symbol);
     });
+}
+
+function getSelectedMarketScannerScopeLabel() {
+  return marketScannerScopeSelectEl?.selectedOptions?.[0]?.textContent || "All Rise/Fall";
+}
+
+function getScannerSymbolsForScope(scope = "__rise_fall") {
+  const base = activeSymbols.filter(isTradableActiveSymbol).filter(isRiseFallEligibleSymbol);
+  const currentMarket = marketSelect?.value || "";
+  const textFor = (symbol) => [
+    symbol.symbol,
+    symbol.display_name,
+    symbol.market,
+    symbol.market_display_name,
+    symbol.submarket_display_name,
+  ].filter(Boolean).join(" ").toLowerCase();
+  let symbols;
+
+  if (scope === "__current_market" && currentMarket) {
+    symbols = base.filter((symbol) => (symbol.market || symbol.market_display_name || "markets") === currentMarket);
+  } else if (scope === "__forex") {
+    symbols = base.filter((symbol) => textFor(symbol).includes("forex") || textFor(symbol).includes(" fx "));
+  } else if (scope === "__crypto") {
+    symbols = base.filter((symbol) => textFor(symbol).includes("crypto"));
+  } else if (scope === "__deriv") {
+    symbols = base.filter(isDerivedMarket);
+  } else if (scope.startsWith("market:")) {
+    const marketKey = scope.slice("market:".length);
+    symbols = base.filter((symbol) => (symbol.market || symbol.market_display_name || "markets") === marketKey);
+  } else {
+    symbols = getRiseFallScannerSymbols();
+  }
+
+  const seen = new Set();
+  return (symbols || [])
+    .filter((symbol) => {
+      if (!symbol?.symbol || seen.has(symbol.symbol)) return false;
+      seen.add(symbol.symbol);
+      return true;
+    })
+    .sort((a, b) => String(a.display_name || a.symbol).localeCompare(String(b.display_name || b.symbol)));
+}
+
+function getMarketScannerSymbols() {
+  return getScannerSymbolsForScope(marketScannerScopeSelectEl?.value || "__rise_fall");
+}
+
+function getAutoScannerScopeLabel() {
+  return autoMarketScopeSelectEl?.selectedOptions?.[0]?.textContent || "All Rise/Fall";
+}
+
+function getAutoScannerSymbols() {
+  return getScannerSymbolsForScope(autoMarketScopeSelectEl?.value || "__rise_fall");
 }
 
 function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimeframeSeconds()) {
@@ -11671,13 +12439,14 @@ async function revalidateMarketScannerResults(results, indicators) {
 async function scanMarketsBySelectedIndicator() {
   if (marketScannerInFlight) return;
   const indicators = getMarketScannerIndicators();
-  const symbols = getRiseFallScannerSymbols();
+  const symbols = getMarketScannerSymbols();
+  const scopeLabel = getSelectedMarketScannerScopeLabel();
   if (!indicators.length) {
     if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No scanner indicator is selected.";
     return;
   }
   if (!symbols.length) {
-    if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No Rise/Fall markets are loaded yet.";
+    if (marketScannerStatusEl) marketScannerStatusEl.textContent = `No markets loaded for ${scopeLabel}.`;
     return;
   }
 
@@ -11690,7 +12459,7 @@ async function scanMarketsBySelectedIndicator() {
     const label = indicators.length === 1
       ? getChartIndicatorLabel(indicators[0])
       : `${indicators.length} attached indicators`;
-    marketScannerStatusEl.textContent = `Scanning ${symbols.length} markets with ${label}...`;
+    marketScannerStatusEl.textContent = `Scanning ${symbols.length} ${scopeLabel} markets with ${label}...`;
   }
   renderMarketScannerResults([]);
 
@@ -11730,7 +12499,7 @@ async function scanMarketsBySelectedIndicator() {
       renderMarketScannerResults(results);
       if (marketScannerStatusEl) {
         const skipText = skippedForHistory ? ` • skipped ${skippedForHistory} loading` : "";
-        marketScannerStatusEl.textContent = `Scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length}. Best: ${results[0]?.displayName || "--"}.${skipText}`;
+        marketScannerStatusEl.textContent = `Scanned ${Math.min(i + batch.length, symbols.length)}/${symbols.length} ${scopeLabel}. Best: ${results[0]?.displayName || "--"}.${skipText}`;
       }
     }
     if (results.length) {
@@ -11744,10 +12513,10 @@ async function scanMarketsBySelectedIndicator() {
     }
     if (marketScannerStatusEl) {
       marketScannerStatusEl.textContent = results.length
-        ? `Scan complete. Best market: ${results[0].displayName} (${results[0].direction === "CALL" ? "Rise" : "Fall"}, ${results[0].confidence}%).`
+        ? `Scan complete for ${scopeLabel}. Best market: ${results[0].displayName} (${results[0].direction === "CALL" ? "Rise" : "Fall"}, ${results[0].confidence}%).`
         : skippedForHistory
-          ? `Scan complete. ${skippedForHistory} markets did not have enough loaded history yet.`
-          : `Scan complete. No current setup from ${indicators.length === 1 ? getChartIndicatorLabel(indicators[0]) : "the attached indicators"}.`;
+          ? `Scan complete for ${scopeLabel}. ${skippedForHistory} markets did not have enough loaded history yet.`
+          : `Scan complete for ${scopeLabel}. No current setup from ${indicators.length === 1 ? getChartIndicatorLabel(indicators[0]) : "the attached indicators"}.`;
     }
   } finally {
     marketScannerInFlight = false;
@@ -13437,6 +14206,8 @@ async function loadActiveSymbols() {
     higher_lower: buildSymbolsByMarket(derivedSymbols, "Derived"),
   };
 
+  populateMarketScannerScopeSelect();
+  populateAutoMarketScopeSelect();
   rebuildSymbolsForTradeMode({ preserveSelection: false });
   setStatus(`Markets loaded (${riseFallSymbols.length} Rise/Fall symbols)`);
 }
@@ -14233,6 +15004,7 @@ function init() {
   generateMainSignalBtn = document.getElementById("generateMainSignal");
   mainSignalStatusEl = document.getElementById("mainSignalStatus");
   marketScannerIndicatorSelectEl = document.getElementById("marketScannerIndicator");
+  marketScannerScopeSelectEl = document.getElementById("marketScannerScope");
   scanMarketsBtnEl = document.getElementById("scanMarkets");
   marketScannerStatusEl = document.getElementById("marketScannerStatus");
   marketScannerResultsEl = document.getElementById("marketScannerResults");
@@ -14267,6 +15039,7 @@ function init() {
   autoAccountSelect = document.getElementById("autoAccountSelect");
   autoStakeInputEl = document.getElementById("autoStakeInput");
   autoTimeframeSelectEl = document.getElementById("autoTimeframeSelect");
+  autoMarketScopeSelectEl = document.getElementById("autoMarketScope");
   autoResultsEl = document.getElementById("autoResults");
   autoBodyEl = document.getElementById("autoBody");
   autoSectionEl = document.getElementById("autoSection");
@@ -14326,6 +15099,8 @@ function init() {
   populateTimeframeOptions();
   populateAutoTimeframeOptions();
   populateMarketScannerIndicators();
+  populateMarketScannerScopeSelect();
+  populateAutoMarketScopeSelect();
   populateTrendModeOptions();
   chartDrawingStore = loadChartDrawingStore();
   syncDrawingToolUI();
@@ -15025,6 +15800,13 @@ function init() {
   autoTimeframeSelectEl?.addEventListener("change", () => {
     autoTradeTimeframeSeconds = getAutoTradeTimeframeSeconds();
     if (autoTradeEnabled && !autoOpenContractId) {
+      scheduleAutoScanner(0);
+    }
+  });
+
+  autoMarketScopeSelectEl?.addEventListener("change", () => {
+    if (autoTradeEnabled && !autoOpenContractId) {
+      setAutoTradeStatus(`scope set to ${getAutoScannerScopeLabel()}`);
       scheduleAutoScanner(0);
     }
   });

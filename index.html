@@ -130,6 +130,7 @@
         <div class="market-scanner">
           <div class="market-scanner-controls">
             <select id="marketScannerIndicator" class="field-input" aria-label="Indicator market scanner"></select>
+            <select id="marketScannerScope" class="field-input" aria-label="Market scanner scope"></select>
             <button id="scanMarkets" class="ghost small main-signal-btn" type="button">Scan markets</button>
           </div>
           <div id="marketScannerStatus" class="main-signal-status">Attach indicators, then scan markets for the best current setup.</div>
@@ -150,7 +151,7 @@
             <div id="sigTrend" class="field-value">--</div>
           </div>
           <div class="signal-item">
-            <div class="field-label">Divergence</div>
+            <div class="field-label">AI Filter</div>
             <div id="sigDiv" class="field-value">--</div>
           </div>
           <div class="signal-item">
@@ -182,11 +183,11 @@
             <div id="sigLevel" class="field-value">--</div>
           </div>
           <div class="signal-item">
-            <div class="field-label">Blue Candles</div>
+            <div class="field-label">Rolling Winrate</div>
             <div id="sigBlue" class="field-value">--</div>
           </div>
           <div class="signal-item">
-            <div class="field-label">White Candles</div>
+            <div class="field-label">Recent History</div>
             <div id="sigWhite" class="field-value">--</div>
           </div>
           <div class="signal-item">
@@ -340,6 +341,10 @@
               <div class="field">
                 <div class="field-label">Timeframe</div>
                 <select id="autoTimeframeSelect" class="field-input" aria-label="Auto trade timeframe"></select>
+              </div>
+              <div class="field">
+                <div class="field-label">Market scope</div>
+                <select id="autoMarketScope" class="field-input" aria-label="Auto trade market scope"></select>
               </div>
             </div>
           </div>
