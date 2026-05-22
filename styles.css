@@ -1501,6 +1501,22 @@ button.chart-indicator-select {
   overflow: visible;
 }
 
+.auto-compact-fields {
+  display: grid;
+  grid-template-columns: minmax(0, 0.75fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.auto-compact-fields .field {
+  margin-bottom: 0;
+  padding: 8px;
+}
+
+.auto-compact-fields .field-input {
+  min-width: 0;
+  padding-inline: 8px;
+}
+
 .auto-row.collapsed {
   max-height: 0;
   opacity: 0;
