@@ -14078,7 +14078,7 @@ function getChartMarketMenuMap() {
   if (currentAppTab === "auto" && autoMarketScopeSelectEl) {
     return buildSymbolsByMarket(getAutoScannerSymbols(), getAutoScannerScopeLabel());
   }
-  if (currentAppTab === "chart" && marketScannerScopeSelectEl) {
+  if (marketScannerScopeSelectEl) {
     return buildSymbolsByMarket(getMarketScannerSymbols(), getSelectedMarketScannerScopeLabel());
   }
   return symbolsByTradeMode[getActiveTradeMode()] || symbolsByMarket || new Map();
