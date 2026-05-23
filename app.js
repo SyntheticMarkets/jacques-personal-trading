@@ -14074,9 +14074,19 @@ function updateChartMarketButton() {
   if (priceEl) priceEl.textContent = Number.isFinite(lastSpot) ? formatPrice(lastSpot, currentPip) : "--";
 }
 
+function getChartMarketMenuMap() {
+  if (currentAppTab === "auto" && autoMarketScopeSelectEl) {
+    return buildSymbolsByMarket(getAutoScannerSymbols(), getAutoScannerScopeLabel());
+  }
+  if (currentAppTab === "chart" && marketScannerScopeSelectEl) {
+    return buildSymbolsByMarket(getMarketScannerSymbols(), getSelectedMarketScannerScopeLabel());
+  }
+  return symbolsByTradeMode[getActiveTradeMode()] || symbolsByMarket || new Map();
+}
+
 function renderChartMarketMenu() {
   if (!chartMarketMenuEl) return;
-  const modeMap = symbolsByTradeMode[getActiveTradeMode()] || symbolsByMarket || new Map();
+  const modeMap = getChartMarketMenuMap();
   const baseEntries = Array.from(modeMap.values()).sort((a, b) => a.display.localeCompare(b.display));
   if (!baseEntries.length) {
     chartMarketMenuEl.innerHTML = "<div class=\"chart-market-main\"><div class=\"trade-meta\">Markets are still loading.</div></div>";
@@ -15276,6 +15286,9 @@ function init() {
       const market = item.getAttribute("data-chart-market");
       const symbol = item.getAttribute("data-chart-symbol");
       if (market && symbol) {
+        if (!symbolsByMarket.has(market) && symbolsByTradeMode.rise_fall?.has(market)) {
+          setActiveTab("rise_fall");
+        }
         marketSelect.value = market;
         updateSymbols({ preferredSymbol: symbol });
         setChartMarketMenuOpen(false);
@@ -15805,9 +15818,18 @@ function init() {
   });
 
   autoMarketScopeSelectEl?.addEventListener("change", () => {
+    chartMarketMenuMarket = "";
+    renderChartMarketMenu();
     if (autoTradeEnabled && !autoOpenContractId) {
       setAutoTradeStatus(`scope set to ${getAutoScannerScopeLabel()}`);
       scheduleAutoScanner(0);
+    }
+  });
+
+  marketScannerScopeSelectEl?.addEventListener("change", () => {
+    if (currentAppTab === "chart") {
+      chartMarketMenuMarket = "";
+      renderChartMarketMenu();
     }
   });
 
