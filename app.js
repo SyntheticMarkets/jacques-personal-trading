@@ -13629,7 +13629,7 @@ function updateTradeProfitSummary() {
   tradeProfitSummaryEl.textContent = `Profit: ${profit.toFixed(2)} on ${stake.toFixed(2)} stake${payout != null ? ` • Payout ${payout.toFixed(2)}` : ""}`;
 }
 
-function setActiveTab(tabName) {
+function setActiveTab(tabName, options = {}) {
   tabs.forEach((t) => {
     const isActive = t.dataset.tab === tabName;
     t.classList.toggle("active", isActive);
@@ -13648,7 +13648,7 @@ function setActiveTab(tabName) {
   proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
   syncTradeTypeControls(tabName);
-  rebuildSymbolsForTradeMode();
+  rebuildSymbolsForTradeMode({ preserveSelection: options.preserveSelection !== false });
   buildExpiries();
   updateProposalDirectionButtons();
   updateTradeProfitSummary();
@@ -14050,6 +14050,110 @@ function isRiseFallEligibleSymbol(symbol) {
   return true;
 }
 
+function getActiveSymbolInfo(symbolCode = currentSymbol || symbolSelect?.value) {
+  if (!symbolCode) return null;
+  return activeSymbols.find((symbol) => symbol.symbol === symbolCode) || null;
+}
+
+function isForexSymbol(symbol) {
+  const text = [
+    symbol?.symbol,
+    symbol?.display_name,
+    symbol?.market,
+    symbol?.market_display_name,
+    symbol?.submarket_display_name,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("forex") || text.includes(" fx ") || symbol?.market === "forex";
+}
+
+function isCryptoSymbol(symbol) {
+  const text = [
+    symbol?.symbol,
+    symbol?.display_name,
+    symbol?.market,
+    symbol?.market_display_name,
+    symbol?.submarket_display_name,
+  ].filter(Boolean).join(" ").toLowerCase();
+  return text.includes("crypto") || symbol?.market === "cryptocurrency";
+}
+
+function getInstrumentScannerScope(symbol) {
+  if (isForexSymbol(symbol)) return "__forex";
+  if (isCryptoSymbol(symbol)) return "__crypto";
+  if (isDerivedMarket(symbol)) return "__deriv";
+  return "__rise_fall";
+}
+
+function symbolSupportsHigherLower(symbolCode = currentSymbol || symbolSelect?.value) {
+  if (!symbolCode) return false;
+  return Array.from(symbolsByTradeMode.higher_lower?.values?.() || [])
+    .some((entry) => entry.symbols?.some((symbol) => symbol.symbol === symbolCode));
+}
+
+function setSelectValueIfAvailable(selectEl, value) {
+  if (!selectEl || !value) return false;
+  const hasValue = Array.from(selectEl.options || []).some((option) => option.value === value);
+  if (!hasValue) return false;
+  selectEl.value = value;
+  return true;
+}
+
+function setMinimumTimeframe(seconds) {
+  const minSeconds = Math.max(1, Number(seconds) || DEFAULT_TIMEFRAME_SEC);
+  if (getChartTimeframeSeconds() < minSeconds) {
+    setChartTimeframe(minSeconds).catch(() => {});
+  }
+  if (autoTimeframeSelectEl && getAutoTradeTimeframeSeconds() < minSeconds) {
+    autoTimeframeSelectEl.value = String(minSeconds);
+    autoTradeTimeframeSeconds = minSeconds;
+  }
+}
+
+function syncTimeframeAvailability(minSeconds = DEFAULT_TIMEFRAME_SEC) {
+  const minValue = Math.max(1, Number(minSeconds) || DEFAULT_TIMEFRAME_SEC);
+  [chartTfSelectEl, autoTimeframeSelectEl].forEach((selectEl) => {
+    Array.from(selectEl?.options || []).forEach((option) => {
+      option.disabled = Number(option.value) < minValue;
+    });
+  });
+  if (chartTfLabelEl && minValue >= 900 && getChartTimeframeSeconds() < minValue) {
+    chartTfLabelEl.textContent = getTimeframeLabel(minValue);
+  }
+}
+
+function syncInstrumentDrivenControls(symbol = getActiveSymbolInfo()) {
+  if (!symbol) return;
+  const supportsHL = symbolSupportsHigherLower(symbol.symbol);
+  const scope = getInstrumentScannerScope(symbol);
+  const minSignalSeconds = isForexSymbol(symbol) ? 900 : 1;
+
+  tabs?.forEach((tab) => {
+    if (tab.dataset.tab === "higher_lower") {
+      tab.disabled = !supportsHL;
+      tab.hidden = !supportsHL;
+      tab.classList.toggle("disabled", !supportsHL);
+    }
+  });
+  [desktopTradeTypeSelectEl, sidebarTradeTypeSelectEl].forEach((selectEl) => {
+    const option = selectEl?.querySelector?.('option[value="higher_lower"]');
+    if (option) {
+      option.disabled = !supportsHL;
+      option.hidden = !supportsHL;
+    }
+  });
+
+  if (!supportsHL && getActiveTradeMode() === "higher_lower") {
+    setActiveTab("rise_fall", { preserveSelection: true });
+  }
+
+  setSelectValueIfAvailable(marketScannerScopeSelectEl, scope);
+  setSelectValueIfAvailable(autoMarketScopeSelectEl, scope);
+  syncTimeframeAvailability(minSignalSeconds);
+  if (isForexSymbol(symbol)) {
+    setMinimumTimeframe(minSignalSeconds);
+  }
+}
+
 function buildSymbolsByMarket(symbols, fallbackDisplay = "Markets") {
   const grouped = new Map();
   symbols.forEach((s) => {
@@ -14075,13 +14179,8 @@ function updateChartMarketButton() {
 }
 
 function getChartMarketMenuMap() {
-  if (currentAppTab === "auto" && autoMarketScopeSelectEl) {
-    return buildSymbolsByMarket(getAutoScannerSymbols(), getAutoScannerScopeLabel());
-  }
-  if (marketScannerScopeSelectEl) {
-    return buildSymbolsByMarket(getMarketScannerSymbols(), getSelectedMarketScannerScopeLabel());
-  }
-  return symbolsByTradeMode[getActiveTradeMode()] || symbolsByMarket || new Map();
+  const tradeable = activeSymbols.filter(isTradableActiveSymbol).filter(isRiseFallEligibleSymbol);
+  return buildSymbolsByMarket(tradeable, "Markets");
 }
 
 function renderChartMarketMenu() {
@@ -14274,6 +14373,7 @@ function onSymbolChange(options = {}) {
   symbolPrice.textContent = "--";
   currentSymbol = symbol;
   currentPip = pip;
+  syncInstrumentDrivenControls(getActiveSymbolInfo(symbol));
   lastSpot = null;
   updateChartMarketButton();
   resetChartViewportState({ render: false });
