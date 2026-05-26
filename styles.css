@@ -812,6 +812,18 @@ button.small {
   gap: 8px;
 }
 
+.scanner-source {
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #10151e;
+  color: var(--muted);
+  font-size: 12px;
+  padding: 0 12px;
+}
+
 .market-scanner-results {
   display: grid;
   gap: 6px;

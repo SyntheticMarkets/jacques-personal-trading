@@ -135,6 +135,7 @@ let sigWhiteEl;
 let generateMainSignalBtn;
 let mainSignalStatusEl;
 let marketScannerIndicatorSelectEl;
+let marketScannerIndicatorSourceEl;
 let marketScannerScopeSelectEl;
 let scanMarketsBtnEl;
 let marketScannerStatusEl;
@@ -7389,7 +7390,7 @@ async function runAutoScannerCycle() {
   }
   const indicators = getMarketScannerIndicators();
   if (!indicators.length) {
-    setAutoTradeStatus("no scanner indicator is selected", true);
+    setAutoTradeStatus("attach a chart signal indicator first", true);
     return;
   }
 
@@ -10547,6 +10548,7 @@ function renderChartIndicatorList() {
   if (!chartIndicatorListEl) return;
   if (!activeChartIndicators.size) {
     chartIndicatorListEl.innerHTML = "";
+    updateMarketScannerIndicatorSource();
     return;
   }
   chartIndicatorListEl.innerHTML = Array.from(activeChartIndicators)
@@ -10557,6 +10559,19 @@ function renderChartIndicatorList() {
       </span>`
     ))
     .join("");
+  updateMarketScannerIndicatorSource();
+}
+
+function updateMarketScannerIndicatorSource() {
+  if (!marketScannerIndicatorSourceEl) return;
+  const attached = Array.from(activeChartIndicators)
+    .filter((indicator) => MARKET_SCANNER_INDICATORS.includes(indicator));
+  marketScannerIndicatorSourceEl.textContent = attached.length
+    ? `Chart: ${attached.map(getChartIndicatorLabel).join(" + ")}`
+    : "Chart indicators";
+  marketScannerIndicatorSourceEl.title = attached.length
+    ? "Scanner uses these attached chart signal indicators"
+    : "Attach a signal indicator to the chart before scanning";
 }
 
 function populateIndicatorOptions() {
@@ -12275,9 +12290,7 @@ function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimefram
 function getMarketScannerIndicators() {
   const attached = Array.from(activeChartIndicators)
     .filter((indicator) => MARKET_SCANNER_INDICATORS.includes(indicator));
-  if (attached.length) return attached;
-  const selected = marketScannerIndicatorSelectEl?.value || MARKET_SCANNER_INDICATORS[0];
-  return selected ? [selected] : [];
+  return attached;
 }
 
 function scoreMarketWithIndicators(indicators, candles, baseSeconds = getChartTimeframeSeconds()) {
@@ -12442,7 +12455,7 @@ async function scanMarketsBySelectedIndicator() {
   const symbols = getMarketScannerSymbols();
   const scopeLabel = getSelectedMarketScannerScopeLabel();
   if (!indicators.length) {
-    if (marketScannerStatusEl) marketScannerStatusEl.textContent = "No scanner indicator is selected.";
+    if (marketScannerStatusEl) marketScannerStatusEl.textContent = "Attach a signal indicator to the chart first. The scanner uses chart indicators only.";
     return;
   }
   if (!symbols.length) {
@@ -15114,6 +15127,7 @@ function init() {
   generateMainSignalBtn = document.getElementById("generateMainSignal");
   mainSignalStatusEl = document.getElementById("mainSignalStatus");
   marketScannerIndicatorSelectEl = document.getElementById("marketScannerIndicator");
+  marketScannerIndicatorSourceEl = document.getElementById("marketScannerIndicatorSource");
   marketScannerScopeSelectEl = document.getElementById("marketScannerScope");
   scanMarketsBtnEl = document.getElementById("scanMarkets");
   marketScannerStatusEl = document.getElementById("marketScannerStatus");
