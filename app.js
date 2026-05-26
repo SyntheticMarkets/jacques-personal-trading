@@ -7440,6 +7440,33 @@ async function tryAutoTrade() {
   scheduleAutoScanner(0);
 }
 
+function getRobustChartPriceRange(points) {
+  const candles = (Array.isArray(points) ? points : []).filter((candle) => (
+    candle
+    && [candle.open, candle.high, candle.low, candle.close].every(Number.isFinite)
+    && candle.high >= candle.low
+  ));
+  if (!candles.length) return null;
+
+  const lows = candles.map((candle) => candle.low).sort((a, b) => a - b);
+  const highs = candles.map((candle) => candle.high).sort((a, b) => a - b);
+  const trim = candles.length >= 20 ? Math.max(1, Math.floor(candles.length * 0.05)) : 0;
+  const rawMin = Math.min(...lows);
+  const rawMax = Math.max(...highs);
+  const trimmedMin = lows[Math.min(trim, lows.length - 1)];
+  const trimmedMax = highs[Math.max(0, highs.length - 1 - trim)];
+  const bodyValues = candles.flatMap((candle) => [candle.open, candle.close]);
+  const bodyMin = Math.min(...bodyValues);
+  const bodyMax = Math.max(...bodyValues);
+  const latestClose = candles[candles.length - 1].close;
+  const bodyRange = Math.max(bodyMax - bodyMin, Math.abs(latestClose) * 0.00001, 0.0000001);
+  const rawRange = rawMax - rawMin;
+  const hasDistortingWick = rawRange > bodyRange * 12 && candles.length >= 8;
+  const min = hasDistortingWick ? Math.min(trimmedMin, bodyMin, latestClose) : rawMin;
+  const max = hasDistortingWick ? Math.max(trimmedMax, bodyMax, latestClose) : rawMax;
+  return max > min ? { min, max } : { min: latestClose - bodyRange / 2, max: latestClose + bodyRange / 2 };
+}
+
 function renderMiniChart(candles) {
   if (!miniChartCanvas) return;
   const ctx = miniChartCanvas.getContext("2d");
@@ -7472,10 +7499,10 @@ function renderMiniChart(candles) {
     else whiteCount += 1;
   });
   updateVisibleCandleCountUI(blueCount, whiteCount);
-  const lows = points.map((c) => c.low);
-  const highs = points.map((c) => c.high);
-  const rawMin = Math.min(...lows);
-  const rawMax = Math.max(...highs);
+  const priceRange = getRobustChartPriceRange(points);
+  if (!priceRange) return;
+  const rawMin = priceRange.min;
+  const rawMax = priceRange.max;
   const leftPad = 6;
   const rightPad = 72;
   const topPad = 6;
