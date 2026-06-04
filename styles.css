@@ -806,6 +806,77 @@ button.small {
   margin-bottom: 10px;
 }
 
+.ask-ai-panel {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+
+.ask-ai-body {
+  display: grid;
+  gap: 8px;
+}
+
+.ask-ai-body.hidden {
+  display: none;
+}
+
+.ask-ai-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.ask-ai-result {
+  display: grid;
+  gap: 6px;
+}
+
+.ask-ai-card {
+  border: 1px solid #202a3a;
+  background: #0f141c;
+  border-radius: 10px;
+  padding: 9px 10px;
+}
+
+.ask-ai-card.buy {
+  border-color: rgba(20, 184, 139, 0.6);
+}
+
+.ask-ai-card.sell {
+  border-color: rgba(238, 91, 102, 0.6);
+}
+
+.ask-ai-card.skip {
+  border-color: rgba(148, 163, 184, 0.42);
+}
+
+.ask-ai-title {
+  color: var(--text);
+  font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.ask-ai-meta {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.ask-ai-frames {
+  display: grid;
+  gap: 5px;
+  margin-top: 8px;
+}
+
+.ask-ai-frame {
+  display: grid;
+  grid-template-columns: 58px 54px 1fr;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+
 .market-scanner-controls {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(0, 0.9fr) minmax(120px, 0.42fr);

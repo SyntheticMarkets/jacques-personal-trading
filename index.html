@@ -127,6 +127,19 @@
           <button id="generateMainSignal" class="ghost small main-signal-btn" type="button">Generate signal</button>
           <div id="mainSignalStatus" class="main-signal-status">Wait for the current close, then scan current and higher frames.</div>
         </div>
+        <div class="ask-ai-panel">
+          <button id="askAiToggle" class="ghost small main-signal-btn" type="button">Ask AI</button>
+          <div id="askAiBody" class="ask-ai-body hidden">
+            <div class="ask-ai-controls">
+              <select id="askAiGroup" class="field-input" aria-label="AI analysis market group"></select>
+              <select id="askAiSymbol" class="field-input" aria-label="AI analysis pair"></select>
+              <select id="askAiTimeframe" class="field-input" aria-label="AI analysis timeframe"></select>
+              <button id="askAiAnalyse" class="ghost small main-signal-btn" type="button">Analyse</button>
+            </div>
+            <div id="askAiStatus" class="main-signal-status">Choose a group, pair, and timeframe.</div>
+            <div id="askAiResult" class="ask-ai-result"></div>
+          </div>
+        </div>
         <div class="market-scanner">
           <div class="market-scanner-controls">
             <div id="marketScannerIndicatorSource" class="scanner-source" aria-label="Scanner indicator source">Chart indicators</div>

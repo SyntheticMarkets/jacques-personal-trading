@@ -140,6 +140,15 @@ let marketScannerScopeSelectEl;
 let scanMarketsBtnEl;
 let marketScannerStatusEl;
 let marketScannerResultsEl;
+let askAiToggleBtnEl;
+let askAiBodyEl;
+let askAiGroupSelectEl;
+let askAiSymbolSelectEl;
+let askAiTimeframeSelectEl;
+let askAiAnalyseBtnEl;
+let askAiStatusEl;
+let askAiResultEl;
+let askAiInFlight = false;
 let signalBodyEl;
 let signalSectionTitleEl;
 let toggleSignalBtn;
@@ -12261,6 +12270,188 @@ function getAutoScannerSymbols() {
   return getScannerSymbolsForScope(autoMarketScopeSelectEl?.value || "__rise_fall");
 }
 
+function populateAskAiGroups() {
+  if (!askAiGroupSelectEl) return;
+  const previous = askAiGroupSelectEl.value || marketScannerScopeSelectEl?.value || "__rise_fall";
+  const options = getMarketScannerScopeOptions();
+  askAiGroupSelectEl.innerHTML = options
+    .map((option) => `<option value="${escapeHtml(option.value)}">${escapeHtml(option.label)}</option>`)
+    .join("");
+  askAiGroupSelectEl.value = options.some((option) => option.value === previous) ? previous : "__rise_fall";
+}
+
+function populateAskAiSymbols() {
+  if (!askAiSymbolSelectEl) return;
+  const previous = askAiSymbolSelectEl.value || currentSymbol || "";
+  const symbols = getScannerSymbolsForScope(askAiGroupSelectEl?.value || "__rise_fall");
+  askAiSymbolSelectEl.innerHTML = symbols
+    .map((symbol) => `<option value="${escapeHtml(symbol.symbol)}">${escapeHtml(symbol.display_name || symbol.symbol)}</option>`)
+    .join("");
+  askAiSymbolSelectEl.value = symbols.some((symbol) => symbol.symbol === previous)
+    ? previous
+    : symbols[0]?.symbol || "";
+}
+
+function populateAskAiTimeframes() {
+  if (!askAiTimeframeSelectEl) return;
+  const previous = Number(askAiTimeframeSelectEl.value || getChartTimeframeSeconds());
+  askAiTimeframeSelectEl.innerHTML = TIMEFRAME_OPTIONS
+    .map((option) => `<option value="${option.seconds}">${option.label}</option>`)
+    .join("");
+  askAiTimeframeSelectEl.value = TIMEFRAME_OPTIONS.some((option) => option.seconds === previous)
+    ? String(previous)
+    : String(getChartTimeframeSeconds());
+}
+
+function syncAskAiControls() {
+  populateAskAiGroups();
+  populateAskAiSymbols();
+  populateAskAiTimeframes();
+}
+
+function analyseAskAiFrame(candles, seconds, label) {
+  const source = (Array.isArray(candles) ? candles : []).filter(Boolean);
+  if (source.length < 60) {
+    return { seconds, label, direction: null, score: 0, confidence: 0, reason: `Only ${source.length} candles loaded` };
+  }
+  const close = source[source.length - 1].close;
+  const ema20 = calculateChartEMA(source, 20);
+  const ema50 = calculateChartEMA(source, 50);
+  const fast = ema20[ema20.length - 1];
+  const slow = ema50[ema50.length - 1];
+  const fastPrev = ema20[Math.max(0, ema20.length - 6)];
+  const recent = source.slice(-20);
+  const prior = source.slice(-45, -20);
+  const recentHigh = Math.max(...recent.map((candle) => candle.high));
+  const recentLow = Math.min(...recent.map((candle) => candle.low));
+  const priorHigh = prior.length ? Math.max(...prior.map((candle) => candle.high)) : recentHigh;
+  const priorLow = prior.length ? Math.min(...prior.map((candle) => candle.low)) : recentLow;
+  const ranges = recent.map((candle) => Math.max(0, candle.high - candle.low));
+  const avgRange = ranges.reduce((sum, value) => sum + value, 0) / Math.max(1, ranges.length);
+  const last = source[source.length - 1];
+  const body = Math.abs(last.close - last.open);
+  const trendUp = Number.isFinite(fast) && Number.isFinite(slow) && close >= fast && fast >= slow && fast >= fastPrev;
+  const trendDown = Number.isFinite(fast) && Number.isFinite(slow) && close <= fast && fast <= slow && fast <= fastPrev;
+  const structureUp = close >= priorHigh || (recentHigh > priorHigh && recentLow >= priorLow);
+  const structureDown = close <= priorLow || (recentLow < priorLow && recentHigh <= priorHigh);
+  const momentumUp = last.close > last.open && body >= avgRange * 0.35;
+  const momentumDown = last.close < last.open && body >= avgRange * 0.35;
+  const buyScore = [trendUp, structureUp, momentumUp].filter(Boolean).length;
+  const sellScore = [trendDown, structureDown, momentumDown].filter(Boolean).length;
+  const direction = buyScore === sellScore ? null : buyScore > sellScore ? "CALL" : "PUT";
+  const score = Math.max(buyScore, sellScore);
+  const confidence = Math.round((score / 3) * 100);
+  const reason = [
+    trendUp ? "trend up" : trendDown ? "trend down" : "trend mixed",
+    structureUp ? "bullish structure" : structureDown ? "bearish structure" : "range structure",
+    momentumUp ? "bullish momentum" : momentumDown ? "bearish momentum" : "weak momentum",
+  ].join(" | ");
+  return { seconds, label, direction, score, confidence, reason };
+}
+
+async function fetchAskAiCandles(symbol, seconds) {
+  const candles = await fetchCandlesForGranularity(symbol, seconds, 1000);
+  return (Array.isArray(candles) ? candles : []).map(normalizeHistoryCandle).filter(Boolean).slice(-1000);
+}
+
+function renderAskAiResult(result) {
+  if (!askAiResultEl || !result) return;
+  const tone = result.decision === "CALL" ? "buy" : result.decision === "PUT" ? "sell" : "skip";
+  const action = result.decision === "CALL"
+    ? "BUY / Rise next candle"
+    : result.decision === "PUT"
+      ? "SELL / Fall next candle"
+      : "SKIP next candle";
+  const frameRows = result.frameAnalyses.map((frame) => `
+    <div class="ask-ai-frame">
+      <span>${escapeHtml(frame.label)}</span>
+      <span>${frame.direction === "CALL" ? "BUY" : frame.direction === "PUT" ? "SELL" : "MIXED"}</span>
+      <span>${frame.confidence}% • ${escapeHtml(frame.reason)}</span>
+    </div>
+  `).join("");
+  const loadedText = result.candlesLoaded.map((item) => `${item.label}: ${item.count}`).join(" | ");
+  askAiResultEl.innerHTML = `
+    <div class="ask-ai-card ${tone}">
+      <div class="ask-ai-title">${escapeHtml(result.symbol)} • ${action} • ${result.confidence}%</div>
+      <div class="ask-ai-meta">Trading timeframe: ${escapeHtml(getTimeframeLabel(result.baseSeconds))} • Loaded candles: ${escapeHtml(loadedText)}</div>
+      <div class="ask-ai-meta">Top-down engine: ${escapeHtml(result.topDown?.setup || "No top-down edge")}</div>
+      <div class="ask-ai-frames">${frameRows}</div>
+    </div>
+  `;
+}
+
+async function runAskAiAnalysis() {
+  if (askAiInFlight) return;
+  const symbol = askAiSymbolSelectEl?.value || currentSymbol;
+  const baseSeconds = Number(askAiTimeframeSelectEl?.value || getChartTimeframeSeconds());
+  const symbolInfo = activeSymbols.find((item) => item.symbol === symbol);
+  if (!symbol || !Number.isFinite(baseSeconds)) {
+    if (askAiStatusEl) askAiStatusEl.textContent = "Select a group, pair, and timeframe first.";
+    return;
+  }
+
+  askAiInFlight = true;
+  if (askAiAnalyseBtnEl) {
+    askAiAnalyseBtnEl.disabled = true;
+    askAiAnalyseBtnEl.textContent = "Analysing...";
+  }
+  if (askAiStatusEl) askAiStatusEl.textContent = `Requesting 1000 candles for ${symbolInfo?.display_name || symbol} across 7x, 5x, 3x, and trading timeframe...`;
+  if (askAiResultEl) askAiResultEl.innerHTML = "";
+
+  try {
+    const frames = [
+      { seconds: baseSeconds * 7, label: `7x ${getTimeframeLabel(baseSeconds * 7)}` },
+      { seconds: baseSeconds * 5, label: `5x ${getTimeframeLabel(baseSeconds * 5)}` },
+      { seconds: baseSeconds * 3, label: `3x ${getTimeframeLabel(baseSeconds * 3)}` },
+      { seconds: baseSeconds, label: `Trade ${getTimeframeLabel(baseSeconds)}` },
+    ];
+    const loaded = [];
+    for (const frame of frames) {
+      if (askAiStatusEl) askAiStatusEl.textContent = `Loading ${frame.label} candles...`;
+      const candles = await fetchAskAiCandles(symbol, frame.seconds);
+      loaded.push({ ...frame, candles, analysis: analyseAskAiFrame(candles, frame.seconds, frame.label) });
+    }
+
+    const frameAnalyses = loaded.map((frame) => frame.analysis);
+    const callCount = frameAnalyses.filter((frame) => frame.direction === "CALL").length;
+    const putCount = frameAnalyses.filter((frame) => frame.direction === "PUT").length;
+    const alignedDirection = callCount === putCount ? null : callCount > putCount ? "CALL" : "PUT";
+    const alignedFrames = frameAnalyses.filter((frame) => frame.direction === alignedDirection).length;
+    const baseLoaded = loaded[loaded.length - 1]?.candles || [];
+    const referencePrice = baseLoaded[baseLoaded.length - 1]?.close;
+    const topDown = buildTopDownMainSignal(baseLoaded, referencePrice, baseSeconds);
+    const topDownDirection = topDown.rawDirection || topDown.direction || null;
+    const topDownAligned = alignedDirection && topDownDirection === alignedDirection;
+    const averageConfidence = Math.round(frameAnalyses.reduce((sum, frame) => sum + frame.confidence, 0) / Math.max(1, frameAnalyses.length));
+    const confidence = clamp(Math.round((alignedFrames / frames.length) * 55 + averageConfidence * 0.25 + (topDownAligned ? 20 : 0)), 0, 100);
+    const takeTrade = Boolean(alignedDirection && alignedFrames >= 3 && topDownAligned && confidence >= 65);
+    const decision = takeTrade ? alignedDirection : null;
+    renderAskAiResult({
+      symbol: symbolInfo?.display_name || symbol,
+      baseSeconds,
+      decision,
+      rawDirection: alignedDirection,
+      confidence,
+      topDown,
+      frameAnalyses,
+      candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: frame.candles.length })),
+    });
+    if (askAiStatusEl) {
+      askAiStatusEl.textContent = takeTrade
+        ? `Analysis complete. Next candle bias: ${decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${confidence}%).`
+        : `Analysis complete. Skip next candle unless alignment improves (${confidence}%).`;
+    }
+  } catch (err) {
+    if (askAiStatusEl) askAiStatusEl.textContent = `AI analysis failed: ${err?.message || "unknown error"}`;
+  } finally {
+    askAiInFlight = false;
+    if (askAiAnalyseBtnEl) {
+      askAiAnalyseBtnEl.disabled = false;
+      askAiAnalyseBtnEl.textContent = "Analyse";
+    }
+  }
+}
+
 function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimeframeSeconds()) {
   const sourceCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
   if (sourceCandles.length < MARKET_SCANNER_MIN_ENTRY_CANDLES) return null;
@@ -14188,6 +14379,10 @@ function syncInstrumentDrivenControls(symbol = getActiveSymbolInfo()) {
 
   setSelectValueIfAvailable(marketScannerScopeSelectEl, scope);
   setSelectValueIfAvailable(autoMarketScopeSelectEl, scope);
+  if (setSelectValueIfAvailable(askAiGroupSelectEl, scope)) {
+    populateAskAiSymbols();
+    setSelectValueIfAvailable(askAiSymbolSelectEl, symbol.symbol);
+  }
   syncTimeframeAvailability(minSignalSeconds);
   if (isForexSymbol(symbol)) {
     setMinimumTimeframe(minSignalSeconds);
@@ -14357,6 +14552,7 @@ async function loadActiveSymbols() {
 
   populateMarketScannerScopeSelect();
   populateAutoMarketScopeSelect();
+  syncAskAiControls();
   rebuildSymbolsForTradeMode({ preserveSelection: false });
   setStatus(`Markets loaded (${riseFallSymbols.length} Rise/Fall symbols)`);
 }
@@ -15159,6 +15355,14 @@ function init() {
   scanMarketsBtnEl = document.getElementById("scanMarkets");
   marketScannerStatusEl = document.getElementById("marketScannerStatus");
   marketScannerResultsEl = document.getElementById("marketScannerResults");
+  askAiToggleBtnEl = document.getElementById("askAiToggle");
+  askAiBodyEl = document.getElementById("askAiBody");
+  askAiGroupSelectEl = document.getElementById("askAiGroup");
+  askAiSymbolSelectEl = document.getElementById("askAiSymbol");
+  askAiTimeframeSelectEl = document.getElementById("askAiTimeframe");
+  askAiAnalyseBtnEl = document.getElementById("askAiAnalyse");
+  askAiStatusEl = document.getElementById("askAiStatus");
+  askAiResultEl = document.getElementById("askAiResult");
   signalBodyEl = document.getElementById("signalBody");
   signalSectionTitleEl = document.getElementById("signalSectionTitle");
   toggleSignalBtn = document.getElementById("toggleSignal");
@@ -15252,6 +15456,7 @@ function init() {
   populateMarketScannerIndicators();
   populateMarketScannerScopeSelect();
   populateAutoMarketScopeSelect();
+  syncAskAiControls();
   populateTrendModeOptions();
   chartDrawingStore = loadChartDrawingStore();
   syncDrawingToolUI();
@@ -15973,6 +16178,13 @@ function init() {
       renderChartMarketMenu();
     }
   });
+
+  askAiToggleBtnEl?.addEventListener("click", () => {
+    askAiBodyEl?.classList.toggle("hidden");
+    syncAskAiControls();
+  });
+  askAiGroupSelectEl?.addEventListener("change", populateAskAiSymbols);
+  askAiAnalyseBtnEl?.addEventListener("click", runAskAiAnalysis);
 
   autoAccountSelect?.addEventListener("change", () => {
     autoTradeLoginId = autoAccountSelect.value;
