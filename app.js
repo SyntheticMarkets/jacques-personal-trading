@@ -12308,10 +12308,79 @@ function populateAskAiTimeframes() {
     : String(getChartTimeframeSeconds());
 }
 
+function populateAskAiTimeframesForLimits(limits = null) {
+  if (!askAiTimeframeSelectEl) return;
+  const previous = Number(askAiTimeframeSelectEl.value || getChartTimeframeSeconds());
+  const minSec = Number(limits?.minSec ?? 1);
+  const maxSec = Number(limits?.maxSec ?? Infinity);
+  const allowed = TIMEFRAME_OPTIONS.filter((option) => (
+    option.seconds >= minSec &&
+    (!Number.isFinite(maxSec) || option.seconds <= maxSec)
+  ));
+  const options = allowed.length ? allowed : TIMEFRAME_OPTIONS;
+  askAiTimeframeSelectEl.innerHTML = options
+    .map((option) => `<option value="${option.seconds}">${option.label}</option>`)
+    .join("");
+  askAiTimeframeSelectEl.value = options.some((option) => option.seconds === previous)
+    ? String(previous)
+    : String(options[0]?.seconds || getChartTimeframeSeconds());
+}
+
 function syncAskAiControls() {
   populateAskAiGroups();
   populateAskAiSymbols();
   populateAskAiTimeframes();
+  refreshAskAiTimeframeRules().catch(() => {});
+}
+
+function getFallbackDurationLimitsForSymbol(symbolInfo) {
+  if (isForexSymbol(symbolInfo)) return { minSec: 900, maxSec: Infinity };
+  return { minSec: 1, maxSec: Infinity };
+}
+
+async function getAskAiDurationLimitsForSymbol(symbolInfo) {
+  if (!symbolInfo?.symbol) return { minSec: minDurationSec, maxSec: Infinity };
+  try {
+    return await getAutoContractDurationLimits(symbolInfo.symbol);
+  } catch {
+    return getFallbackDurationLimitsForSymbol(symbolInfo);
+  }
+}
+
+async function getAskAiDurationLimitsForSelection() {
+  const selectedSymbol = askAiSymbolSelectEl?.value || currentSymbol;
+  const groupSymbols = getScannerSymbolsForScope(askAiGroupSelectEl?.value || "__rise_fall");
+  const symbols = selectedSymbol === "__scan_group"
+    ? groupSymbols
+    : groupSymbols.filter((item) => item.symbol === selectedSymbol);
+  if (!symbols.length) return { minSec: minDurationSec, maxSec: Infinity };
+  const limits = await Promise.all(symbols.map(getAskAiDurationLimitsForSymbol));
+  return limits.reduce((acc, item) => ({
+    minSec: Math.max(acc.minSec, Number(item.minSec || 1)),
+    maxSec: Math.min(acc.maxSec, Number(item.maxSec ?? Infinity)),
+  }), { minSec: 1, maxSec: Infinity });
+}
+
+async function refreshAskAiTimeframeRules() {
+  if (!askAiTimeframeSelectEl) return;
+  const selectedSymbol = askAiSymbolSelectEl?.value || currentSymbol;
+  const groupSymbols = getScannerSymbolsForScope(askAiGroupSelectEl?.value || "__rise_fall");
+  const immediateSymbols = selectedSymbol === "__scan_group" ? groupSymbols : groupSymbols.filter((item) => item.symbol === selectedSymbol);
+  const fallback = immediateSymbols.reduce((acc, symbol) => {
+    const limits = getFallbackDurationLimitsForSymbol(symbol);
+    return {
+      minSec: Math.max(acc.minSec, limits.minSec),
+      maxSec: Math.min(acc.maxSec, limits.maxSec),
+    };
+  }, { minSec: 1, maxSec: Infinity });
+  populateAskAiTimeframesForLimits(fallback);
+  try {
+    const limits = await getAskAiDurationLimitsForSelection();
+    populateAskAiTimeframesForLimits(limits);
+    if (askAiStatusEl && !askAiInFlight) {
+      askAiStatusEl.textContent = `Minimum expiry for this selection: ${formatDurationLabel(limits.minSec)}.`;
+    }
+  } catch {}
 }
 
 function getAskAiFramePlan(baseSeconds) {
@@ -12531,6 +12600,13 @@ function renderAskAiResult(result) {
 
 async function buildAskAiAnalysisForSymbol(symbol, baseSeconds, options = {}) {
   const symbolInfo = activeSymbols.find((item) => item.symbol === symbol);
+  const durationLimits = await getAskAiDurationLimitsForSymbol(symbolInfo);
+  if (
+    Number(baseSeconds) < Number(durationLimits.minSec || 1) ||
+    (Number.isFinite(durationLimits.maxSec) && Number(baseSeconds) > Number(durationLimits.maxSec))
+  ) {
+    throw new Error(`minimum expiry ${formatDurationLabel(durationLimits.minSec)}`);
+  }
   const frames = getAskAiFramePlan(baseSeconds);
   const loaded = [];
   for (const frame of frames) {
@@ -12578,6 +12654,7 @@ async function runAskAiAnalysis() {
 
   try {
     const results = [];
+    let skippedForExpiry = 0;
     for (let i = 0; i < symbolsToAnalyse.length; i += 1) {
       const symbolInfo = symbolsToAnalyse[i];
       if (askAiStatusEl) {
@@ -12587,7 +12664,9 @@ async function runAskAiAnalysis() {
       }
       try {
         results.push(await buildAskAiAnalysisForSymbol(symbolInfo.symbol, baseSeconds, { showProgress: !scanAll }));
-      } catch {}
+      } catch (err) {
+        if (String(err?.message || "").includes("minimum expiry")) skippedForExpiry += 1;
+      }
     }
     const best = results
       .sort((a, b) => Number(Boolean(b.decision)) - Number(Boolean(a.decision)) || b.confidence - a.confidence)[0];
@@ -12598,9 +12677,10 @@ async function runAskAiAnalysis() {
     renderAskAiResult(best);
     if (askAiStatusEl) {
       const prefix = scanAll ? `Scan complete. Best market: ${best.symbol}. ` : "Analysis complete. ";
+      const skippedText = skippedForExpiry ? ` Skipped ${skippedForExpiry} market${skippedForExpiry === 1 ? "" : "s"} below min expiry.` : "";
       askAiStatusEl.textContent = best.decision
-        ? `${prefix}Next candle bias: ${best.decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${best.confidence}%).`
-        : `${prefix}Skip next candle unless alignment improves (${best.confidence}%).`;
+        ? `${prefix}Next candle bias: ${best.decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${best.confidence}%).${skippedText}`
+        : `${prefix}Skip next candle unless alignment improves (${best.confidence}%).${skippedText}`;
     }
   } catch (err) {
     if (askAiStatusEl) askAiStatusEl.textContent = `AI analysis failed: ${err?.message || "unknown error"}`;
@@ -14492,12 +14572,13 @@ function setSelectValueIfAvailable(selectEl, value) {
 
 function setMinimumTimeframe(seconds) {
   const minSeconds = Math.max(1, Number(seconds) || DEFAULT_TIMEFRAME_SEC);
-  if (getChartTimeframeSeconds() < minSeconds) {
-    setChartTimeframe(minSeconds).catch(() => {});
+  const targetSeconds = TIMEFRAME_OPTIONS.find((option) => option.seconds >= minSeconds)?.seconds || minSeconds;
+  if (getChartTimeframeSeconds() < targetSeconds) {
+    setChartTimeframe(targetSeconds).catch(() => {});
   }
-  if (autoTimeframeSelectEl && getAutoTradeTimeframeSeconds() < minSeconds) {
-    autoTimeframeSelectEl.value = String(minSeconds);
-    autoTradeTimeframeSeconds = minSeconds;
+  if (autoTimeframeSelectEl && getAutoTradeTimeframeSeconds() < targetSeconds) {
+    autoTimeframeSelectEl.value = String(targetSeconds);
+    autoTradeTimeframeSeconds = targetSeconds;
   }
 }
 
@@ -14543,6 +14624,7 @@ function syncInstrumentDrivenControls(symbol = getActiveSymbolInfo()) {
   if (setSelectValueIfAvailable(askAiGroupSelectEl, scope)) {
     populateAskAiSymbols();
     setSelectValueIfAvailable(askAiSymbolSelectEl, symbol.symbol);
+    refreshAskAiTimeframeRules().catch(() => {});
   }
   syncTimeframeAvailability(minSignalSeconds);
   if (isForexSymbol(symbol)) {
@@ -14950,6 +15032,9 @@ async function loadContractsFor(symbol) {
     if (mins.length) {
       minDurationSec = Math.min(...mins);
     }
+    syncTimeframeAvailability(minDurationSec);
+    setMinimumTimeframe(minDurationSec);
+    refreshAskAiTimeframeRules().catch(() => {});
     populateRiseFallExpiryOptions();
   } catch {
     if (requestSymbol !== currentSymbol) return;
@@ -16352,7 +16437,13 @@ function init() {
   askAiDialogEl?.addEventListener("click", (event) => {
     if (event.target === askAiDialogEl) askAiDialogEl.classList.add("hidden");
   });
-  askAiGroupSelectEl?.addEventListener("change", populateAskAiSymbols);
+  askAiGroupSelectEl?.addEventListener("change", () => {
+    populateAskAiSymbols();
+    refreshAskAiTimeframeRules().catch(() => {});
+  });
+  askAiSymbolSelectEl?.addEventListener("change", () => {
+    refreshAskAiTimeframeRules().catch(() => {});
+  });
   askAiAnalyseBtnEl?.addEventListener("click", runAskAiAnalysis);
   askAiResultEl?.addEventListener("click", (event) => {
     const target = event.target instanceof HTMLElement ? event.target.closest("[data-ask-ai-open-symbol]") : null;
