@@ -16,6 +16,7 @@
           <button id="chart2BackBtn" class="ghost small chart2-back-btn" type="button">Back to Chart</button>
           <nav id="desktopQuickTabs" class="desktop-quick-tabs" aria-label="Desktop panel">
             <button class="desktop-quick-tab active" data-desktop-panel="proposals" type="button">Trade proposals</button>
+            <button id="askAiToggle" class="desktop-quick-tab" type="button">Ask AI</button>
             <button class="desktop-quick-tab" data-desktop-panel="settings" type="button">Settings</button>
             <button class="desktop-quick-tab" data-desktop-panel="results" type="button">Results</button>
             <button class="desktop-quick-tab" data-desktop-panel="auto" type="button">Auto</button>
@@ -34,6 +35,25 @@
         </div>
         <div id="accountList" class="account-list"></div>
         <button id="logoutBtn" class="ghost small account-manage">Logout</button>
+      </div>
+
+      <div id="askAiDialog" class="ask-ai-dialog hidden" role="dialog" aria-modal="true" aria-labelledby="askAiDialogTitle">
+        <div class="ask-ai-dialog-card">
+          <header class="card-head">
+            <h2 id="askAiDialogTitle">Ask AI</h2>
+            <button id="askAiClose" class="ghost small" type="button">Close</button>
+          </header>
+          <div id="askAiBody" class="ask-ai-body">
+            <div class="ask-ai-controls">
+              <select id="askAiGroup" class="field-input" aria-label="AI analysis market group"></select>
+              <select id="askAiSymbol" class="field-input" aria-label="AI analysis pair"></select>
+              <select id="askAiTimeframe" class="field-input" aria-label="AI analysis timeframe"></select>
+              <button id="askAiAnalyse" class="ghost small main-signal-btn" type="button">Analyse</button>
+            </div>
+            <div id="askAiStatus" class="main-signal-status">Choose a group, pair, and timeframe.</div>
+            <div id="askAiResult" class="ask-ai-result"></div>
+          </div>
+        </div>
       </div>
 
       <aside id="desktopSidebar" class="desktop-sidebar">
@@ -126,19 +146,6 @@
         <div class="main-signal-actions">
           <button id="generateMainSignal" class="ghost small main-signal-btn" type="button">Generate signal</button>
           <div id="mainSignalStatus" class="main-signal-status">Wait for the current close, then scan current and higher frames.</div>
-        </div>
-        <div class="ask-ai-panel">
-          <button id="askAiToggle" class="ghost small main-signal-btn" type="button">Ask AI</button>
-          <div id="askAiBody" class="ask-ai-body hidden">
-            <div class="ask-ai-controls">
-              <select id="askAiGroup" class="field-input" aria-label="AI analysis market group"></select>
-              <select id="askAiSymbol" class="field-input" aria-label="AI analysis pair"></select>
-              <select id="askAiTimeframe" class="field-input" aria-label="AI analysis timeframe"></select>
-              <button id="askAiAnalyse" class="ghost small main-signal-btn" type="button">Analyse</button>
-            </div>
-            <div id="askAiStatus" class="main-signal-status">Choose a group, pair, and timeframe.</div>
-            <div id="askAiResult" class="ask-ai-result"></div>
-          </div>
         </div>
         <div class="market-scanner">
           <div class="market-scanner-controls">

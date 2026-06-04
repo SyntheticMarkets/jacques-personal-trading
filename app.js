@@ -141,6 +141,8 @@ let scanMarketsBtnEl;
 let marketScannerStatusEl;
 let marketScannerResultsEl;
 let askAiToggleBtnEl;
+let askAiDialogEl;
+let askAiCloseBtnEl;
 let askAiBodyEl;
 let askAiGroupSelectEl;
 let askAiSymbolSelectEl;
@@ -12309,31 +12311,55 @@ function syncAskAiControls() {
   populateAskAiTimeframes();
 }
 
+function getAskAiFramePlan(baseSeconds) {
+  const sorted = TIMEFRAME_OPTIONS
+    .map((option) => ({ seconds: option.seconds, label: option.label }))
+    .sort((a, b) => a.seconds - b.seconds);
+  const baseIndex = sorted.findIndex((option) => option.seconds === Number(baseSeconds));
+  const resolvedBaseIndex = baseIndex >= 0
+    ? baseIndex
+    : Math.max(0, sorted.findIndex((option) => option.seconds > Number(baseSeconds)) - 1);
+  const labels = [
+    { offset: 7, prefix: "7 frames up" },
+    { offset: 5, prefix: "5 frames up" },
+    { offset: 3, prefix: "3 frames up" },
+    { offset: 0, prefix: "Trade frame" },
+  ];
+  const seen = new Set();
+  return labels
+    .map(({ offset, prefix }) => {
+      const option = sorted[Math.min(sorted.length - 1, Math.max(0, resolvedBaseIndex + offset))];
+      return option ? { seconds: option.seconds, label: `${prefix} ${option.label}` } : null;
+    })
+    .filter((frame) => {
+      if (!frame || seen.has(frame.seconds)) return false;
+      seen.add(frame.seconds);
+      return true;
+    });
+}
+
 function analyseAskAiFrame(candles, seconds, label) {
-  const source = (Array.isArray(candles) ? candles : []).filter(Boolean);
-  if (source.length < 60) {
-    return { seconds, label, direction: null, score: 0, confidence: 0, reason: `Only ${source.length} candles loaded` };
+  const source = (Array.isArray(candles) ? candles : []).filter(Boolean).slice(-20);
+  if (source.length < 20) {
+    return { seconds, label, direction: null, score: 0, confidence: 0, reason: `Only ${source.length}/20 candles loaded` };
   }
   const close = source[source.length - 1].close;
+  const ema8 = calculateChartEMA(source, 8);
   const ema20 = calculateChartEMA(source, 20);
-  const ema50 = calculateChartEMA(source, 50);
-  const fast = ema20[ema20.length - 1];
-  const slow = ema50[ema50.length - 1];
-  const fastPrev = ema20[Math.max(0, ema20.length - 6)];
-  const recent = source.slice(-20);
-  const prior = source.slice(-45, -20);
-  const recentHigh = Math.max(...recent.map((candle) => candle.high));
-  const recentLow = Math.min(...recent.map((candle) => candle.low));
-  const priorHigh = prior.length ? Math.max(...prior.map((candle) => candle.high)) : recentHigh;
-  const priorLow = prior.length ? Math.min(...prior.map((candle) => candle.low)) : recentLow;
-  const ranges = recent.map((candle) => Math.max(0, candle.high - candle.low));
+  const fast = ema8[ema8.length - 1];
+  const slow = ema20[ema20.length - 1];
+  const fastPrev = ema8[Math.max(0, ema8.length - 5)];
+  const prior = source.slice(0, -1);
+  const priorHigh = Math.max(...prior.map((candle) => candle.high));
+  const priorLow = Math.min(...prior.map((candle) => candle.low));
+  const ranges = source.map((candle) => Math.max(0, candle.high - candle.low));
   const avgRange = ranges.reduce((sum, value) => sum + value, 0) / Math.max(1, ranges.length);
   const last = source[source.length - 1];
   const body = Math.abs(last.close - last.open);
   const trendUp = Number.isFinite(fast) && Number.isFinite(slow) && close >= fast && fast >= slow && fast >= fastPrev;
   const trendDown = Number.isFinite(fast) && Number.isFinite(slow) && close <= fast && fast <= slow && fast <= fastPrev;
-  const structureUp = close >= priorHigh || (recentHigh > priorHigh && recentLow >= priorLow);
-  const structureDown = close <= priorLow || (recentLow < priorLow && recentHigh <= priorHigh);
+  const structureUp = close >= priorHigh;
+  const structureDown = close <= priorLow;
   const momentumUp = last.close > last.open && body >= avgRange * 0.35;
   const momentumDown = last.close < last.open && body >= avgRange * 0.35;
   const buyScore = [trendUp, structureUp, momentumUp].filter(Boolean).length;
@@ -12350,8 +12376,8 @@ function analyseAskAiFrame(candles, seconds, label) {
 }
 
 async function fetchAskAiCandles(symbol, seconds) {
-  const candles = await fetchCandlesForGranularity(symbol, seconds, 1000);
-  return (Array.isArray(candles) ? candles : []).map(normalizeHistoryCandle).filter(Boolean).slice(-1000);
+  const candles = await fetchCandlesForGranularity(symbol, seconds, 80);
+  return (Array.isArray(candles) ? candles : []).map(normalizeHistoryCandle).filter(Boolean).slice(-80);
 }
 
 function renderAskAiResult(result) {
@@ -12373,7 +12399,7 @@ function renderAskAiResult(result) {
   askAiResultEl.innerHTML = `
     <div class="ask-ai-card ${tone}">
       <div class="ask-ai-title">${escapeHtml(result.symbol)} • ${action} • ${result.confidence}%</div>
-      <div class="ask-ai-meta">Trading timeframe: ${escapeHtml(getTimeframeLabel(result.baseSeconds))} • Loaded candles: ${escapeHtml(loadedText)}</div>
+      <div class="ask-ai-meta">Trading timeframe: ${escapeHtml(getTimeframeLabel(result.baseSeconds))} • Analysed candles: ${escapeHtml(loadedText)}</div>
       <div class="ask-ai-meta">Top-down engine: ${escapeHtml(result.topDown?.setup || "No top-down edge")}</div>
       <div class="ask-ai-frames">${frameRows}</div>
     </div>
@@ -12395,16 +12421,11 @@ async function runAskAiAnalysis() {
     askAiAnalyseBtnEl.disabled = true;
     askAiAnalyseBtnEl.textContent = "Analysing...";
   }
-  if (askAiStatusEl) askAiStatusEl.textContent = `Requesting 1000 candles for ${symbolInfo?.display_name || symbol} across 7x, 5x, 3x, and trading timeframe...`;
+  if (askAiStatusEl) askAiStatusEl.textContent = `Loading ladder timeframes for ${symbolInfo?.display_name || symbol}. The analysis uses the latest 20 candles on each frame.`;
   if (askAiResultEl) askAiResultEl.innerHTML = "";
 
   try {
-    const frames = [
-      { seconds: baseSeconds * 7, label: `7x ${getTimeframeLabel(baseSeconds * 7)}` },
-      { seconds: baseSeconds * 5, label: `5x ${getTimeframeLabel(baseSeconds * 5)}` },
-      { seconds: baseSeconds * 3, label: `3x ${getTimeframeLabel(baseSeconds * 3)}` },
-      { seconds: baseSeconds, label: `Trade ${getTimeframeLabel(baseSeconds)}` },
-    ];
+    const frames = getAskAiFramePlan(baseSeconds);
     const loaded = [];
     for (const frame of frames) {
       if (askAiStatusEl) askAiStatusEl.textContent = `Loading ${frame.label} candles...`;
@@ -12424,7 +12445,7 @@ async function runAskAiAnalysis() {
     const topDownAligned = alignedDirection && topDownDirection === alignedDirection;
     const averageConfidence = Math.round(frameAnalyses.reduce((sum, frame) => sum + frame.confidence, 0) / Math.max(1, frameAnalyses.length));
     const confidence = clamp(Math.round((alignedFrames / frames.length) * 55 + averageConfidence * 0.25 + (topDownAligned ? 20 : 0)), 0, 100);
-    const takeTrade = Boolean(alignedDirection && alignedFrames >= 3 && topDownAligned && confidence >= 65);
+    const takeTrade = Boolean(alignedDirection && alignedFrames >= Math.min(3, frames.length) && confidence >= 55);
     const decision = takeTrade ? alignedDirection : null;
     renderAskAiResult({
       symbol: symbolInfo?.display_name || symbol,
@@ -12434,7 +12455,7 @@ async function runAskAiAnalysis() {
       confidence,
       topDown,
       frameAnalyses,
-      candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: frame.candles.length })),
+      candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: Math.min(20, frame.candles.length) })),
     });
     if (askAiStatusEl) {
       askAiStatusEl.textContent = takeTrade
@@ -15356,6 +15377,8 @@ function init() {
   marketScannerStatusEl = document.getElementById("marketScannerStatus");
   marketScannerResultsEl = document.getElementById("marketScannerResults");
   askAiToggleBtnEl = document.getElementById("askAiToggle");
+  askAiDialogEl = document.getElementById("askAiDialog");
+  askAiCloseBtnEl = document.getElementById("askAiClose");
   askAiBodyEl = document.getElementById("askAiBody");
   askAiGroupSelectEl = document.getElementById("askAiGroup");
   askAiSymbolSelectEl = document.getElementById("askAiSymbol");
@@ -16180,8 +16203,14 @@ function init() {
   });
 
   askAiToggleBtnEl?.addEventListener("click", () => {
-    askAiBodyEl?.classList.toggle("hidden");
+    askAiDialogEl?.classList.remove("hidden");
     syncAskAiControls();
+  });
+  askAiCloseBtnEl?.addEventListener("click", () => {
+    askAiDialogEl?.classList.add("hidden");
+  });
+  askAiDialogEl?.addEventListener("click", (event) => {
+    if (event.target === askAiDialogEl) askAiDialogEl.classList.add("hidden");
   });
   askAiGroupSelectEl?.addEventListener("change", populateAskAiSymbols);
   askAiAnalyseBtnEl?.addEventListener("click", runAskAiAnalysis);
