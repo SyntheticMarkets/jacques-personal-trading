@@ -12342,40 +12342,128 @@ function getAskAiFramePlan(baseSeconds) {
 }
 
 function analyseAskAiFrame(candles, seconds, label) {
-  const source = (Array.isArray(candles) ? candles : []).filter(Boolean).slice(-20);
+  const source = (Array.isArray(candles) ? candles : []).filter(Boolean).slice(-90);
   if (source.length < 20) {
-    return { seconds, label, direction: null, score: 0, confidence: 0, reason: `Only ${source.length}/20 candles loaded` };
+    return { seconds, label, direction: null, structureDirection: null, score: 0, confidence: 0, reason: `Only ${source.length}/20 candles loaded` };
   }
-  const close = source[source.length - 1].close;
-  const ema8 = calculateChartEMA(source, 8);
-  const ema20 = calculateChartEMA(source, 20);
-  const fast = ema8[ema8.length - 1];
-  const slow = ema20[ema20.length - 1];
-  const fastPrev = ema8[Math.max(0, ema8.length - 5)];
-  const prior = source.slice(0, -1);
-  const priorHigh = Math.max(...prior.map((candle) => candle.high));
-  const priorLow = Math.min(...prior.map((candle) => candle.low));
-  const ranges = source.map((candle) => Math.max(0, candle.high - candle.low));
-  const avgRange = ranges.reduce((sum, value) => sum + value, 0) / Math.max(1, ranges.length);
-  const last = source[source.length - 1];
-  const body = Math.abs(last.close - last.open);
-  const trendUp = Number.isFinite(fast) && Number.isFinite(slow) && close >= fast && fast >= slow && fast >= fastPrev;
-  const trendDown = Number.isFinite(fast) && Number.isFinite(slow) && close <= fast && fast <= slow && fast <= fastPrev;
-  const structureUp = close >= priorHigh;
-  const structureDown = close <= priorLow;
-  const momentumUp = last.close > last.open && body >= avgRange * 0.35;
-  const momentumDown = last.close < last.open && body >= avgRange * 0.35;
-  const buyScore = [trendUp, structureUp, momentumUp].filter(Boolean).length;
-  const sellScore = [trendDown, structureDown, momentumDown].filter(Boolean).length;
-  const direction = buyScore === sellScore ? null : buyScore > sellScore ? "CALL" : "PUT";
-  const score = Math.max(buyScore, sellScore);
-  const confidence = Math.round((score / 3) * 100);
+  const structure = buildICTStructureAnalysis(source, source.length >= 35 ? 3 : 2);
+  const lastEvent = structure.events[structure.events.length - 1] || null;
+  const lastHigh = structure.pivotHighs[structure.pivotHighs.length - 1] || null;
+  const prevHigh = structure.pivotHighs[structure.pivotHighs.length - 2] || null;
+  const lastLow = structure.pivotLows[structure.pivotLows.length - 1] || null;
+  const prevLow = structure.pivotLows[structure.pivotLows.length - 2] || null;
+  const closeBias = assessCloseStructure(source);
+  let structureDirection = lastEvent?.direction || null;
+  if (!structureDirection && lastHigh && prevHigh && lastLow && prevLow) {
+    if (lastHigh.price > prevHigh.price && lastLow.price > prevLow.price) structureDirection = "UP";
+    if (lastHigh.price < prevHigh.price && lastLow.price < prevLow.price) structureDirection = "DOWN";
+  }
+  if (!structureDirection && closeBias.bias !== "MIXED") structureDirection = closeBias.bias;
+  const confidence = clamp(Math.round(
+    (lastEvent ? 42 : 0) +
+    (closeBias.bias === structureDirection ? 28 : 0) +
+    (lastEvent?.type === "BOS" ? 18 : lastEvent?.type === "MSS" ? 12 : 0) +
+    (source.length >= 50 ? 12 : 6),
+  ), 0, 100);
+  const direction = structureDirection === "UP" ? "CALL" : structureDirection === "DOWN" ? "PUT" : null;
   const reason = [
-    trendUp ? "trend up" : trendDown ? "trend down" : "trend mixed",
-    structureUp ? "bullish structure" : structureDown ? "bearish structure" : "range structure",
-    momentumUp ? "bullish momentum" : momentumDown ? "bearish momentum" : "weak momentum",
+    lastEvent ? `${lastEvent.direction} ${lastEvent.type}` : "no fresh BOS/MSS",
+    closeBias.bias === "UP" ? "bullish close structure" : closeBias.bias === "DOWN" ? "bearish close structure" : "mixed close structure",
+    lastHigh && lastLow ? "swings mapped" : "building swings",
   ].join(" | ");
-  return { seconds, label, direction, score, confidence, reason };
+  return { seconds, label, direction, structureDirection, score: confidence, confidence, reason, lastEvent };
+}
+
+function findAskAiRecentSweep(candles, direction, lookback = 8) {
+  if (!Array.isArray(candles) || candles.length < 8 || !direction) return null;
+  const start = Math.max(1, candles.length - lookback);
+  for (let index = candles.length - 1; index >= start; index -= 1) {
+    const event = detectLiquiditySweepEvent(candles, index, SIGNAL_STRUCTURE_LOOKBACK);
+    if (event?.sweepType === direction) return event;
+  }
+  return null;
+}
+
+function findAskAiPoi(candles, direction, currentPrice) {
+  const source = (Array.isArray(candles) ? candles : []).filter(Boolean).slice(-120);
+  if (source.length < 20 || !direction || !Number.isFinite(currentPrice)) return null;
+  const avgRange = averageRange(source, Math.min(30, source.length)) || Math.abs(currentPrice) * 0.0005 || currentPip || 0.0001;
+  const tolerance = Math.max(currentPip || 0.0001, avgRange * 0.35);
+  const reaction = getInstitutionalReactionPoiLevels(source, tolerance, {
+    pivotLen: source.length >= 45 ? 3 : 2,
+    minTouches: 2,
+    source: "Ask AI",
+  });
+  const closeClusters = getInstitutionalPoiLevels(source, tolerance, 2)
+    .map((level) => ({ ...level, source: "Ask AI", kind: "reaction" }));
+  const levels = mergeInstitutionalPoiCandidates([reaction, closeClusters], tolerance)
+    .map((level) => ({
+      ...level,
+      distance: Math.abs(currentPrice - level.price),
+      aligned: direction === "BUY" ? level.price <= currentPrice + tolerance : level.price >= currentPrice - tolerance,
+    }))
+    .filter((level) => level.aligned)
+    .sort((a, b) => a.distance - b.distance || b.strength - a.strength);
+  const poi = levels[0] || null;
+  if (!poi) return null;
+  return {
+    ...poi,
+    tolerance,
+    avgRange,
+    atPoi: poi.distance <= tolerance * 2.2,
+    behavior: (poi.strength || 0) <= 2 ? "reversal probability" : "breakout risk",
+  };
+}
+
+function buildAskAiInstitutionalPipeline(loaded, baseSeconds) {
+  const frameAnalyses = loaded.map((frame) => frame.analysis);
+  const htfFrames = frameAnalyses.slice(0, Math.max(1, frameAnalyses.length - 1));
+  const upCount = htfFrames.filter((frame) => frame.structureDirection === "UP").length;
+  const downCount = htfFrames.filter((frame) => frame.structureDirection === "DOWN").length;
+  const htfDirection = upCount === htfFrames.length ? "BUY" : downCount === htfFrames.length ? "SELL" : null;
+  const htfAligned = Boolean(htfDirection);
+  const tradeFrame = loaded[loaded.length - 1] || null;
+  const tradeCandles = tradeFrame?.candles || [];
+  const tradeCurrent = tradeCandles[tradeCandles.length - 1] || null;
+  const currentPrice = Number(tradeCurrent?.close);
+  const poiSource = loaded[Math.max(0, loaded.length - 2)]?.candles || tradeCandles;
+  const poi = findAskAiPoi(poiSource, htfDirection, currentPrice);
+  const liquiditySource = loaded[Math.max(0, loaded.length - 2)]?.candles || tradeCandles;
+  const liquiditySweep = findAskAiRecentSweep(liquiditySource, htfDirection, 10);
+  const microSweep = findAskAiRecentSweep(tradeCandles, htfDirection, 5);
+  const avgRange = averageRange(tradeCandles, Math.min(20, tradeCandles.length)) || poi?.avgRange || currentPip || 0.0001;
+  const candlePattern = detectInstitutionalCandlePattern(tradeCandles, htfDirection, avgRange);
+  const confirmation = hasInstitutionalConfirmation(tradeCandles, htfDirection) || candlePattern.confirmed;
+  const gates = [
+    { key: "HTF", pass: htfAligned, label: htfAligned ? `HTF ${htfDirection}` : "HTF not aligned" },
+    { key: "LQ", pass: Boolean(liquiditySweep), label: liquiditySweep ? `${liquiditySweep.liquidityLabel} taken` : "no HTF liquidity taken" },
+    { key: "POI", pass: Boolean(poi?.atPoi), label: poi ? `POI ${formatPrice(poi.price, currentPip)} ${poi.strength || 1}t ${poi.behavior}` : "no POI alignment" },
+    { key: "Micro LQ", pass: Boolean(microSweep), label: microSweep ? `micro ${microSweep.liquidityLabel} taken` : "no micro liquidity taken" },
+    { key: "Confirm", pass: Boolean(confirmation), label: confirmation ? (candlePattern.confirmed ? candlePattern.label : "institutional confirmation") : "no confirmation candle" },
+  ];
+  const passed = gates.filter((gate) => gate.pass).length;
+  const confidence = clamp(Math.round(
+    (htfAligned ? 22 : 0) +
+    (liquiditySweep ? 20 : 0) +
+    (poi?.atPoi ? 20 : 0) +
+    (microSweep ? 18 : 0) +
+    (confirmation ? 20 : 0),
+  ), 0, 100);
+  const takeTrade = passed === gates.length && confidence >= 80;
+  return {
+    decision: takeTrade ? (htfDirection === "BUY" ? "CALL" : "PUT") : null,
+    rawDirection: htfDirection === "BUY" ? "CALL" : htfDirection === "SELL" ? "PUT" : null,
+    institutionalDirection: htfDirection,
+    confidence,
+    frameAnalyses,
+    gates,
+    poi,
+    liquiditySweep,
+    microSweep,
+    candlePattern,
+    setup: gates.map((gate) => `${gate.key}: ${gate.label}`).join(" | "),
+    baseSeconds,
+  };
 }
 
 async function fetchAskAiCandles(symbol, seconds) {
@@ -12417,17 +12505,25 @@ function renderAskAiResult(result) {
   const frameRows = result.frameAnalyses.map((frame) => `
     <div class="ask-ai-frame">
       <span>${escapeHtml(frame.label)}</span>
-      <span>${frame.direction === "CALL" ? "BUY" : frame.direction === "PUT" ? "SELL" : "MIXED"}</span>
+      <span>${frame.structureDirection === "UP" ? "BULL" : frame.structureDirection === "DOWN" ? "BEAR" : "MIXED"}</span>
       <span>${frame.confidence}% • ${escapeHtml(frame.reason)}</span>
     </div>
   `).join("");
+  const gateRows = Array.isArray(result.gates) ? result.gates.map((gate) => `
+    <div class="ask-ai-frame">
+      <span>${escapeHtml(gate.key)}</span>
+      <span>${gate.pass ? "PASS" : "WAIT"}</span>
+      <span>${escapeHtml(gate.label)}</span>
+    </div>
+  `).join("") : "";
   const loadedText = result.candlesLoaded.map((item) => `${item.label}: ${item.count}`).join(" | ");
   askAiResultEl.innerHTML = `
     <div class="ask-ai-card ${tone}">
       <div class="ask-ai-title">${escapeHtml(result.symbol)} • ${action} • ${result.confidence}%</div>
       <div class="ask-ai-meta">Trading timeframe: ${escapeHtml(getTimeframeLabel(result.baseSeconds))} • Analysed candles: ${escapeHtml(loadedText)}</div>
-      <div class="ask-ai-meta">Top-down engine: ${escapeHtml(result.topDown?.setup || "No top-down edge")}</div>
+      <div class="ask-ai-meta">${escapeHtml(result.setup || "Waiting for institutional sequence")}</div>
       <button class="ghost small main-signal-btn ask-ai-open-chart" type="button" data-ask-ai-open-symbol="${escapeHtml(result.symbolCode || "")}" data-ask-ai-open-timeframe="${result.baseSeconds}">Open chart</button>
+      <div class="ask-ai-frames">${gateRows}</div>
       <div class="ask-ai-frames">${frameRows}</div>
     </div>
   `;
@@ -12442,29 +12538,21 @@ async function buildAskAiAnalysisForSymbol(symbol, baseSeconds, options = {}) {
     const candles = await fetchAskAiCandles(symbol, frame.seconds);
     loaded.push({ ...frame, candles, analysis: analyseAskAiFrame(candles, frame.seconds, frame.label) });
   }
-
-  const frameAnalyses = loaded.map((frame) => frame.analysis);
-  const callCount = frameAnalyses.filter((frame) => frame.direction === "CALL").length;
-  const putCount = frameAnalyses.filter((frame) => frame.direction === "PUT").length;
-  const alignedDirection = callCount === putCount ? null : callCount > putCount ? "CALL" : "PUT";
-  const alignedFrames = frameAnalyses.filter((frame) => frame.direction === alignedDirection).length;
-  const baseLoaded = loaded[loaded.length - 1]?.candles || [];
-  const referencePrice = baseLoaded[baseLoaded.length - 1]?.close;
-  const topDown = buildTopDownMainSignal(baseLoaded, referencePrice, baseSeconds);
-  const topDownDirection = topDown.rawDirection || topDown.direction || null;
-  const topDownAligned = alignedDirection && topDownDirection === alignedDirection;
-  const averageConfidence = Math.round(frameAnalyses.reduce((sum, frame) => sum + frame.confidence, 0) / Math.max(1, frameAnalyses.length));
-  const confidence = clamp(Math.round((alignedFrames / frames.length) * 55 + averageConfidence * 0.25 + (topDownAligned ? 20 : 0)), 0, 100);
-  const takeTrade = Boolean(alignedDirection && alignedFrames >= Math.min(3, frames.length) && confidence >= 55);
+  const pipeline = buildAskAiInstitutionalPipeline(loaded, baseSeconds);
   return {
     symbol: symbolInfo?.display_name || symbol,
     symbolCode: symbol,
     baseSeconds,
-    decision: takeTrade ? alignedDirection : null,
-    rawDirection: alignedDirection,
-    confidence,
-    topDown,
-    frameAnalyses,
+    decision: pipeline.decision,
+    rawDirection: pipeline.rawDirection,
+    confidence: pipeline.confidence,
+    frameAnalyses: pipeline.frameAnalyses,
+    gates: pipeline.gates,
+    setup: pipeline.setup,
+    poi: pipeline.poi,
+    liquiditySweep: pipeline.liquiditySweep,
+    microSweep: pipeline.microSweep,
+    candlePattern: pipeline.candlePattern,
     candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: Math.min(20, frame.candles.length) })),
   };
 }
