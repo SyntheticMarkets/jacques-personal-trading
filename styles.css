@@ -886,6 +886,10 @@ button.small {
   line-height: 1.35;
 }
 
+.ask-ai-open-chart {
+  margin-top: 8px;
+}
+
 .ask-ai-frames {
   display: grid;
   gap: 5px;

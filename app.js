@@ -12286,7 +12286,10 @@ function populateAskAiSymbols() {
   if (!askAiSymbolSelectEl) return;
   const previous = askAiSymbolSelectEl.value || currentSymbol || "";
   const symbols = getScannerSymbolsForScope(askAiGroupSelectEl?.value || "__rise_fall");
-  askAiSymbolSelectEl.innerHTML = symbols
+  const scanAllOption = symbols.length
+    ? `<option value="__scan_group">Scan all markets in this group</option>`
+    : "";
+  askAiSymbolSelectEl.innerHTML = scanAllOption + symbols
     .map((symbol) => `<option value="${escapeHtml(symbol.symbol)}">${escapeHtml(symbol.display_name || symbol.symbol)}</option>`)
     .join("");
   askAiSymbolSelectEl.value = symbols.some((symbol) => symbol.symbol === previous)
@@ -12380,6 +12383,29 @@ async function fetchAskAiCandles(symbol, seconds) {
   return (Array.isArray(candles) ? candles : []).map(normalizeHistoryCandle).filter(Boolean).slice(-80);
 }
 
+async function openAskAiChart(symbol, timeframeSeconds) {
+  if (!symbol || !Number.isFinite(Number(timeframeSeconds))) return;
+  const marketEntry = Array.from(symbolsByTradeMode.rise_fall?.values?.() || [])
+    .find((entry) => entry.symbols?.some((item) => item.symbol === symbol));
+  if (!marketEntry || !marketSelect || !symbolSelect) {
+    if (askAiStatusEl) askAiStatusEl.textContent = "Could not open that market on the chart.";
+    return;
+  }
+  askAiDialogEl?.classList.add("hidden");
+  setActiveTab("rise_fall");
+  setActiveAppTab("chart");
+  setStatus(`Opening ${symbol} on ${getTimeframeLabel(timeframeSeconds)}...`);
+  if (TIMEFRAME_OPTIONS.some((option) => option.seconds === Number(timeframeSeconds))) {
+    await setChartTimeframe(Number(timeframeSeconds), { load: false });
+  }
+  marketSelect.value = marketEntry.market;
+  await updateSymbols({ preferredSymbol: symbol, awaitHistory: true });
+  await new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+  scheduleChartResize();
+  renderMiniChart(getBuiltCandles());
+  setStatus(`Opened ${symbolSelect?.selectedOptions?.[0]?.textContent || symbol} on ${getTimeframeLabel(timeframeSeconds)}`);
+}
+
 function renderAskAiResult(result) {
   if (!askAiResultEl || !result) return;
   const tone = result.decision === "CALL" ? "buy" : result.decision === "PUT" ? "sell" : "skip";
@@ -12401,17 +12427,56 @@ function renderAskAiResult(result) {
       <div class="ask-ai-title">${escapeHtml(result.symbol)} • ${action} • ${result.confidence}%</div>
       <div class="ask-ai-meta">Trading timeframe: ${escapeHtml(getTimeframeLabel(result.baseSeconds))} • Analysed candles: ${escapeHtml(loadedText)}</div>
       <div class="ask-ai-meta">Top-down engine: ${escapeHtml(result.topDown?.setup || "No top-down edge")}</div>
+      <button class="ghost small main-signal-btn ask-ai-open-chart" type="button" data-ask-ai-open-symbol="${escapeHtml(result.symbolCode || "")}" data-ask-ai-open-timeframe="${result.baseSeconds}">Open chart</button>
       <div class="ask-ai-frames">${frameRows}</div>
     </div>
   `;
 }
 
+async function buildAskAiAnalysisForSymbol(symbol, baseSeconds, options = {}) {
+  const symbolInfo = activeSymbols.find((item) => item.symbol === symbol);
+  const frames = getAskAiFramePlan(baseSeconds);
+  const loaded = [];
+  for (const frame of frames) {
+    if (askAiStatusEl && options.showProgress !== false) askAiStatusEl.textContent = `Loading ${symbolInfo?.display_name || symbol} ${frame.label} candles...`;
+    const candles = await fetchAskAiCandles(symbol, frame.seconds);
+    loaded.push({ ...frame, candles, analysis: analyseAskAiFrame(candles, frame.seconds, frame.label) });
+  }
+
+  const frameAnalyses = loaded.map((frame) => frame.analysis);
+  const callCount = frameAnalyses.filter((frame) => frame.direction === "CALL").length;
+  const putCount = frameAnalyses.filter((frame) => frame.direction === "PUT").length;
+  const alignedDirection = callCount === putCount ? null : callCount > putCount ? "CALL" : "PUT";
+  const alignedFrames = frameAnalyses.filter((frame) => frame.direction === alignedDirection).length;
+  const baseLoaded = loaded[loaded.length - 1]?.candles || [];
+  const referencePrice = baseLoaded[baseLoaded.length - 1]?.close;
+  const topDown = buildTopDownMainSignal(baseLoaded, referencePrice, baseSeconds);
+  const topDownDirection = topDown.rawDirection || topDown.direction || null;
+  const topDownAligned = alignedDirection && topDownDirection === alignedDirection;
+  const averageConfidence = Math.round(frameAnalyses.reduce((sum, frame) => sum + frame.confidence, 0) / Math.max(1, frameAnalyses.length));
+  const confidence = clamp(Math.round((alignedFrames / frames.length) * 55 + averageConfidence * 0.25 + (topDownAligned ? 20 : 0)), 0, 100);
+  const takeTrade = Boolean(alignedDirection && alignedFrames >= Math.min(3, frames.length) && confidence >= 55);
+  return {
+    symbol: symbolInfo?.display_name || symbol,
+    symbolCode: symbol,
+    baseSeconds,
+    decision: takeTrade ? alignedDirection : null,
+    rawDirection: alignedDirection,
+    confidence,
+    topDown,
+    frameAnalyses,
+    candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: Math.min(20, frame.candles.length) })),
+  };
+}
+
 async function runAskAiAnalysis() {
   if (askAiInFlight) return;
-  const symbol = askAiSymbolSelectEl?.value || currentSymbol;
+  const selectedSymbol = askAiSymbolSelectEl?.value || currentSymbol;
   const baseSeconds = Number(askAiTimeframeSelectEl?.value || getChartTimeframeSeconds());
-  const symbolInfo = activeSymbols.find((item) => item.symbol === symbol);
-  if (!symbol || !Number.isFinite(baseSeconds)) {
+  const scanAll = selectedSymbol === "__scan_group";
+  const groupSymbols = getScannerSymbolsForScope(askAiGroupSelectEl?.value || "__rise_fall");
+  const symbolsToAnalyse = scanAll ? groupSymbols : groupSymbols.filter((item) => item.symbol === selectedSymbol);
+  if (!symbolsToAnalyse.length || !Number.isFinite(baseSeconds)) {
     if (askAiStatusEl) askAiStatusEl.textContent = "Select a group, pair, and timeframe first.";
     return;
   }
@@ -12421,46 +12486,33 @@ async function runAskAiAnalysis() {
     askAiAnalyseBtnEl.disabled = true;
     askAiAnalyseBtnEl.textContent = "Analysing...";
   }
-  if (askAiStatusEl) askAiStatusEl.textContent = `Loading ladder timeframes for ${symbolInfo?.display_name || symbol}. The analysis uses the latest 20 candles on each frame.`;
   if (askAiResultEl) askAiResultEl.innerHTML = "";
 
   try {
-    const frames = getAskAiFramePlan(baseSeconds);
-    const loaded = [];
-    for (const frame of frames) {
-      if (askAiStatusEl) askAiStatusEl.textContent = `Loading ${frame.label} candles...`;
-      const candles = await fetchAskAiCandles(symbol, frame.seconds);
-      loaded.push({ ...frame, candles, analysis: analyseAskAiFrame(candles, frame.seconds, frame.label) });
+    const results = [];
+    for (let i = 0; i < symbolsToAnalyse.length; i += 1) {
+      const symbolInfo = symbolsToAnalyse[i];
+      if (askAiStatusEl) {
+        askAiStatusEl.textContent = scanAll
+          ? `Scanning ${i + 1}/${symbolsToAnalyse.length}: ${symbolInfo.display_name || symbolInfo.symbol}`
+          : `Loading ladder timeframes for ${symbolInfo.display_name || symbolInfo.symbol}. The analysis uses the latest 20 candles on each frame.`;
+      }
+      try {
+        results.push(await buildAskAiAnalysisForSymbol(symbolInfo.symbol, baseSeconds, { showProgress: !scanAll }));
+      } catch {}
     }
-
-    const frameAnalyses = loaded.map((frame) => frame.analysis);
-    const callCount = frameAnalyses.filter((frame) => frame.direction === "CALL").length;
-    const putCount = frameAnalyses.filter((frame) => frame.direction === "PUT").length;
-    const alignedDirection = callCount === putCount ? null : callCount > putCount ? "CALL" : "PUT";
-    const alignedFrames = frameAnalyses.filter((frame) => frame.direction === alignedDirection).length;
-    const baseLoaded = loaded[loaded.length - 1]?.candles || [];
-    const referencePrice = baseLoaded[baseLoaded.length - 1]?.close;
-    const topDown = buildTopDownMainSignal(baseLoaded, referencePrice, baseSeconds);
-    const topDownDirection = topDown.rawDirection || topDown.direction || null;
-    const topDownAligned = alignedDirection && topDownDirection === alignedDirection;
-    const averageConfidence = Math.round(frameAnalyses.reduce((sum, frame) => sum + frame.confidence, 0) / Math.max(1, frameAnalyses.length));
-    const confidence = clamp(Math.round((alignedFrames / frames.length) * 55 + averageConfidence * 0.25 + (topDownAligned ? 20 : 0)), 0, 100);
-    const takeTrade = Boolean(alignedDirection && alignedFrames >= Math.min(3, frames.length) && confidence >= 55);
-    const decision = takeTrade ? alignedDirection : null;
-    renderAskAiResult({
-      symbol: symbolInfo?.display_name || symbol,
-      baseSeconds,
-      decision,
-      rawDirection: alignedDirection,
-      confidence,
-      topDown,
-      frameAnalyses,
-      candlesLoaded: loaded.map((frame) => ({ label: frame.label, count: Math.min(20, frame.candles.length) })),
-    });
+    const best = results
+      .sort((a, b) => Number(Boolean(b.decision)) - Number(Boolean(a.decision)) || b.confidence - a.confidence)[0];
+    if (!best) {
+      if (askAiStatusEl) askAiStatusEl.textContent = "Analysis complete. No market returned enough data.";
+      return;
+    }
+    renderAskAiResult(best);
     if (askAiStatusEl) {
-      askAiStatusEl.textContent = takeTrade
-        ? `Analysis complete. Next candle bias: ${decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${confidence}%).`
-        : `Analysis complete. Skip next candle unless alignment improves (${confidence}%).`;
+      const prefix = scanAll ? `Scan complete. Best market: ${best.symbol}. ` : "Analysis complete. ";
+      askAiStatusEl.textContent = best.decision
+        ? `${prefix}Next candle bias: ${best.decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${best.confidence}%).`
+        : `${prefix}Skip next candle unless alignment improves (${best.confidence}%).`;
     }
   } catch (err) {
     if (askAiStatusEl) askAiStatusEl.textContent = `AI analysis failed: ${err?.message || "unknown error"}`;
@@ -16214,6 +16266,15 @@ function init() {
   });
   askAiGroupSelectEl?.addEventListener("change", populateAskAiSymbols);
   askAiAnalyseBtnEl?.addEventListener("click", runAskAiAnalysis);
+  askAiResultEl?.addEventListener("click", (event) => {
+    const target = event.target instanceof HTMLElement ? event.target.closest("[data-ask-ai-open-symbol]") : null;
+    const symbol = target?.getAttribute("data-ask-ai-open-symbol");
+    const timeframe = Number(target?.getAttribute("data-ask-ai-open-timeframe") || askAiTimeframeSelectEl?.value || getChartTimeframeSeconds());
+    if (!symbol) return;
+    openAskAiChart(symbol, timeframe).catch((err) => {
+      if (askAiStatusEl) askAiStatusEl.textContent = `Open chart failed: ${err?.message || "unknown error"}`;
+    });
+  });
 
   autoAccountSelect?.addEventListener("change", () => {
     autoTradeLoginId = autoAccountSelect.value;
