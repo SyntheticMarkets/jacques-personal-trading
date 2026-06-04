@@ -14827,6 +14827,35 @@ function updateSymbols({ preferredSymbol = "", awaitHistory = false } = {}) {
   return onSymbolChange({ awaitHistory });
 }
 
+function findSymbolMarketEntry(symbol, mode = getActiveTradeMode()) {
+  if (!symbol) return null;
+  const map = symbolsByTradeMode[mode] || new Map();
+  return Array.from(map.values())
+    .find((entry) => entry.symbols?.some((item) => item.symbol === symbol)) || null;
+}
+
+async function selectChartMarketSymbol(symbol, options = {}) {
+  if (!symbol || !marketSelect || !symbolSelect) return false;
+  let marketEntry = findSymbolMarketEntry(symbol, getActiveTradeMode());
+  if (!marketEntry) {
+    marketEntry = findSymbolMarketEntry(symbol, "rise_fall");
+    if (!marketEntry) return false;
+    setActiveTab("rise_fall", { preserveSelection: false });
+  }
+  if (!symbolsByMarket.has(marketEntry.market)) {
+    marketEntry = findSymbolMarketEntry(symbol, "rise_fall");
+    if (!marketEntry) return false;
+    setActiveTab("rise_fall", { preserveSelection: false });
+  }
+  marketSelect.value = marketEntry.market;
+  chartMarketMenuMarket = marketEntry.market;
+  await updateSymbols({
+    preferredSymbol: symbol,
+    awaitHistory: Boolean(options.awaitHistory),
+  });
+  return symbolSelect.value === symbol;
+}
+
 function subscribeToCurrentSymbol({ force = false } = {}) {
   const symbol = currentSymbol || symbolSelect?.value;
   if (!symbol || !ws || ws.readyState !== WebSocket.OPEN) return;
@@ -15854,7 +15883,7 @@ function init() {
     }
   });
 
-  chartMarketMenuEl?.addEventListener("click", (event) => {
+  chartMarketMenuEl?.addEventListener("click", async (event) => {
     event.stopPropagation();
     const target = event.target instanceof HTMLElement ? event.target : null;
     const favorite = target?.closest("[data-chart-favorite]");
@@ -15877,15 +15906,15 @@ function init() {
     }
     const item = target?.closest("[data-chart-symbol]");
     if (item instanceof HTMLElement && marketSelect && symbolSelect) {
-      const market = item.getAttribute("data-chart-market");
       const symbol = item.getAttribute("data-chart-symbol");
-      if (market && symbol) {
-        if (!symbolsByMarket.has(market) && symbolsByTradeMode.rise_fall?.has(market)) {
-          setActiveTab("rise_fall");
+      if (symbol) {
+        const ok = await selectChartMarketSymbol(symbol);
+        if (ok) {
+          setChartMarketMenuOpen(false);
+        } else {
+          setStatus(`Could not switch to ${symbol}.`, true);
+          renderChartMarketMenu();
         }
-        marketSelect.value = market;
-        updateSymbols({ preferredSymbol: symbol });
-        setChartMarketMenuOpen(false);
       }
     }
   });
