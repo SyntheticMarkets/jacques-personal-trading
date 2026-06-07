@@ -4,10 +4,12 @@ const WS_URLS = [
   `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`,
 ];
 const OAUTH_BASE_URL = "https://oauth.deriv.com/oauth2/authorize";
+const REDIRECT_URI = "https://jacques-personal-trading.vercel.app";
 
 function getOAuthUrl() {
   const url = new URL(OAUTH_BASE_URL);
   url.searchParams.set("app_id", APP_ID);
+  url.searchParams.set("redirect_uri", REDIRECT_URI);
   return url.toString();
 }
 
