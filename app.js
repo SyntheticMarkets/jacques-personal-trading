@@ -3,8 +3,13 @@ const WS_URLS = [
   `wss://ws.derivws.com/websockets/v3?app_id=${APP_ID}`,
   `wss://ws.binaryws.com/websockets/v3?app_id=${APP_ID}`,
 ];
-const REDIRECT_URI = "https://jacques-personal-trading.vercel.app";
-const OAUTH_URL = `https://oauth.deriv.com/oauth2/authorize?app_id=${APP_ID}&redirect_uri=${encodeURIComponent(REDIRECT_URI)}`;
+const OAUTH_BASE_URL = "https://oauth.deriv.com/oauth2/authorize";
+
+function getOAuthUrl() {
+  const url = new URL(OAUTH_BASE_URL);
+  url.searchParams.set("app_id", APP_ID);
+  return url.toString();
+}
 
 let tabs;
 let appTabs;
@@ -13500,7 +13505,7 @@ function executeProposalBuy(proposalId, price, direction) {
   }
   if (!activeToken || !isAuthorized) {
     setStatus("Please log in to execute trades.", true);
-    window.location.href = OAUTH_URL;
+    window.location.href = getOAuthUrl();
     return Promise.resolve(false);
   }
   const buyPrice = Number(price);
@@ -15759,7 +15764,7 @@ function init() {
     }
     if (!activeToken || !isAuthorized) {
       setStatus("Please log in to execute trades.", true);
-      window.location.href = OAUTH_URL;
+      window.location.href = getOAuthUrl();
       return;
     }
     const price = priceStr ? Number(priceStr) : Number(stakeInput?.value || "0");
@@ -16411,7 +16416,7 @@ function init() {
   autoToggleEl?.addEventListener("change", () => {
     autoTradeEnabled = autoToggleEl.checked;
     if (autoTradeEnabled && !storedAccounts.length) {
-      window.location.href = OAUTH_URL;
+      window.location.href = getOAuthUrl();
       return;
     }
     if (autoTradeEnabled) {
@@ -16503,7 +16508,7 @@ function init() {
   if (accountSummary && accountPanel) {
     accountSummary.addEventListener("click", () => {
       if (!storedAccounts.length) {
-        window.location.href = OAUTH_URL;
+        window.location.href = getOAuthUrl();
         return;
       }
       accountPanel.classList.toggle("hidden");
