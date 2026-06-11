@@ -643,6 +643,10 @@ let chartLastDrawingTapId = null;
 let chartMouseTapCount = 0;
 let chartLastMouseTapAt = 0;
 let chartLastTouchTapAt = 0;
+let chartTouchPointers = new Map();
+let chartPinchStartDistance = null;
+let chartPinchStartPoints = null;
+let chartLongPressTimer = null;
 let activeIndicatorMenuCategory = "ANALYSIS";
 let backtestChartPoints = 28;
 let backtestChartOffset = 0;
@@ -10549,6 +10553,39 @@ function setCrosshairEnabled(enabled) {
   renderMiniChart(getBuiltCandles());
 }
 
+function clearChartLongPressTimer() {
+  if (!chartLongPressTimer) return;
+  clearTimeout(chartLongPressTimer);
+  chartLongPressTimer = null;
+}
+
+function resetChartTouchGestureState() {
+  chartTouchPointers.clear();
+  chartPinchStartDistance = null;
+  chartPinchStartPoints = null;
+  clearChartLongPressTimer();
+}
+
+function getChartTouchDistance() {
+  const touches = Array.from(chartTouchPointers.values());
+  if (touches.length < 2) return null;
+  return Math.hypot(touches[0].x - touches[1].x, touches[0].y - touches[1].y);
+}
+
+function updateChartPinchZoom() {
+  const distance = getChartTouchDistance();
+  if (!Number.isFinite(distance) || !Number.isFinite(chartPinchStartDistance) || !Number.isFinite(chartPinchStartPoints) || chartPinchStartDistance < 8) return;
+  const ratio = distance / chartPinchStartDistance;
+  if (!Number.isFinite(ratio) || ratio <= 0) return;
+  const nextPoints = clamp(Math.round(chartPinchStartPoints / ratio), 10, MAX_CANDLES);
+  if (nextPoints === chartPoints) return;
+  chartPoints = nextPoints;
+  const built = getBuiltCandles();
+  const { min, max } = getChartOffsetBounds(built);
+  chartOffset = clamp(chartOffset, min, max);
+  renderMiniChart(built);
+}
+
 function updateChartCrosshairFromPointer(event) {
   if (!miniChartCanvas || !chartViewportState) return;
   const rect = miniChartCanvas.getBoundingClientRect();
@@ -16948,6 +16985,29 @@ function init() {
     const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
     const pointerPoint = !inAxis ? { x: localX, y: localY } : null;
+    if (event.pointerType !== "mouse") {
+      chartTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      clearChartLongPressTimer();
+      if (chartTouchPointers.size >= 2) {
+        chartPinchStartDistance = getChartTouchDistance();
+        chartPinchStartPoints = chartPoints;
+        chartDragX = null;
+        chartDragY = null;
+        chartDragMode = "pinch";
+        chartGestureMoved = false;
+        miniChartCanvas.setPointerCapture?.(event.pointerId);
+        return;
+      }
+      if (!inAxis && chartDrawingTool === "SELECT") {
+        chartLongPressTimer = setTimeout(() => {
+          chartLongPressTimer = null;
+          if (chartTouchPointers.has(event.pointerId)) {
+            updateChartCrosshairFromPointer(event);
+            setCrosshairEnabled(true);
+          }
+        }, 3000);
+      }
+    }
     chartDragX = event.clientX;
     chartDragY = event.clientY;
     chartDrawingHitCandidateId = null;
@@ -17058,6 +17118,15 @@ function init() {
     const rect = miniChartCanvas.getBoundingClientRect();
     const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
     const inAxis = event.clientX - rect.left >= axisThreshold;
+    if (event.pointerType !== "mouse" && chartTouchPointers.has(event.pointerId)) {
+      chartTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (chartDragMode === "pinch" || chartTouchPointers.size >= 2) {
+        clearChartLongPressTimer();
+        chartDragMode = "pinch";
+        updateChartPinchZoom();
+        return;
+      }
+    }
     if (chartDrawingDraft && chartDrawingTool !== "SELECT") {
       miniChartCanvas.style.cursor = inAxis ? "ns-resize" : "crosshair";
       if (!inAxis) {
@@ -17086,6 +17155,7 @@ function init() {
     const deltaX = event.clientX - chartDragX;
     const deltaY = event.clientY - chartDragY;
     if (Math.abs(deltaX) < 4 && Math.abs(deltaY) < 4) return;
+    if (event.pointerType !== "mouse") clearChartLongPressTimer();
     chartDragX = event.clientX;
     chartDragY = event.clientY;
     chartGestureMoved = true;
@@ -17123,6 +17193,21 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointerup", (event) => {
+    if (event.pointerType !== "mouse") {
+      chartTouchPointers.delete(event.pointerId);
+      clearChartLongPressTimer();
+      if (chartDragMode === "pinch") {
+        if (chartTouchPointers.size < 2) {
+          chartPinchStartDistance = null;
+          chartPinchStartPoints = null;
+          chartDragMode = null;
+          chartDragX = null;
+          chartDragY = null;
+          chartGestureMoved = false;
+        }
+        return;
+      }
+    }
     if (chartDrawingPressTimer) {
       clearTimeout(chartDrawingPressTimer);
       chartDrawingPressTimer = null;
@@ -17199,7 +17284,9 @@ function init() {
       } else {
         if (now - chartLastTouchTapAt < 350) {
           chartLastTouchTapAt = 0;
-          showTimeframePicker();
+          if (chartCrosshairEnabled) {
+            setCrosshairEnabled(false);
+          }
         } else {
           chartLastTouchTapAt = now;
         }
@@ -17222,6 +17309,7 @@ function init() {
       clearTimeout(chartDrawingPressTimer);
       chartDrawingPressTimer = null;
     }
+    resetChartTouchGestureState();
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
@@ -17237,6 +17325,10 @@ function init() {
     if (chartDrawingPressTimer) {
       clearTimeout(chartDrawingPressTimer);
       chartDrawingPressTimer = null;
+    }
+    if (event.pointerType !== "mouse") {
+      chartTouchPointers.delete(event.pointerId);
+      clearChartLongPressTimer();
     }
     chartDragX = null;
     chartDragY = null;
