@@ -158,6 +158,18 @@ let askAiAnalyseBtnEl;
 let askAiStatusEl;
 let askAiResultEl;
 let askAiInFlight = false;
+let replayToggleBtn;
+let replayToolbarEl;
+let replayStartSelectEl;
+let replaySelectAgainBtn;
+let replayPrevBtn;
+let replayPlayPauseBtn;
+let replayNextBtn;
+let replaySpeedSelectEl;
+let replayLiveBtn;
+let replayCloseBtn;
+let replayStatusEl;
+let replayAxisDateEl;
 let signalBodyEl;
 let signalSectionTitleEl;
 let toggleSignalBtn;
@@ -551,6 +563,17 @@ const AUTO_SCANNER_MIN_CONFIDENCE = 70;
 const AUTO_SCANNER_RETRY_MS = 15000;
 const AUTO_SCANNER_AFTER_CLOSE_MS = 3000;
 const AUTO_CONTRACT_DURATION_CACHE_MS = 10 * 60 * 1000;
+const REPLAY_SPEED_OPTIONS = [
+  { value: 0.1, label: "0.1x", title: "1 update every 10 seconds" },
+  { value: 0.2, label: "0.2x", title: "1 update every 5 seconds" },
+  { value: 0.3, label: "0.3x", title: "1 update every 3 seconds" },
+  { value: 0.5, label: "0.5x", title: "1 update every 2 seconds" },
+  { value: 1, label: "1x", title: "1 update per second" },
+  { value: 3, label: "3x", title: "3 updates per second" },
+  { value: 5, label: "5x", title: "5 updates per second" },
+  { value: 7, label: "7x", title: "7 updates per second" },
+  { value: 10, label: "10x", title: "10 updates per second" },
+];
 const TREND_MODE_OPTIONS = ["EMA", "AVG", "OBV", "STACK", "SMC", "HEIKEN", "RENKO", "MACD", "STOCH"];
 const DRAWING_TOOL_OPTIONS = [
   "SELECT",
@@ -647,6 +670,8 @@ let chartTouchPointers = new Map();
 let chartPinchStartDistance = null;
 let chartPinchStartPoints = null;
 let chartLongPressTimer = null;
+let replaySelectionState = null;
+let replayPendingTimeframeAnchor = null;
 let activeIndicatorMenuCategory = "ANALYSIS";
 let backtestChartPoints = 28;
 let backtestChartOffset = 0;
@@ -687,6 +712,217 @@ let lastSweepState = {
 function clamp(value, min, max) {
   return Math.min(max, Math.max(min, value));
 }
+
+class ReplayEngine {
+  constructor() {
+    this.enabled = false;
+    this.playing = false;
+    this.selectingCandle = false;
+    this.speed = 1;
+    this.timer = null;
+    this.fullCandles = [];
+    this.currentIndex = -1;
+  }
+
+  isReplayMode() {
+    return this.enabled;
+  }
+
+  isSelectingCandle() {
+    return this.enabled && this.selectingCandle;
+  }
+
+  enableReplay(options = {}) {
+    const source = getLiveBuiltCandles().filter(Boolean);
+    if (source.length < 2) {
+      setStatus("Replay needs at least 2 candles loaded.", true);
+      return false;
+    }
+    this.pause();
+    this.fullCandles = source.map((candle) => ({ ...candle, ticks: Array.isArray(candle.ticks) ? [...candle.ticks] : [] }));
+    this.currentIndex = clamp(Number.isFinite(Number(options.index)) ? Number(options.index) : this.fullCandles.length - 1, 0, this.fullCandles.length - 1);
+    this.enabled = true;
+    this.selectingCandle = options.selecting !== false;
+    replaySelectionState = null;
+    pauseLiveTicksForReplay();
+    chartOffset = 0;
+    shownIndicatorSignalKeys.clear();
+    this.refreshView(this.selectingCandle ? "Select replay candle" : "Replay enabled");
+    return true;
+  }
+
+  disableReplay(options = {}) {
+    const wasEnabled = this.enabled;
+    this.pause();
+    this.enabled = false;
+    this.selectingCandle = false;
+    this.fullCandles = [];
+    this.currentIndex = -1;
+    replaySelectionState = null;
+    replayPendingTimeframeAnchor = null;
+    syncReplayUI();
+    if (options.restoreLive !== false && currentSymbol && ws?.readyState === WebSocket.OPEN) {
+      subscribeToCurrentSymbol({ force: true });
+    }
+    if (wasEnabled || options.forceRefresh) {
+      chartOffset = 0;
+      const liveCandles = getLiveBuiltCandles();
+      renderMiniChart(liveCandles);
+      updateSignalFromCandles(liveCandles);
+      if (!options.silent) setStatus("Replay closed. Live feed resumed.");
+    }
+  }
+
+  getVisibleCandles() {
+    if (!this.enabled) return getLiveBuiltCandles();
+    if (this.selectingCandle) return this.fullCandles;
+    if (!this.fullCandles.length || this.currentIndex < 0) return [];
+    return this.fullCandles.slice(0, this.currentIndex + 1);
+  }
+
+  getAnchorTime() {
+    const candle = this.fullCandles[this.currentIndex] || this.fullCandles[this.fullCandles.length - 1];
+    return Number(candle?.time) || null;
+  }
+
+  reloadFromLiveHistory(options = {}) {
+    if (!this.enabled) return;
+    const source = getLiveBuiltCandles().filter(Boolean);
+    if (!source.length) return;
+    const anchorTime = Number(options.anchorTime ?? this.getAnchorTime());
+    this.fullCandles = source.map((candle) => ({ ...candle, ticks: Array.isArray(candle.ticks) ? [...candle.ticks] : [] }));
+    if (Number.isFinite(anchorTime)) {
+      const indexAtOrBefore = this.fullCandles.findIndex((candle) => Number(candle.time) > anchorTime);
+      this.currentIndex = indexAtOrBefore > 0
+        ? indexAtOrBefore - 1
+        : indexAtOrBefore === 0
+          ? 0
+          : this.fullCandles.length - 1;
+    } else {
+      this.currentIndex = this.fullCandles.length - 1;
+    }
+    this.selectingCandle = false;
+    replaySelectionState = null;
+    pauseLiveTicksForReplay();
+    chartOffset = 0;
+    this.refreshView("Replay timeframe synced");
+  }
+
+  jumpToIndex(index) {
+    if (!this.enabled || !this.fullCandles.length) return;
+    this.currentIndex = clamp(Math.round(Number(index) || 0), 0, this.fullCandles.length - 1);
+    this.selectingCandle = false;
+    replaySelectionState = null;
+    this.refreshView("Replay start selected");
+  }
+
+  jumpToDate(dateText) {
+    if (!this.enabled || !this.fullCandles.length || !dateText) return;
+    const targetMs = Date.parse(dateText);
+    if (!Number.isFinite(targetMs)) {
+      setStatus("Replay date was not valid.", true);
+      return;
+    }
+    const targetSec = Math.floor(targetMs / 1000);
+    const index = this.fullCandles.findIndex((candle) => Number(candle.time) >= targetSec);
+    this.jumpToIndex(index >= 0 ? index : this.fullCandles.length - 1);
+  }
+
+  selectFirst() {
+    this.jumpToIndex(0);
+  }
+
+  selectRandom() {
+    if (!this.enabled || !this.fullCandles.length) return;
+    const max = Math.max(0, this.fullCandles.length - 2);
+    this.jumpToIndex(Math.floor(Math.random() * (max + 1)));
+  }
+
+  armCandleSelection() {
+    if (!this.enabled) {
+      if (!this.enableReplay({ index: getLiveBuiltCandles().length - 1 })) return;
+    }
+    this.selectingCandle = true;
+    replaySelectionState = null;
+    if (replayStartSelectEl) replayStartSelectEl.value = "select";
+    this.pause();
+    syncReplayUI();
+    renderMiniChart(this.fullCandles);
+    setStatus("Replay: click a candle to choose the starting point.");
+  }
+
+  previousBar() {
+    if (!this.enabled) return;
+    this.pause();
+    this.jumpToIndex(this.currentIndex - 1);
+  }
+
+  nextBar(options = {}) {
+    if (!this.enabled) return;
+    if (this.currentIndex >= this.fullCandles.length - 1) {
+      this.pause();
+      this.goLive({ status: "Replay reached live edge. Live feed resumed." });
+      return;
+    }
+    this.currentIndex += 1;
+    if (this.currentIndex >= this.fullCandles.length - 1 && this.playing) {
+      this.goLive({ status: "Replay reached live edge. Live feed resumed." });
+      return;
+    }
+    this.refreshView(options.status || "Replay advanced");
+  }
+
+  goLive(options = {}) {
+    const statusText = options.status || "Live feed resumed.";
+    this.disableReplay({ silent: true });
+    setStatus(statusText);
+  }
+
+  play() {
+    if (!this.enabled || this.playing) return;
+    this.playing = true;
+    const interval = Math.max(100, Math.round(1000 / Math.max(0.1, this.speed)));
+    this.timer = setInterval(() => this.nextBar({ status: "Replay playing" }), interval);
+    syncReplayUI();
+  }
+
+  pause() {
+    if (this.timer) clearInterval(this.timer);
+    this.timer = null;
+    this.playing = false;
+    syncReplayUI();
+  }
+
+  togglePlay() {
+    if (!this.enabled) {
+      if (!this.enableReplay()) return;
+    }
+    if (this.playing) this.pause();
+    else this.play();
+  }
+
+  setSpeed(speed) {
+    const next = Number(speed);
+    if (!Number.isFinite(next) || next <= 0) return;
+    this.speed = next;
+    if (this.playing) {
+      this.pause();
+      this.play();
+    }
+    syncReplayUI();
+  }
+
+  refreshView(statusText = "") {
+    const visible = this.getVisibleCandles();
+    const bounds = getChartOffsetBounds(visible);
+    chartOffset = clamp(chartOffset, bounds.min, bounds.max);
+    renderMiniChart(visible);
+    updateSignalFromCandles(visible);
+    syncReplayUI(statusText);
+  }
+}
+
+const replayEngine = new ReplayEngine();
 
 function loadChartDrawingStore() {
   try {
@@ -8097,6 +8333,7 @@ function getRobustChartPriceRange(points) {
 
 function renderMiniChart(candles) {
   if (!miniChartCanvas) return;
+  if (!replayEngine.isReplayMode()) hideReplayAxisDateBadge();
   const ctx = miniChartCanvas.getContext("2d");
   if (!ctx) return;
   const width = miniChartCanvas.clientWidth;
@@ -10462,8 +10699,13 @@ function renderMiniChart(candles) {
     if (Number.isInteger(chartCrosshairState.candleIndex)) {
       const candle = candles[chartCrosshairState.candleIndex];
       if (candle?.time) {
-        const crossTimeLabel = new Date(candle.time * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-        const timeW = Math.max(44, ctx.measureText(crossTimeLabel).width + 16);
+        const crossTimeLabel = new Date(candle.time * 1000).toLocaleString([], {
+          month: "short",
+          day: "2-digit",
+          hour: "2-digit",
+          minute: "2-digit",
+        });
+        const timeW = Math.max(86, ctx.measureText(crossTimeLabel).width + 16);
         const timeX = clamp(crossX - (timeW / 2), leftPad, width - rightPad - timeW);
         const timeY = height - bottomPad + 6;
         ctx.fillStyle = "#2d333d";
@@ -10478,6 +10720,40 @@ function renderMiniChart(candles) {
     ctx.restore();
   }
 
+  if (replayEngine.isSelectingCandle() && chartViewportState) {
+    const selectionIndex = Number.isInteger(replaySelectionState?.index)
+      ? replaySelectionState.index
+      : start + Math.floor(points.length / 2);
+    if (selectionIndex >= start && selectionIndex < end) {
+      const selectionX = leftPad + ((selectionIndex - start) * slotW) + (slotW / 2);
+      const candle = candles[selectionIndex];
+      const timeLabel = candle?.time
+        ? new Date(candle.time * 1000).toLocaleString([], { month: "short", day: "2-digit", hour: "2-digit", minute: "2-digit" })
+        : "Select bar";
+      updateReplayAxisDateBadge(timeLabel);
+      ctx.save();
+      ctx.strokeStyle = "#2f6dff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(selectionX, topPad);
+      ctx.lineTo(selectionX, height - bottomPad);
+      ctx.stroke();
+      ctx.fillStyle = "#0f141c";
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(selectionX, topPad + (plotH * 0.52), 9, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 12px Inter, Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText("R", selectionX, topPad + (plotH * 0.52) + 0.5);
+      ctx.restore();
+    }
+  }
+
   const current = points[points.length - 1];
   const candleSize = current ? Math.abs(current.close - current.open) : 0;
   const sizeLabel = `Body ${formatPrice(candleSize, currentPip)}`;
@@ -10488,10 +10764,113 @@ function renderMiniChart(candles) {
   ctx.fillText(sizeLabel, width - 8, height - 8);
 }
 
-function getBuiltCandles() {
+function getLiveBuiltCandles() {
   return candleBuilder.currentCandle
     ? [...candleBuilder.candles, candleBuilder.currentCandle]
     : candleBuilder.candles;
+}
+
+function getBuiltCandles() {
+  return replayEngine.isReplayMode() ? replayEngine.getVisibleCandles() : getLiveBuiltCandles();
+}
+
+function pauseLiveTicksForReplay() {
+  if (!tickStreamId || !ws || ws.readyState !== WebSocket.OPEN) return;
+  try {
+    ws.send(JSON.stringify({ forget: tickStreamId }));
+  } catch {
+    // Ignore forget failures; the tick handler still blocks replay updates.
+  }
+  tickStreamId = null;
+  lastTickAt = 0;
+}
+
+function formatReplayCandleTime(candle) {
+  const seconds = Number(candle?.time);
+  if (!Number.isFinite(seconds)) return "--";
+  return new Date(seconds * 1000).toLocaleString([], {
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function hideReplayAxisDateBadge() {
+  if (!replayAxisDateEl) return;
+  replayAxisDateEl.classList.add("hidden");
+  replayAxisDateEl.setAttribute("aria-hidden", "true");
+}
+
+function updateReplayAxisDateBadge(label) {
+  if (!replayAxisDateEl || !label) return;
+  replayAxisDateEl.textContent = label;
+  replayAxisDateEl.classList.remove("hidden");
+  replayAxisDateEl.setAttribute("aria-hidden", "false");
+}
+
+function syncReplayUI(statusText = "") {
+  const enabled = replayEngine.isReplayMode();
+  replayToolbarEl?.classList.toggle("hidden", !enabled);
+  replayToggleBtn?.classList.toggle("replay-active", enabled);
+  replayToggleBtn?.classList.toggle("active", enabled);
+  replayToggleBtn?.setAttribute("aria-pressed", enabled ? "true" : "false");
+  if (replayPlayPauseBtn) {
+    replayPlayPauseBtn.textContent = replayEngine.playing ? "Pause" : "Play";
+    replayPlayPauseBtn.setAttribute("aria-label", replayEngine.playing ? "Pause replay" : "Play replay");
+  }
+  if (replaySpeedSelectEl) replaySpeedSelectEl.value = String(replayEngine.speed);
+  if (replaySelectAgainBtn) replaySelectAgainBtn.disabled = !enabled;
+  if (replayPrevBtn) replayPrevBtn.disabled = !enabled || replayEngine.currentIndex <= 0;
+  if (replayNextBtn) replayNextBtn.disabled = !enabled || replayEngine.currentIndex >= replayEngine.fullCandles.length - 1;
+  const selectedIndex = replayEngine.isSelectingCandle() && Number.isInteger(replaySelectionState?.index)
+    ? replaySelectionState.index
+    : replayEngine.currentIndex;
+  const current = replayEngine.fullCandles[selectedIndex];
+  if (enabled) updateReplayAxisDateBadge(formatReplayCandleTime(current));
+  else hideReplayAxisDateBadge();
+  if (replayStatusEl) {
+    const selectText = replayEngine.isSelectingCandle() ? "Select candle on chart" : statusText;
+    replayStatusEl.textContent = enabled
+      ? `${selectText || "Replay"} • ${selectedIndex + 1}/${replayEngine.fullCandles.length} • ${formatReplayCandleTime(current)}`
+      : "Replay off";
+  }
+}
+
+function getReplayIndexFromPointer(localX) {
+  if (!chartViewportState || !replayEngine.isReplayMode()) return null;
+  const relativeX = localX - chartViewportState.leftPad;
+  const slot = Math.floor(relativeX / Math.max(1, chartViewportState.slotW));
+  if (!Number.isFinite(slot)) return null;
+  const index = chartViewportState.start + slot;
+  return clamp(index, 0, Math.max(0, replayEngine.fullCandles.length - 1));
+}
+
+function updateReplaySelectionFromPointer(event) {
+  if (!miniChartCanvas || !replayEngine.isSelectingCandle()) return null;
+  const rect = miniChartCanvas.getBoundingClientRect();
+  const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+  const localX = event.clientX - rect.left;
+  if (localX >= axisThreshold) return null;
+  const replayIndex = getReplayIndexFromPointer(localX);
+  if (replayIndex == null) return null;
+  replaySelectionState = { index: replayIndex, x: localX };
+  miniChartCanvas.style.cursor = "crosshair";
+  renderMiniChart(getBuiltCandles());
+  return replayIndex;
+}
+
+function commitReplaySelectionFromPointer(event) {
+  const replayIndex = updateReplaySelectionFromPointer(event);
+  if (replayIndex == null && Number.isInteger(replaySelectionState?.index)) {
+    replayEngine.jumpToIndex(replaySelectionState.index);
+    return true;
+  }
+  if (replayIndex != null) {
+    replayEngine.jumpToIndex(replayIndex);
+    return true;
+  }
+  return false;
 }
 
 function getChartOffsetBounds(candles) {
@@ -11194,6 +11573,15 @@ function populateTimeframeOptions() {
   updateTimeframeUI();
 }
 
+function populateReplayControls() {
+  if (replaySpeedSelectEl) {
+    replaySpeedSelectEl.innerHTML = REPLAY_SPEED_OPTIONS
+      .map((option) => `<option value="${option.value}" title="${escapeHtml(option.title)}">${option.label}</option>`)
+      .join("");
+    replaySpeedSelectEl.value = String(replayEngine.speed);
+  }
+}
+
 function populateAutoTimeframeOptions() {
   if (!autoTimeframeSelectEl) return;
   autoTimeframeSelectEl.innerHTML = TIMEFRAME_OPTIONS
@@ -11671,6 +12059,15 @@ async function setChartTimeframe(seconds, options = {}) {
     return;
   }
 
+  const wasReplayMode = replayEngine.isReplayMode();
+  const replayAnchorTime = wasReplayMode ? replayEngine.getAnchorTime() : null;
+  if (replayEngine.isReplayMode()) {
+    replayEngine.pause();
+    replayEngine.selectingCandle = false;
+    replaySelectionState = null;
+    replayPendingTimeframeAnchor = replayAnchorTime;
+    pauseLiveTicksForReplay();
+  }
   candleBuilder.timeframe = next;
   resetChartViewportState({ render: false });
   lastAutoTradeCandle = null;
@@ -11684,6 +12081,9 @@ async function setChartTimeframe(seconds, options = {}) {
 
   if (shouldLoad && currentSymbol) {
     await loadTickHistory(currentSymbol);
+  }
+  if (wasReplayMode && !shouldLoad) {
+    replayEngine.reloadFromLiveHistory({ anchorTime: replayAnchorTime });
   }
   if (isRiseFallCandleEndExpiry()) {
     buildExpiries();
@@ -11813,6 +12213,11 @@ function onMessage(event) {
   }
   if (data.msg_type === "tick" && data.tick) {
     if (data.tick.symbol !== currentSymbol) return;
+    if (replayEngine.isReplayMode()) {
+      tickStreamId = data.tick.id || tickStreamId;
+      pauseLiveTicksForReplay();
+      return;
+    }
     try {
       const price = data.tick.quote;
       lastTickAt = Date.now();
@@ -15077,7 +15482,7 @@ function syncDesktopSidebarContent() {
 function updateSidebarToggleUI() {
   if (toggleSidebarBtn && phoneEl) {
     const collapsed = phoneEl.classList.contains("sidebar-collapsed");
-    toggleSidebarBtn.textContent = collapsed ? "Show Menu" : "Hide Menu";
+    toggleSidebarBtn.textContent = collapsed ? "Show Trade Proposals" : "Hide Trade Proposals";
     toggleSidebarBtn.setAttribute("aria-pressed", collapsed ? "true" : "false");
   }
   if (toggleSignalSidebarBtn && phoneEl) {
@@ -15784,6 +16189,7 @@ async function selectChartMarketSymbol(symbol, options = {}) {
 function subscribeToCurrentSymbol({ force = false } = {}) {
   const symbol = currentSymbol || symbolSelect?.value;
   if (!symbol || !ws || ws.readyState !== WebSocket.OPEN) return;
+  if (replayEngine.isReplayMode()) return;
 
   if (tickStreamId) {
     ws.send(JSON.stringify({ forget: tickStreamId }));
@@ -15797,6 +16203,9 @@ function subscribeToCurrentSymbol({ force = false } = {}) {
 }
 
 function onSymbolChange(options = {}) {
+  if (replayEngine.isReplayMode()) {
+    replayEngine.disableReplay({ restoreLive: false, silent: true });
+  }
   const symbol = symbolSelect.value;
   const display = symbolSelect.selectedOptions[0]?.textContent || "--";
   const pip = Number(symbolSelect.selectedOptions[0]?.dataset?.pip || "0");
@@ -15850,7 +16259,13 @@ async function loadTickHistory(symbol) {
     if (symbol !== currentSymbol || requestedTimeframe !== candleBuilder.timeframe) return;
     setCachedCandles(symbol, requestedTimeframe, built);
     maybePrimeTopDownTimeframeCache(symbol, requestedTimeframe);
-    updateSignalFromCandles(built);
+    if (replayEngine.isReplayMode()) {
+      const anchorTime = replayPendingTimeframeAnchor;
+      replayPendingTimeframeAnchor = null;
+      replayEngine.reloadFromLiveHistory({ anchorTime });
+    } else {
+      updateSignalFromCandles(built);
+    }
   } catch (err) {
     setStatus(err?.message || "History load failed", true);
   }
@@ -16565,6 +16980,18 @@ function init() {
   askAiAnalyseBtnEl = document.getElementById("askAiAnalyse");
   askAiStatusEl = document.getElementById("askAiStatus");
   askAiResultEl = document.getElementById("askAiResult");
+  replayToggleBtn = document.getElementById("replayToggle");
+  replayToolbarEl = document.getElementById("replayToolbar");
+  replayStartSelectEl = document.getElementById("replayStartSelect");
+  replaySelectAgainBtn = document.getElementById("replaySelectAgain");
+  replayPrevBtn = document.getElementById("replayPrev");
+  replayPlayPauseBtn = document.getElementById("replayPlayPause");
+  replayNextBtn = document.getElementById("replayNext");
+  replaySpeedSelectEl = document.getElementById("replaySpeedSelect");
+  replayLiveBtn = document.getElementById("replayLive");
+  replayCloseBtn = document.getElementById("replayClose");
+  replayStatusEl = document.getElementById("replayStatus");
+  replayAxisDateEl = document.getElementById("replayAxisDate");
   signalBodyEl = document.getElementById("signalBody");
   signalSectionTitleEl = document.getElementById("signalSectionTitle");
   toggleSignalBtn = document.getElementById("toggleSignal");
@@ -16656,6 +17083,7 @@ function init() {
   symbolSelect.addEventListener("change", onSymbolChange);
   populateRiseFallExpiryOptions();
   populateTimeframeOptions();
+  populateReplayControls();
   populateAutoTimeframeOptions();
   populateMarketScannerIndicators();
   populateMarketScannerScopeSelect();
@@ -16714,6 +17142,37 @@ function init() {
     scheduleChartResize();
     renderMiniChart(getBuiltCandles());
   });
+
+  replayToggleBtn?.addEventListener("click", () => {
+    if (replayEngine.isReplayMode()) {
+      replayEngine.disableReplay();
+    } else {
+      replayEngine.enableReplay();
+    }
+  });
+
+  replayStartSelectEl?.addEventListener("change", () => {
+    const value = replayStartSelectEl.value;
+    if (!replayEngine.isReplayMode() && !replayEngine.enableReplay({ index: getLiveBuiltCandles().length - 1 })) return;
+    if (value === "select") {
+      replayEngine.armCandleSelection();
+    } else if (value === "first") {
+      replayEngine.selectFirst();
+    } else if (value === "random") {
+      replayEngine.selectRandom();
+    } else if (value === "date") {
+      const input = window.prompt("Replay start date/time", new Date((replayEngine.fullCandles[replayEngine.currentIndex]?.time || Date.now() / 1000) * 1000).toLocaleString());
+      if (input) replayEngine.jumpToDate(input);
+    }
+  });
+
+  replayPrevBtn?.addEventListener("click", () => replayEngine.previousBar());
+  replaySelectAgainBtn?.addEventListener("click", () => replayEngine.armCandleSelection());
+  replayNextBtn?.addEventListener("click", () => replayEngine.nextBar());
+  replayPlayPauseBtn?.addEventListener("click", () => replayEngine.togglePlay());
+  replaySpeedSelectEl?.addEventListener("change", () => replayEngine.setSpeed(replaySpeedSelectEl.value));
+  replayLiveBtn?.addEventListener("click", () => replayEngine.goLive({ status: "Live feed resumed." }));
+  replayCloseBtn?.addEventListener("click", () => replayEngine.disableReplay());
 
   if (toggleTradeBtn && tradeBody) {
     toggleTradeBtn.addEventListener("click", () => {
@@ -16960,6 +17419,25 @@ function init() {
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (!replayEngine.isReplayMode()) return;
+    const target = event.target;
+    if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement || target instanceof HTMLTextAreaElement) return;
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      replayEngine.previousBar();
+    } else if (event.key === "ArrowRight") {
+      event.preventDefault();
+      replayEngine.nextBar();
+    } else if (event.key === " ") {
+      event.preventDefault();
+      replayEngine.togglePlay();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      replayEngine.disableReplay();
+    }
+  });
+
   miniChartCanvas?.addEventListener("wheel", (event) => {
     event.preventDefault();
     const built = getBuiltCandles();
@@ -16985,6 +17463,18 @@ function init() {
     const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
     const pointerPoint = !inAxis ? { x: localX, y: localY } : null;
+    if (replayEngine.isSelectingCandle() && !inAxis) {
+      const replayIndex = updateReplaySelectionFromPointer(event);
+      if (replayIndex != null) {
+        event.preventDefault();
+        chartDragMode = "replay-select";
+        chartDragX = event.clientX;
+        chartDragY = event.clientY;
+        chartGestureMoved = false;
+        miniChartCanvas.setPointerCapture?.(event.pointerId);
+        return;
+      }
+    }
     if (event.pointerType !== "mouse") {
       chartTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       clearChartLongPressTimer();
@@ -17117,7 +17607,16 @@ function init() {
   miniChartCanvas?.addEventListener("pointermove", (event) => {
     const rect = miniChartCanvas.getBoundingClientRect();
     const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
-    const inAxis = event.clientX - rect.left >= axisThreshold;
+    const localX = event.clientX - rect.left;
+    const inAxis = localX >= axisThreshold;
+    if (chartDragMode === "replay-select") {
+      updateReplaySelectionFromPointer(event);
+      return;
+    }
+    if (replayEngine.isSelectingCandle() && !inAxis) {
+      updateReplaySelectionFromPointer(event);
+      return;
+    }
     if (event.pointerType !== "mouse" && chartTouchPointers.has(event.pointerId)) {
       chartTouchPointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
       if (chartDragMode === "pinch" || chartTouchPointers.size >= 2) {
@@ -17193,6 +17692,16 @@ function init() {
   });
 
   miniChartCanvas?.addEventListener("pointerup", (event) => {
+    if (chartDragMode === "replay-select") {
+      event.preventDefault();
+      commitReplaySelectionFromPointer(event);
+      chartDragX = null;
+      chartDragY = null;
+      chartDragMode = null;
+      chartGestureMoved = false;
+      miniChartCanvas.releasePointerCapture?.(event.pointerId);
+      return;
+    }
     if (event.pointerType !== "mouse") {
       chartTouchPointers.delete(event.pointerId);
       clearChartLongPressTimer();
@@ -17318,6 +17827,9 @@ function init() {
     chartDrawingDraft = null;
     chartDrawingMoveOrigin = null;
     chartDrawingAdjustHandle = null;
+    if (replayEngine.isSelectingCandle()) {
+      renderMiniChart(getBuiltCandles());
+    }
     if (chartCrosshairEnabled) ensureCrosshairVisible();
   });
 
@@ -17337,6 +17849,10 @@ function init() {
     chartDrawingHitCandidateId = null;
     chartDrawingMoveOrigin = null;
     chartDrawingAdjustHandle = null;
+    if (replayEngine.isSelectingCandle()) {
+      miniChartCanvas.style.cursor = "crosshair";
+      return;
+    }
     if (chartCrosshairEnabled && event.pointerType === "mouse") {
       chartCrosshairState = null;
       renderMiniChart(getBuiltCandles());

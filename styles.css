@@ -123,6 +123,12 @@ body {
   color: #fff;
 }
 
+.desktop-quick-tab.replay-active {
+  background: #173425;
+  border-color: rgba(13, 183, 135, 0.72);
+  color: #dffdef;
+}
+
 .sidebar-toggle-btn {
   display: none;
 }
@@ -1781,6 +1787,86 @@ button.chart-indicator-select {
   cursor: grab;
 }
 
+.replay-toolbar {
+  position: absolute;
+  left: 50%;
+  bottom: 14px;
+  z-index: 72;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: calc(100% - 24px);
+  padding: 8px;
+  border: 1px solid #2b3a50;
+  border-radius: 14px;
+  background: rgba(13, 18, 26, 0.94);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.42);
+  backdrop-filter: blur(10px);
+  transform: translateX(-50%);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+}
+
+.replay-axis-date {
+  position: absolute;
+  left: 50%;
+  bottom: 68px;
+  z-index: 76;
+  min-width: 118px;
+  max-width: calc(100% - 24px);
+  padding: 6px 12px;
+  border: 1px solid rgba(145, 190, 255, 0.45);
+  border-radius: 9px;
+  background: rgba(47, 109, 255, 0.96);
+  color: #ffffff;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.28);
+  pointer-events: none;
+  transform: translateX(-50%);
+}
+
+.replay-control {
+  flex: 0 0 auto;
+  min-height: 32px;
+  border: 1px solid #2a3547;
+  border-radius: 9px;
+  background: #101722;
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.replay-button {
+  padding: 0 12px;
+}
+
+.replay-primary {
+  border-color: rgba(13, 183, 135, 0.65);
+  background: #133326;
+}
+
+.replay-select {
+  min-width: 126px;
+  padding: 0 28px 0 10px;
+}
+
+.replay-speed {
+  min-width: 78px;
+}
+
+.replay-status {
+  flex: 0 0 auto;
+  color: var(--muted);
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 0 6px;
+}
+
 @media (min-width: 980px), (orientation: landscape) and (min-width: 640px) {
   body {
     display: block;
@@ -3404,6 +3490,35 @@ button.chart-indicator-select {
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"] .chart-indicator-list,
   .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-footer,
   .phone.chart2-mode .app-panel[data-app-panel="chart"] .chart-indicator-list {
+    display: none !important;
+  }
+
+  .phone.desktop-chart-layout .replay-toolbar,
+  .phone.chart2-mode .replay-toolbar {
+    position: absolute !important;
+    left: 50% !important;
+    right: auto !important;
+    bottom: 10px !important;
+    max-width: calc(100vw - 20px) !important;
+    padding: 6px !important;
+  }
+
+  .phone.desktop-chart-layout .replay-axis-date,
+  .phone.chart2-mode .replay-axis-date {
+    bottom: 58px !important;
+    min-width: 104px !important;
+    padding: 5px 10px !important;
+    font-size: 11px !important;
+  }
+
+  .phone.desktop-chart-layout .replay-control,
+  .phone.chart2-mode .replay-control {
+    min-height: 30px !important;
+    font-size: 11px !important;
+  }
+
+  .phone.desktop-chart-layout .replay-status,
+  .phone.chart2-mode .replay-status {
     display: none !important;
   }
 }

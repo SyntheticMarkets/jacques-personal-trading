@@ -21,8 +21,9 @@
             <button class="desktop-quick-tab" data-desktop-panel="results" type="button">Results</button>
             <button class="desktop-quick-tab" data-desktop-panel="auto" type="button">Auto</button>
             <button class="desktop-quick-tab" data-desktop-panel="backtest" type="button">Backtest</button>
+            <button id="replayToggle" class="desktop-quick-tab" type="button" aria-pressed="false">Replay</button>
           </nav>
-          <button id="toggleSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Sidebar</button>
+          <button id="toggleSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Show Trade Proposals</button>
           <button id="toggleSignalSidebar" class="ghost small sidebar-toggle-btn" type="button" aria-pressed="false">Signals</button>
           <div class="status" id="status">Connecting...</div>
         </div>
@@ -261,6 +262,23 @@
           </div>
           <div id="chart2DrawingMenu" class="chart2-drawing-menu hidden"></div>
           <canvas id="miniChart" aria-label="Mini chart"></canvas>
+          <div id="replayAxisDate" class="replay-axis-date hidden" aria-hidden="true"></div>
+          <div id="replayToolbar" class="replay-toolbar hidden" aria-label="Replay controls">
+            <select id="replayStartSelect" class="replay-control replay-select" aria-label="Replay start">
+              <option value="select">Select candle</option>
+              <option value="date">Select date</option>
+              <option value="first">First available candle</option>
+              <option value="random">Random candle</option>
+            </select>
+            <button id="replaySelectAgain" class="replay-control replay-button" type="button">Select again</button>
+            <button id="replayPrev" class="replay-control replay-button" type="button" aria-label="Previous candle">Prev</button>
+            <button id="replayPlayPause" class="replay-control replay-button replay-primary" type="button" aria-label="Play replay">Play</button>
+            <button id="replayNext" class="replay-control replay-button" type="button" aria-label="Next candle">Next</button>
+            <select id="replaySpeedSelect" class="replay-control replay-select replay-speed" aria-label="Replay speed"></select>
+            <button id="replayLive" class="replay-control replay-button" type="button">Live</button>
+            <button id="replayClose" class="replay-control replay-button" type="button">Close</button>
+            <span id="replayStatus" class="replay-status">Replay ready</span>
+          </div>
           <div class="chart-footer">
             <div class="chart-footer-group">
               <span class="chart-footer-label">Timeframe</span>
