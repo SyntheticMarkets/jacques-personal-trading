@@ -317,6 +317,7 @@ const CHART_INDICATOR_OPTIONS = [
   { value: "ICT_BPR", label: "ICT BPR" },
   { value: "LIQ_SWEEP_OB", label: "Liquidity Sweep OB" },
   { value: "LDMSS", label: "Liquidity-Driven Market Structure" },
+  { value: "SMC_WELO_TRADES", label: "Smart Money Concepts by WeloTrades" },
   { value: "SMC_SETUP_08", label: "SMC Setup 08" },
   { value: "SMC_PRO_COMBO", label: "SMC Pro Combo" },
   { value: "ADX_VOL_WAVES", label: "ADX Volatility Waves" },
@@ -367,7 +368,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "SMC",
     label: "SMC",
     category: "SIGNALS",
-    items: ["SMC_SETUP_08", "SMC_PRO_COMBO"],
+    items: ["SMC_WELO_TRADES", "SMC_SETUP_08", "SMC_PRO_COMBO"],
   },
   {
     key: "VOL_SIG",
@@ -433,6 +434,7 @@ const MARKET_SCANNER_INDICATORS = [
   "ICT_STRUCTURE",
   "LIQ_SWEEP_OB",
   "LDMSS",
+  "SMC_WELO_TRADES",
   "SMC_SETUP_08",
   "SMC_PRO_COMBO",
   "ADX_VOL_WAVES",
@@ -454,6 +456,8 @@ const activeChartIndicators = new Set();
 const CHART_MARKET_FAVORITES_KEY = "deriv_chart_market_favorites_v1";
 const CHART_INDICATOR_FAVORITES_KEY = "deriv_chart_indicator_favorites_v1";
 const CHART_INDICATOR_TEMPLATES_KEY = "deriv_chart_indicator_templates_v1";
+const CHART_INDICATOR_TIMEFRAMES_KEY = "deriv_chart_indicator_timeframes_v1";
+const chartIndicatorTimeframes = new Map();
 
 function synthesizeCandleTicks(candle) {
   if (!candle || !Number.isFinite(candle.open) || !Number.isFinite(candle.high) || !Number.isFinite(candle.low) || !Number.isFinite(candle.close)) {
@@ -669,6 +673,7 @@ let chartLastTouchTapAt = 0;
 let chartTouchPointers = new Map();
 let chartPinchStartDistance = null;
 let chartPinchStartPoints = null;
+let chartTimeScaleDragRemainder = 0;
 let chartLongPressTimer = null;
 let replaySelectionState = null;
 let replayPendingTimeframeAnchor = null;
@@ -2887,6 +2892,170 @@ function buildICTOrderBlocks(candles, structureEvents, activeLimit = 2) {
   return {
     bullish: finalizeZones(bullish, "UP"),
     bearish: finalizeZones(bearish, "DOWN"),
+  };
+}
+
+function buildWeloSmartMoneyConcepts(candles, options = {}) {
+  const source = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  const minCandles = Number(options.minCandles ?? 45);
+  if (source.length < minCandles) {
+    return {
+      bias: "NEUTRAL",
+      confidence: 0,
+      swings: [],
+      structureEvents: [],
+      orderBlocks: [],
+      breakerBlocks: [],
+      fvgs: [],
+      bprs: [],
+      equalHighs: [],
+      equalLows: [],
+      sweeps: [],
+      trendlines: [],
+      signals: [],
+      summary: "Waiting for SMC structure",
+    };
+  }
+
+  const pivotLen = Math.max(2, Number(options.pivotLen ?? 4));
+  const lookback = Math.max(80, Number(options.lookback ?? 260));
+  const offset = Math.max(0, source.length - lookback);
+  const candlesSlice = source.slice(offset);
+  const addOffset = (item) => ({
+    ...item,
+    index: Number.isInteger(item.index) ? item.index + offset : item.index,
+    startIndex: Number.isInteger(item.startIndex) ? item.startIndex + offset : item.startIndex,
+    endIndex: Number.isInteger(item.endIndex) ? item.endIndex + offset : item.endIndex,
+    drawEndIndex: Number.isInteger(item.drawEndIndex) ? item.drawEndIndex + offset : item.drawEndIndex,
+    pivotIndex: Number.isInteger(item.pivotIndex) ? item.pivotIndex + offset : item.pivotIndex,
+    breakIndex: Number.isInteger(item.breakIndex) ? item.breakIndex + offset : item.breakIndex,
+    mitigationIndex: Number.isInteger(item.mitigationIndex) ? item.mitigationIndex + offset : item.mitigationIndex,
+    oppositePivot: item.oppositePivot ? { ...item.oppositePivot, index: item.oppositePivot.index + offset } : item.oppositePivot,
+  });
+
+  const structureSlice = buildICTStructureAnalysis(candlesSlice, pivotLen);
+  const structureEvents = structureSlice.events.map(addOffset);
+  const pivotHighs = structureSlice.pivotHighs.map((point) => ({ ...point, type: "HIGH", index: point.index + offset }));
+  const pivotLows = structureSlice.pivotLows.map((point) => ({ ...point, type: "LOW", index: point.index + offset }));
+  const swings = [...pivotHighs, ...pivotLows].sort((a, b) => a.index - b.index).map((point, index, all) => {
+    const previousSame = [...all.slice(0, index)].reverse().find((candidate) => candidate.type === point.type);
+    let label = point.type === "HIGH" ? "H" : "L";
+    if (previousSame) {
+      label = point.type === "HIGH"
+        ? (point.price > previousSame.price ? "HH" : "LH")
+        : (point.price < previousSame.price ? "LL" : "HL");
+    }
+    return { ...point, label };
+  });
+
+  const fvgSlice = buildICTFVGs(candlesSlice, Number(options.fvgLimit ?? 8));
+  const fvgs = [
+    ...fvgSlice.bullish.map((zone) => ({ ...addOffset(zone), type: "FVG", direction: "UP" })),
+    ...fvgSlice.bearish.map((zone) => ({ ...addOffset(zone), type: "FVG", direction: "DOWN" })),
+  ].sort((a, b) => a.startIndex - b.startIndex);
+  const bprs = fvgSlice.bprs.map((zone) => ({ ...addOffset(zone), type: "BPR" }));
+  const orderBlockSlice = buildICTOrderBlocks(candlesSlice, structureSlice.events, Number(options.orderBlockLimit ?? 5));
+  const rawOrderBlocks = [
+    ...orderBlockSlice.bullish.map((zone) => ({ ...addOffset(zone), type: "OB", direction: "UP" })),
+    ...orderBlockSlice.bearish.map((zone) => ({ ...addOffset(zone), type: "OB", direction: "DOWN" })),
+  ].sort((a, b) => a.index - b.index);
+  const orderBlocks = rawOrderBlocks.filter((zone) => zone.active);
+  const breakerBlocks = rawOrderBlocks
+    .filter((zone) => !zone.active && Number.isInteger(zone.mitigationIndex))
+    .slice(-4)
+    .map((zone) => ({
+      ...zone,
+      type: "BREAKER",
+      direction: zone.direction === "UP" ? "DOWN" : "UP",
+      index: zone.mitigationIndex,
+      drawEndIndex: source.length - 1,
+    }));
+
+  const priceRange = Math.max(
+    ...candlesSlice.map((candle) => candle.high),
+  ) - Math.min(
+    ...candlesSlice.map((candle) => candle.low),
+  );
+  const tolerance = Math.max(
+    Number(options.equalTolerance ?? 0),
+    priceRange * Number(options.equalTolerancePct ?? 0.0014),
+    (currentPip || 0.0001) * 4,
+  );
+  const buildEqualLevels = (points, type) => {
+    const levels = [];
+    for (let i = 1; i < points.length; i += 1) {
+      const a = points[i - 1];
+      const b = points[i];
+      if (Math.abs(a.price - b.price) <= tolerance) {
+        levels.push({
+          type,
+          startIndex: a.index,
+          endIndex: b.index,
+          price: (a.price + b.price) / 2,
+          label: type === "HIGH" ? "EQH" : "EQL",
+        });
+      }
+    }
+    return levels.slice(-5);
+  };
+  const equalHighs = buildEqualLevels(pivotHighs, "HIGH");
+  const equalLows = buildEqualLevels(pivotLows, "LOW");
+
+  const sweeps = [];
+  for (let index = Math.max(0, source.length - 80); index < source.length; index += 1) {
+    const event = detectLiquiditySweepEvent(source, index, 14);
+    if (event) sweeps.push(event);
+  }
+
+  const trendlines = [];
+  const recentHighs = pivotHighs.slice(-3);
+  const recentLows = pivotLows.slice(-3);
+  if (recentHighs.length >= 2) trendlines.push({ type: "HIGH", from: recentHighs[recentHighs.length - 2], to: recentHighs[recentHighs.length - 1] });
+  if (recentLows.length >= 2) trendlines.push({ type: "LOW", from: recentLows[recentLows.length - 2], to: recentLows[recentLows.length - 1] });
+
+  const latestStructure = structureEvents[structureEvents.length - 1] || null;
+  const latestSweep = sweeps[sweeps.length - 1] || null;
+  const latestFvg = fvgs.filter((zone) => zone.active).slice(-1)[0] || null;
+  const latestOb = orderBlocks.slice(-1)[0] || null;
+  const bias = latestStructure?.direction === "UP" ? "BUY" : latestStructure?.direction === "DOWN" ? "SELL" : "NEUTRAL";
+  let confidence = bias === "NEUTRAL" ? 0 : 58;
+  if (latestStructure?.type === "MSS") confidence += 9;
+  if (latestSweep && ((bias === "BUY" && latestSweep.sweepType === "SELL") || (bias === "SELL" && latestSweep.sweepType === "BUY"))) confidence += 8;
+  if (latestFvg && ((bias === "BUY" && latestFvg.direction === "UP") || (bias === "SELL" && latestFvg.direction === "DOWN"))) confidence += 6;
+  if (latestOb && ((bias === "BUY" && latestOb.direction === "UP") || (bias === "SELL" && latestOb.direction === "DOWN"))) confidence += 6;
+  confidence = clamp(Math.round(confidence), 0, 92);
+
+  const signals = [];
+  if (bias !== "NEUTRAL" && confidence >= 60) {
+    signals.push({
+      direction: bias,
+      entryIndex: source.length - 1,
+      price: source[source.length - 1]?.close,
+      confidence,
+      reason: [
+        latestStructure ? `${latestStructure.type === "MSS" ? "CHOCH" : "BOS"} ${latestStructure.direction}` : null,
+        latestSweep ? latestSweep.liquidityLabel : null,
+        latestOb ? "active order block" : null,
+        latestFvg ? "imbalance" : null,
+      ].filter(Boolean).join(" + "),
+    });
+  }
+
+  return {
+    bias,
+    confidence,
+    swings: swings.slice(-18),
+    structureEvents: structureEvents.slice(-14),
+    orderBlocks: orderBlocks.slice(-6),
+    breakerBlocks,
+    fvgs: fvgs.filter((zone) => zone.active).slice(-7),
+    bprs,
+    equalHighs,
+    equalLows,
+    sweeps: sweeps.slice(-8),
+    trendlines,
+    signals,
+    summary: bias === "NEUTRAL" ? "No SMC bias" : `${bias} ${confidence}% smart money confluence`,
   };
 }
 
@@ -8418,35 +8587,104 @@ function renderMiniChart(candles) {
     max,
     toY,
   };
+  if (isDesktopPointerLayout()) {
+    chartCrosshairEnabled = true;
+    updateCrosshairToggleUI();
+  }
+  if (chartCrosshairEnabled && !chartCrosshairState?.active) {
+    const centerX = leftPad + (plotW * 0.5);
+    const centerY = topPad + (plotH * 0.5);
+    const slotIndex = Math.max(0, Math.min(points.length - 1, Math.floor((centerX - leftPad) / Math.max(1, slotW))));
+    chartCrosshairState = {
+      active: true,
+      x: centerX,
+      y: centerY,
+      candleIndex: points.length ? start + slotIndex : null,
+    };
+  }
 
-  const hasICTKillzones = activeChartIndicators.has("ICT_KILLZONES");
-  const hasICTFVG = activeChartIndicators.has("ICT_FVG");
-  const hasICTBPR = activeChartIndicators.has("ICT_BPR");
-  const hasICTOB = activeChartIndicators.has("ICT_OB");
-  const hasICTStructure = activeChartIndicators.has("ICT_STRUCTURE");
-  const hasICTFib = activeChartIndicators.has("ICT_FIB");
-  const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY");
+  const hasICTKillzones = activeChartIndicators.has("ICT_KILLZONES") && isChartIndicatorNativeTimeframe("ICT_KILLZONES");
+  const hasICTFVG = activeChartIndicators.has("ICT_FVG") && isChartIndicatorNativeTimeframe("ICT_FVG");
+  const hasICTBPR = activeChartIndicators.has("ICT_BPR") && isChartIndicatorNativeTimeframe("ICT_BPR");
+  const hasICTOB = activeChartIndicators.has("ICT_OB") && isChartIndicatorNativeTimeframe("ICT_OB");
+  const hasICTStructure = activeChartIndicators.has("ICT_STRUCTURE") && isChartIndicatorNativeTimeframe("ICT_STRUCTURE");
+  const hasICTFib = activeChartIndicators.has("ICT_FIB") && isChartIndicatorNativeTimeframe("ICT_FIB");
+  const hasICTLiquidity = activeChartIndicators.has("ICT_LIQUIDITY") && isChartIndicatorNativeTimeframe("ICT_LIQUIDITY");
   const hasAnyICT = hasICTKillzones || hasICTFVG || hasICTBPR || hasICTOB || hasICTStructure || hasICTFib || hasICTLiquidity;
-  const hasInstitutionalForexEngine = activeChartIndicators.has("INSTITUTIONAL_FOREX_ENGINE");
-  const hasInstitutionalExecutionModel = activeChartIndicators.has("INST_EXECUTION_MODEL");
-  const hasInstitutionalLevelBehavior = activeChartIndicators.has("INST_LEVEL_BEHAVIOR");
-  const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE");
-  const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT");
-  const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB");
-  const hasLDMSS = activeChartIndicators.has("LDMSS");
-  const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08");
-  const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO");
-  const hasADXVolWaves = activeChartIndicators.has("ADX_VOL_WAVES");
-  const hasBreakoutTargets = activeChartIndicators.has("BREAKOUT_TARGETS");
-  const hasDynamicZDivergence = activeChartIndicators.has("DYNAMIC_Z_DIVERGENCE");
-  const hasVolumeProfileNodes = activeChartIndicators.has("VOLUME_PROFILE_NODES");
-  const hasLiquidityTrendline = activeChartIndicators.has("LIQUIDITY_TRENDLINE");
-  const hasStructurePullback = activeChartIndicators.has("STRUCTURE_PULLBACK");
-  const hasSRSignalsMTF = activeChartIndicators.has("SR_SIGNALS_MTF");
-  const hasTickRejection = activeChartIndicators.has("TICK_REJECTION");
-  const hasTrendVolumeAccum = activeChartIndicators.has("TREND_VOLUME_ACCUM");
-  const hasChartPatterns = activeChartIndicators.has("CHART_PATTERNS");
-  const hasChannelsPatterns = activeChartIndicators.has("CHANNELS_PATTERNS");
+  const hasInstitutionalForexEngine = activeChartIndicators.has("INSTITUTIONAL_FOREX_ENGINE") && isChartIndicatorNativeTimeframe("INSTITUTIONAL_FOREX_ENGINE");
+  const hasInstitutionalExecutionModel = activeChartIndicators.has("INST_EXECUTION_MODEL") && isChartIndicatorNativeTimeframe("INST_EXECUTION_MODEL");
+  const hasInstitutionalLevelBehavior = activeChartIndicators.has("INST_LEVEL_BEHAVIOR") && isChartIndicatorNativeTimeframe("INST_LEVEL_BEHAVIOR");
+  const hasAlgoBehaviorEngine = activeChartIndicators.has("ALGO_BEHAVIOR_ENGINE") && isChartIndicatorNativeTimeframe("ALGO_BEHAVIOR_ENGINE");
+  const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT") && isChartIndicatorNativeTimeframe("PRICE_ACTION_TOOLKIT");
+  const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB") && isChartIndicatorNativeTimeframe("LIQ_SWEEP_OB");
+  const hasLDMSS = activeChartIndicators.has("LDMSS") && isChartIndicatorNativeTimeframe("LDMSS");
+  const hasWeloSMC = activeChartIndicators.has("SMC_WELO_TRADES");
+  const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08") && isChartIndicatorNativeTimeframe("SMC_SETUP_08");
+  const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO") && isChartIndicatorNativeTimeframe("SMC_PRO_COMBO");
+  const hasADXVolWaves = activeChartIndicators.has("ADX_VOL_WAVES") && isChartIndicatorNativeTimeframe("ADX_VOL_WAVES");
+  const hasBreakoutTargets = activeChartIndicators.has("BREAKOUT_TARGETS") && isChartIndicatorNativeTimeframe("BREAKOUT_TARGETS");
+  const hasDynamicZDivergence = activeChartIndicators.has("DYNAMIC_Z_DIVERGENCE") && isChartIndicatorNativeTimeframe("DYNAMIC_Z_DIVERGENCE");
+  const hasVolumeProfileNodes = activeChartIndicators.has("VOLUME_PROFILE_NODES") && isChartIndicatorNativeTimeframe("VOLUME_PROFILE_NODES");
+  const hasLiquidityTrendline = activeChartIndicators.has("LIQUIDITY_TRENDLINE") && isChartIndicatorNativeTimeframe("LIQUIDITY_TRENDLINE");
+  const hasStructurePullback = activeChartIndicators.has("STRUCTURE_PULLBACK") && isChartIndicatorNativeTimeframe("STRUCTURE_PULLBACK");
+  const hasSRSignalsMTF = activeChartIndicators.has("SR_SIGNALS_MTF") && isChartIndicatorNativeTimeframe("SR_SIGNALS_MTF");
+  const hasTickRejection = activeChartIndicators.has("TICK_REJECTION") && isChartIndicatorNativeTimeframe("TICK_REJECTION");
+  const hasTrendVolumeAccum = activeChartIndicators.has("TREND_VOLUME_ACCUM") && isChartIndicatorNativeTimeframe("TREND_VOLUME_ACCUM");
+  const hasChartPatterns = activeChartIndicators.has("CHART_PATTERNS") && isChartIndicatorNativeTimeframe("CHART_PATTERNS");
+  const hasChannelsPatterns = activeChartIndicators.has("CHANNELS_PATTERNS") && isChartIndicatorNativeTimeframe("CHANNELS_PATTERNS");
+
+  const mtfIndicatorBadges = Array.from(activeChartIndicators)
+    .filter((value) => !isChartIndicatorNativeTimeframe(value) && value !== "SMC_WELO_TRADES")
+    .map((value) => {
+      const tf = getChartIndicatorTimeframe(value);
+      const source = getChartIndicatorAnalysisCandles(value, candles);
+      const votes = MARKET_SCANNER_INDICATORS.includes(value)
+        ? scanMainSignalIndicator(value, source, getTimeframeLabel(tf), 1, tf)
+        : [];
+      const best = votes
+        .sort((a, b) => Math.abs(b.weight || 0) - Math.abs(a.weight || 0))[0] || null;
+      return {
+        value,
+        label: getChartIndicatorLabel(value),
+        timeframe: getTimeframeLabel(tf),
+        direction: best?.direction || null,
+        reason: best?.reason || (source === candles ? "loading selected TF" : "analysis ready"),
+        loading: source === candles && tf < getChartTimeframeSeconds() && !replayEngine.isReplayMode(),
+      };
+    });
+
+  if (mtfIndicatorBadges.length) {
+    ctx.save();
+    ctx.font = "bold 10px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    const badgeW = Math.min(250, Math.max(150, plotW * 0.32));
+    const badgeH = 26;
+    const startX = Math.max(leftPad + 4, width - rightPad - badgeW - 6);
+    let y = topPad + 4;
+    mtfIndicatorBadges.slice(0, 5).forEach((badge) => {
+      const buy = badge.direction === "CALL";
+      const sell = badge.direction === "PUT";
+      const color = buy ? "#10b981" : sell ? "#ef4444" : "#94a3b8";
+      ctx.fillStyle = "rgba(12, 17, 25, 0.86)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(startX, y, badgeW, badgeH, 7);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      const directionText = badge.loading ? "loading" : buy ? "BUY" : sell ? "SELL" : "watch";
+      ctx.fillText(`${badge.timeframe} ${directionText}`, startX + 8, y + 6);
+      ctx.fillStyle = "#cbd5e1";
+      ctx.font = "9px Segoe UI, sans-serif";
+      const shortLabel = badge.label.length > 24 ? `${badge.label.slice(0, 23)}...` : badge.label;
+      ctx.fillText(shortLabel, startX + 82, y + 7);
+      ctx.font = "bold 10px Segoe UI, sans-serif";
+      y += badgeH + 5;
+    });
+    ctx.restore();
+  }
 
   if (hasICTKillzones) {
     const killzones = buildICTKillzones(points, start);
@@ -9172,7 +9410,7 @@ function renderMiniChart(candles) {
     ctx.restore();
   }
 
-  if (activeChartIndicators.has("EMA")) {
+  if (activeChartIndicators.has("EMA") && isChartIndicatorNativeTimeframe("EMA")) {
     const emaValues = calculateChartEMA(points, 9);
     ctx.save();
     ctx.strokeStyle = "#f2c94c";
@@ -9384,6 +9622,272 @@ function renderMiniChart(candles) {
         ctx.restore();
       });
     }
+  }
+
+  if (hasWeloSMC) {
+    const weloTfSeconds = getChartIndicatorTimeframe("SMC_WELO_TRADES");
+    const chartTfSeconds = getChartTimeframeSeconds();
+    const weloCandles = getChartIndicatorAnalysisCandles("SMC_WELO_TRADES", candles);
+    const weloNative = weloCandles === candles || weloTfSeconds === chartTfSeconds;
+    const smc = buildWeloSmartMoneyConcepts(weloCandles, {
+      pivotLen: 4,
+      lookback: 260,
+      orderBlockLimit: 7,
+      fvgLimit: 10,
+    });
+    const visibleStartTime = Number(candles[start]?.time ?? candles[start]?.epoch ?? 0);
+    const visibleEndTime = Number(candles[Math.max(start, end - 1)]?.time ?? candles[Math.max(start, end - 1)]?.epoch ?? visibleStartTime) + chartTfSeconds;
+    const sourceTimeAt = (index) => Number(weloCandles[index]?.time ?? weloCandles[index]?.epoch);
+    const xForTime = (time, center = true) => {
+      const value = Number(time);
+      if (!Number.isFinite(value) || !Number.isFinite(visibleStartTime)) return NaN;
+      return leftPad + (((value - visibleStartTime) / Math.max(1, chartTfSeconds)) * slotW) + (center ? slotW / 2 : 0);
+    };
+    const xForIndex = (index, center = true) => {
+      if (weloNative) return leftPad + ((index - start) * slotW) + (center ? slotW / 2 : 0);
+      return xForTime(sourceTimeAt(index), center);
+    };
+    const xForIndexEnd = (index) => {
+      if (weloNative) return leftPad + ((index - start) * slotW) + slotW;
+      return xForTime(sourceTimeAt(index) + weloTfSeconds, false);
+    };
+    const clampX = (x) => clamp(x, leftPad, width - rightPad);
+    const indexVisible = (index) => {
+      if (weloNative) return index >= start && index < end;
+      const time = sourceTimeAt(index);
+      return Number.isFinite(time) && time + weloTfSeconds >= visibleStartTime && time <= visibleEndTime;
+    };
+    const rangeVisible = (startIndex, endIndex) => {
+      if (weloNative) return endIndex >= start && startIndex < end;
+      const startTime = sourceTimeAt(startIndex);
+      const endTime = sourceTimeAt(endIndex) + weloTfSeconds;
+      return Number.isFinite(startTime) && Number.isFinite(endTime) && endTime >= visibleStartTime && startTime <= visibleEndTime;
+    };
+    const zoneVisible = (zone) => {
+      const zoneStart = Number.isInteger(zone.startIndex) ? zone.startIndex : zone.index;
+      const zoneEnd = Number.isInteger(zone.drawEndIndex) ? zone.drawEndIndex : Number.isInteger(zone.endIndex) ? zone.endIndex : weloCandles.length - 1;
+      return rangeVisible(zoneStart, zoneEnd);
+    };
+    const drawTag = (text, x, y, color, align = "center") => {
+      const label = String(text || "");
+      if (!label) return;
+      ctx.save();
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      const padX = 5;
+      const textW = ctx.measureText(label).width;
+      const boxW = textW + padX * 2;
+      const boxH = 16;
+      const boxX = clamp(align === "right" ? x - boxW : align === "left" ? x : x - boxW / 2, leftPad, width - rightPad - boxW);
+      const boxY = clamp(y - boxH / 2, topPad, topPad + plotH - boxH);
+      ctx.fillStyle = "rgba(12, 17, 25, 0.88)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, boxX + boxW / 2, boxY + boxH / 2);
+      ctx.restore();
+    };
+    const drawZone = (zone, label, color, fill) => {
+      if (!zoneVisible(zone)) return;
+      const zoneStart = Number.isInteger(zone.startIndex) ? zone.startIndex : zone.index;
+      const zoneEnd = Number.isInteger(zone.drawEndIndex) ? zone.drawEndIndex : Number.isInteger(zone.endIndex) ? zone.endIndex : weloCandles.length - 1;
+      const x = clampX(weloNative ? xForIndex(Math.max(start, zoneStart), false) : xForIndex(zoneStart, false));
+      const x2 = clampX(weloNative ? xForIndexEnd(Math.min(end - 1, zoneEnd)) : xForIndexEnd(zoneEnd));
+      const y1 = toY(zone.top);
+      const y2 = toY(zone.bottom);
+      if (!Number.isFinite(y1) || !Number.isFinite(y2)) return;
+      const topY = Math.min(y1, y2);
+      const h = Math.max(3, Math.abs(y2 - y1));
+      ctx.save();
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      if (zone.type === "BREAKER") ctx.setLineDash([5, 4]);
+      ctx.fillRect(x, topY, Math.max(3, x2 - x), h);
+      ctx.strokeRect(x, topY, Math.max(3, x2 - x), h);
+      ctx.setLineDash([]);
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.fillStyle = color;
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(label, x + 4, topY + 3);
+      ctx.restore();
+    };
+
+    smc.orderBlocks.forEach((zone) => {
+      const bullish = zone.direction === "UP";
+      drawZone(
+        zone,
+        bullish ? "Bullish OB" : "Bearish OB",
+        bullish ? "rgba(35, 211, 139, 0.95)" : "rgba(255, 91, 107, 0.95)",
+        bullish ? "rgba(35, 211, 139, 0.13)" : "rgba(255, 91, 107, 0.13)",
+      );
+    });
+    smc.breakerBlocks.forEach((zone) => {
+      const bullish = zone.direction === "UP";
+      drawZone(
+        zone,
+        bullish ? "Bull Breaker" : "Bear Breaker",
+        bullish ? "rgba(67, 170, 255, 0.9)" : "rgba(250, 204, 21, 0.95)",
+        bullish ? "rgba(67, 170, 255, 0.10)" : "rgba(250, 204, 21, 0.10)",
+      );
+    });
+    smc.fvgs.forEach((zone) => {
+      const bullish = zone.direction === "UP";
+      drawZone(
+        zone,
+        bullish ? "FVG+" : "FVG-",
+        bullish ? "rgba(94, 234, 212, 0.85)" : "rgba(248, 113, 113, 0.85)",
+        bullish ? "rgba(94, 234, 212, 0.08)" : "rgba(248, 113, 113, 0.08)",
+      );
+    });
+    smc.bprs.forEach((zone) => drawZone(zone, "BPR", "rgba(168, 85, 247, 0.9)", "rgba(168, 85, 247, 0.10)"));
+
+    [...smc.equalHighs, ...smc.equalLows].forEach((level) => {
+      if (!rangeVisible(level.startIndex, level.endIndex)) return;
+      const x1 = clampX(weloNative ? xForIndex(Math.max(start, level.startIndex)) : xForIndex(level.startIndex));
+      const x2 = clampX(weloNative ? xForIndex(Math.min(end - 1, level.endIndex)) : xForIndex(level.endIndex));
+      const y = toY(level.price);
+      if (!Number.isFinite(y)) return;
+      const color = level.type === "HIGH" ? "#ff5570" : "#14b8a6";
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([3, 4]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+      ctx.restore();
+      drawTag(level.label, (x1 + x2) / 2, y - (level.type === "HIGH" ? 10 : -10), color);
+    });
+
+    smc.structureEvents.forEach((event) => {
+      if (!rangeVisible(event.pivotIndex, event.breakIndex)) return;
+      const x1 = clampX(weloNative ? xForIndex(Math.max(start, event.pivotIndex)) : xForIndex(event.pivotIndex));
+      const x2 = clampX(weloNative ? xForIndex(Math.min(end - 1, event.breakIndex)) : xForIndex(event.breakIndex));
+      const y = toY(event.pivotPrice);
+      if (!Number.isFinite(y)) return;
+      const isUp = event.direction === "UP";
+      const color = isUp ? "#10b981" : "#ef4444";
+      const label = event.type === "MSS" ? (isUp ? "CHOCH+" : "CHOCH-") : `BOS ${isUp ? "UP" : "DOWN"}`;
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1.15;
+      ctx.setLineDash(event.type === "MSS" ? [5, 3] : []);
+      ctx.beginPath();
+      ctx.moveTo(x1, y);
+      ctx.lineTo(x2, y);
+      ctx.stroke();
+      ctx.restore();
+      drawTag(label, (x1 + x2) / 2, y + (isUp ? -12 : 12), color);
+    });
+
+    smc.swings.forEach((swing) => {
+      if (!indexVisible(swing.index)) return;
+      const x = clampX(xForIndex(swing.index));
+      const y = toY(swing.price);
+      if (!Number.isFinite(y)) return;
+      const high = swing.type === "HIGH";
+      drawTag(swing.label, x, y + (high ? -12 : 12), high ? "#fca5a5" : "#67e8f9");
+    });
+
+    smc.sweeps.forEach((event) => {
+      if (!indexVisible(event.candleIndex)) return;
+      const x = clampX(xForIndex(event.candleIndex));
+      const refY = toY(event.referenceLevel);
+      const extremeY = toY(event.extremeLevel);
+      if (!Number.isFinite(refY) || !Number.isFinite(extremeY)) return;
+      const buySide = event.sweepType === "BUY";
+      const color = buySide ? "#ef4444" : "#10b981";
+      ctx.save();
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.setLineDash([2, 3]);
+      ctx.beginPath();
+      ctx.moveTo(Math.max(leftPad, x - slotW), refY);
+      ctx.lineTo(Math.min(width - rightPad, x + slotW), refY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (buySide) {
+        ctx.moveTo(x, extremeY - 7);
+        ctx.lineTo(x - 5, extremeY + 2);
+        ctx.lineTo(x + 5, extremeY + 2);
+      } else {
+        ctx.moveTo(x, extremeY + 7);
+        ctx.lineTo(x - 5, extremeY - 2);
+        ctx.lineTo(x + 5, extremeY - 2);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      drawTag(buySide ? "BSL sweep" : "SSL sweep", x, extremeY + (buySide ? -12 : 12), color);
+    });
+
+    smc.trendlines.forEach((line) => {
+      const from = line.from;
+      const to = line.to;
+      if (!from || !to || !rangeVisible(from.index, to.index)) return;
+      const x1 = xForIndex(from.index);
+      const y1 = toY(from.price);
+      const x2Base = xForIndex(to.index);
+      const y2Base = toY(to.price);
+      if (![x1, y1, x2Base, y2Base].every(Number.isFinite)) return;
+      const projectedIndex = Math.min(weloCandles.length - 1, to.index + 20);
+      const slope = (to.price - from.price) / Math.max(1, to.index - from.index);
+      const projectedPrice = to.price + slope * (projectedIndex - to.index);
+      const x2 = clampX(weloNative ? xForIndex(Math.min(end - 1, projectedIndex)) : xForIndex(projectedIndex));
+      const y2 = toY(projectedPrice);
+      ctx.save();
+      ctx.strokeStyle = line.type === "LOW" ? "rgba(16, 185, 129, 0.7)" : "rgba(239, 68, 68, 0.7)";
+      ctx.lineWidth = 1.25;
+      ctx.setLineDash([7, 5]);
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, Number.isFinite(y2) ? y2 : y2Base);
+      ctx.stroke();
+      ctx.restore();
+    });
+
+    const signal = smc.signals[0];
+    if (signal && indexVisible(signal.entryIndex)) {
+      const x = clampX(xForIndex(signal.entryIndex));
+      const candle = weloCandles[signal.entryIndex];
+      const buy = signal.direction === "BUY";
+      const y = toY(buy ? candle.low : candle.high) + (buy ? 16 : -16);
+      const color = buy ? "#10b981" : "#ef4444";
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (buy) {
+        ctx.moveTo(x, y - 8);
+        ctx.lineTo(x - 6, y + 4);
+        ctx.lineTo(x + 6, y + 4);
+      } else {
+        ctx.moveTo(x, y + 8);
+        ctx.lineTo(x - 6, y - 4);
+        ctx.lineTo(x + 6, y - 4);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      drawTag(`${signal.direction} ${signal.confidence}%`, x, y + (buy ? 16 : -16), color);
+    }
+
+    ctx.save();
+    ctx.font = "bold 10px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillStyle = smc.bias === "BUY" ? "#10b981" : smc.bias === "SELL" ? "#ef4444" : "#94a3b8";
+    ctx.fillText(`SMC Welo ${getTimeframeLabel(weloTfSeconds)}: ${smc.summary}`, leftPad + 4, topPad + 4);
+    ctx.restore();
   }
 
   if (hasSMCSetup08) {
@@ -10925,7 +11429,7 @@ function ensureCrosshairVisible() {
 }
 
 function setCrosshairEnabled(enabled) {
-  chartCrosshairEnabled = !!enabled;
+  chartCrosshairEnabled = isDesktopPointerLayout() ? true : !!enabled;
   if (!chartCrosshairEnabled) chartCrosshairState = null;
   else ensureCrosshairVisible();
   updateCrosshairToggleUI();
@@ -11153,6 +11657,61 @@ function panChartByPixels(deltaX) {
   renderMiniChart(built);
 }
 
+function getChartHorizontalZoomAnchor(clientX = null) {
+  const viewport = chartViewportState;
+  if (!miniChartCanvas || !viewport) return null;
+  if (isDesktopPointerLayout() && chartCrosshairState?.active) {
+    return clamp(chartCrosshairState.x, viewport.leftPad, viewport.width - viewport.rightPad);
+  }
+  if (!isTouchChartContext() && Number.isFinite(clientX)) {
+    const rect = miniChartCanvas.getBoundingClientRect();
+    return clamp(clientX - rect.left, viewport.leftPad, viewport.width - viewport.rightPad);
+  }
+  return viewport.leftPad + (viewport.plotW * 0.5);
+}
+
+function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
+  const built = getBuiltCandles();
+  if (!miniChartCanvas || !built.length) {
+    renderMiniChart(built);
+    return;
+  }
+  if (!chartViewportState) renderMiniChart(built);
+  const viewport = chartViewportState;
+  if (!viewport) return;
+  const nextPoints = clamp(chartPoints + pointsDelta, 10, MAX_CANDLES);
+  if (nextPoints === chartPoints) return;
+
+  const anchorX = getChartHorizontalZoomAnchor(anchorClientX);
+  const anchorRatio = anchorX == null
+    ? 0.5
+    : clamp((anchorX - viewport.leftPad) / Math.max(1, viewport.plotW), 0, 1);
+  const currentSlot = Math.floor(anchorRatio * Math.max(1, viewport.visibleSlotCount));
+  const crosshairIndex = Number.isInteger(chartCrosshairState?.candleIndex)
+    ? chartCrosshairState.candleIndex
+    : null;
+  const anchorIndex = clamp(
+    isDesktopPointerLayout() && crosshairIndex != null ? crosshairIndex : viewport.start + currentSlot,
+    0,
+    Math.max(0, built.length - 1),
+  );
+
+  chartPoints = nextPoints;
+  const anchorSlot = Math.round(anchorRatio * Math.max(1, chartPoints));
+  const desiredEnd = anchorIndex + (chartPoints - anchorSlot);
+  const { min, max } = getChartOffsetBounds(built);
+  chartOffset = clamp(built.length - desiredEnd, min, max);
+
+  if (chartCrosshairState?.active) {
+    chartCrosshairState = {
+      ...chartCrosshairState,
+      x: anchorX ?? chartCrosshairState.x,
+      candleIndex: anchorIndex,
+    };
+  }
+  renderMiniChart(built);
+}
+
 function panChartVertically(deltaY) {
   const built = getBuiltCandles();
   if (!miniChartCanvas || !built.length) {
@@ -11186,6 +11745,7 @@ function resetChartView() {
   chartDragX = null;
   chartDragY = null;
   chartDragMode = null;
+  chartTimeScaleDragRemainder = 0;
   chartVerticalOffset = 0;
   chartVerticalScale = 1;
   renderMiniChart(getBuiltCandles());
@@ -11196,6 +11756,7 @@ function resetChartViewportState({ render = true } = {}) {
   chartDragX = null;
   chartDragY = null;
   chartDragMode = null;
+  chartTimeScaleDragRemainder = 0;
   chartGestureMoved = false;
   chartVerticalOffset = 0;
   chartVerticalScale = 1;
@@ -11318,43 +11879,58 @@ function buildIndicatorSignalAlerts(candles) {
   if (!Array.isArray(candles) || candles.length < 3 || !activeChartIndicators.size) return [];
   const recentMinIndex = Math.max(0, candles.length - 2);
   const alerts = [];
-  const addAlert = (indicator, entryIndex, direction, kind) => {
-    if (!Number.isInteger(entryIndex) || entryIndex < recentMinIndex || entryIndex >= candles.length) return;
+  const alertCandlesFor = (indicator) => getChartIndicatorAnalysisCandles(indicator, candles);
+  const addAlert = (indicator, entryIndex, direction, kind, sourceCount = candles.length) => {
+    const sourceRecentMinIndex = Math.max(0, sourceCount - 2);
+    if (!Number.isInteger(entryIndex) || entryIndex < sourceRecentMinIndex || entryIndex >= sourceCount) return;
     alerts.push({ indicator, entryIndex, direction, kind });
   };
 
   if (activeChartIndicators.has("SMC_SETUP_08")) {
-    const smc = buildSMCSetup08(candles, 5);
+    const source = alertCandlesFor("SMC_SETUP_08");
+    const smc = buildSMCSetup08(source, 5);
     [...smc.bullish, ...smc.bearish].forEach((setup) => {
       const entryIndex = setup.triggerIndex != null && setup.triggerIndex + 1 < candles.length
         ? setup.triggerIndex + 1
         : setup.triggerIndex;
-      addAlert("SMC_SETUP_08", entryIndex, setup.direction === "BULL" ? "BUY" : "SELL", "setup");
+      addAlert("SMC_SETUP_08", entryIndex, setup.direction === "BULL" ? "BUY" : "SELL", "setup", source.length);
+    });
+  }
+
+  if (activeChartIndicators.has("SMC_WELO_TRADES")) {
+    const source = alertCandlesFor("SMC_WELO_TRADES");
+    const smc = buildWeloSmartMoneyConcepts(source, { pivotLen: 4, lookback: 260 });
+    smc.signals.forEach((signal) => {
+      addAlert("SMC_WELO_TRADES", signal.entryIndex, signal.direction, signal.reason || `${signal.confidence}% SMC confluence`, source.length);
     });
   }
 
   if (activeChartIndicators.has("INST_EXECUTION_MODEL")) {
-    const iem = buildInstitutionalExecutionModel(candles, {});
-    iem.signals.forEach((signal) => addAlert("INST_EXECUTION_MODEL", signal.entryIndex, signal.direction, signal.result.toLowerCase()));
+    const source = alertCandlesFor("INST_EXECUTION_MODEL");
+    const iem = buildInstitutionalExecutionModel(source, {});
+    iem.signals.forEach((signal) => addAlert("INST_EXECUTION_MODEL", signal.entryIndex, signal.direction, signal.result.toLowerCase(), source.length));
   }
 
   if (activeChartIndicators.has("INST_LEVEL_BEHAVIOR")) {
-    const ilb = buildInstitutionalLevelBehaviorModel(candles, {});
-    ilb.signals.forEach((signal) => addAlert("INST_LEVEL_BEHAVIOR", signal.entryIndex, signal.direction, signal.behavior));
+    const source = alertCandlesFor("INST_LEVEL_BEHAVIOR");
+    const ilb = buildInstitutionalLevelBehaviorModel(source, {});
+    ilb.signals.forEach((signal) => addAlert("INST_LEVEL_BEHAVIOR", signal.entryIndex, signal.direction, signal.behavior, source.length));
   }
 
   if (activeChartIndicators.has("INSTITUTIONAL_FOREX_ENGINE")) {
-    const engine = buildInstitutionalForexSignalEngine(candles, {
-      baseSeconds: getChartTimeframeSeconds(),
+    const source = alertCandlesFor("INSTITUTIONAL_FOREX_ENGINE");
+    const engine = buildInstitutionalForexSignalEngine(source, {
+      baseSeconds: getChartIndicatorTimeframe("INSTITUTIONAL_FOREX_ENGINE"),
       expirySeconds: INSTITUTIONAL_EXPIRY_SECONDS,
     });
     if (engine.direction) {
-      addAlert("INSTITUTIONAL_FOREX_ENGINE", candles.length - 1, engine.direction === "CALL" ? "BUY" : "SELL", `${engine.confidence}% ${engine.confirmationStatus}`);
+      addAlert("INSTITUTIONAL_FOREX_ENGINE", source.length - 1, engine.direction === "CALL" ? "BUY" : "SELL", `${engine.confidence}% ${engine.confirmationStatus}`, source.length);
     }
   }
 
   if (activeChartIndicators.has("SMC_PRO_COMBO")) {
-    const smc = buildSMCProCombo(candles, {
+    const source = alertCandlesFor("SMC_PRO_COMBO");
+    const smc = buildSMCProCombo(source, {
       leftLen: 5,
       rightLen: 5,
       atrLen: 14,
@@ -11365,7 +11941,7 @@ function buildIndicatorSignalAlerts(candles) {
       useBodyFilter: true,
     });
     smc.signals.forEach((signal) => {
-      addAlert("SMC_PRO_COMBO", signal.entryIndex, signal.type.includes("BUY") ? "BUY" : "SELL", signal.type);
+      addAlert("SMC_PRO_COMBO", signal.entryIndex, signal.type.includes("BUY") ? "BUY" : "SELL", signal.type, source.length);
     });
   }
 
@@ -11690,7 +12266,8 @@ function renderChartIndicatorList() {
   chartIndicatorListEl.innerHTML = Array.from(activeChartIndicators)
     .map((value) => (
       `<span class="chart-indicator-chip" data-indicator="${value}">
-        ${getChartIndicatorLabel(value)}
+        <span class="chart-indicator-chip-label">${getChartIndicatorLabel(value)}</span>
+        <span class="chart-indicator-chip-tf">${escapeHtml(getChartIndicatorTimeframeLabel(value))}</span>
         <button class="chart-indicator-remove" type="button" data-remove-indicator="${value}" aria-label="Remove ${getChartIndicatorLabel(value)}">x</button>
       </span>`
     ))
@@ -11703,7 +12280,7 @@ function updateMarketScannerIndicatorSource() {
   const attached = Array.from(activeChartIndicators)
     .filter((indicator) => MARKET_SCANNER_INDICATORS.includes(indicator));
   marketScannerIndicatorSourceEl.textContent = attached.length
-    ? `Chart: ${attached.map(getChartIndicatorLabel).join(" + ")}`
+    ? `Chart: ${attached.map((indicator) => `${getChartIndicatorLabel(indicator)} ${getChartIndicatorTimeframeLabel(indicator)}`).join(" + ")}`
     : "Chart indicators";
   marketScannerIndicatorSourceEl.title = attached.length
     ? "Scanner uses these attached chart signal indicators"
@@ -11734,6 +12311,107 @@ function getChartIndicatorMeta(value) {
   const group = getChartIndicatorGroup(value);
   const category = group?.category === "SIGNALS" ? "Signal" : "Analysis";
   return group ? `${category} - ${group.label}` : category;
+}
+
+function getChartIndicatorTimeframe(value) {
+  const configured = Number(chartIndicatorTimeframes.get(value));
+  return Number.isFinite(configured) && configured > 0 ? configured : getChartTimeframeSeconds();
+}
+
+function getChartIndicatorTimeframeLabel(value) {
+  const configured = Number(chartIndicatorTimeframes.get(value));
+  return Number.isFinite(configured) && configured > 0 ? getTimeframeLabel(configured) : "Chart";
+}
+
+function getIndicatorTimeframeOptionsHtml(value) {
+  const configured = Number(chartIndicatorTimeframes.get(value));
+  const selected = Number.isFinite(configured) && configured > 0 ? String(configured) : "";
+  return [
+    `<option value=""${selected === "" ? " selected" : ""}>Chart</option>`,
+    ...TIMEFRAME_OPTIONS.map((option) => (
+      `<option value="${option.seconds}"${selected === String(option.seconds) ? " selected" : ""}>${escapeHtml(option.label)}</option>`
+    )),
+  ].join("");
+}
+
+function saveChartIndicatorTimeframes() {
+  try {
+    localStorage.setItem(CHART_INDICATOR_TIMEFRAMES_KEY, JSON.stringify(Object.fromEntries(chartIndicatorTimeframes)));
+  } catch {
+    // ignore storage limits
+  }
+}
+
+function loadChartIndicatorTimeframes() {
+  chartIndicatorTimeframes.clear();
+  try {
+    const raw = localStorage.getItem(CHART_INDICATOR_TIMEFRAMES_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    const valid = new Set(CHART_INDICATOR_OPTIONS.map((option) => option.value));
+    Object.entries(parsed || {}).forEach(([value, seconds]) => {
+      const numeric = Number(seconds);
+      if (valid.has(value) && Number.isFinite(numeric) && numeric > 0) {
+        chartIndicatorTimeframes.set(value, numeric);
+      }
+    });
+  } catch {
+    chartIndicatorTimeframes.clear();
+  }
+}
+
+function setChartIndicatorTimeframe(value, seconds) {
+  if (!value || !CHART_INDICATOR_OPTIONS.some((option) => option.value === value)) return;
+  const numeric = Number(seconds);
+  if (Number.isFinite(numeric) && numeric > 0) {
+    chartIndicatorTimeframes.set(value, numeric);
+    ensureChartIndicatorTimeframeData(value);
+  } else {
+    chartIndicatorTimeframes.delete(value);
+  }
+  saveChartIndicatorTimeframes();
+  renderChartIndicatorList();
+  renderIndicatorMenu();
+  renderMiniChart(getBuiltCandles());
+}
+
+function getChartIndicatorAnalysisCandles(value, fallbackCandles = getBuiltCandles()) {
+  const targetSeconds = getChartIndicatorTimeframe(value);
+  const chartSeconds = getChartTimeframeSeconds();
+  const fallback = Array.isArray(fallbackCandles) ? fallbackCandles : [];
+  if (!Number.isFinite(targetSeconds) || targetSeconds === chartSeconds) return fallback;
+  if (targetSeconds > chartSeconds && fallback.length) {
+    const aggregated = aggregateCandlesByTimeframe(fallback, targetSeconds);
+    if (aggregated.length) return aggregated;
+  }
+  const cached = getCachedCandles(currentSymbol, targetSeconds);
+  if (cached.length) return cached;
+  if (!replayEngine.isReplayMode()) ensureChartIndicatorTimeframeData(value);
+  return fallback;
+}
+
+function ensureChartIndicatorTimeframeData(value) {
+  const targetSeconds = getChartIndicatorTimeframe(value);
+  const chartSeconds = getChartTimeframeSeconds();
+  if (!currentSymbol || !Number.isFinite(targetSeconds) || targetSeconds === chartSeconds || replayEngine.isReplayMode()) return;
+  if (targetSeconds > chartSeconds) return;
+  const key = `indicator:${currentSymbol}|${value}|${targetSeconds}`;
+  if (topDownCacheLoadState.get(key) || getCachedCandles(currentSymbol, targetSeconds, { freshOnly: true }).length) return;
+  topDownCacheLoadState.set(key, true);
+  fetchCandlesForGranularity(currentSymbol, targetSeconds, Math.min(MAX_CANDLES, 320))
+    .then((candles) => {
+      if (candles.length) {
+        setCachedCandles(currentSymbol, targetSeconds, candles);
+        if (activeChartIndicators.has(value) && getChartIndicatorTimeframe(value) === targetSeconds && !replayEngine.isReplayMode()) {
+          renderMiniChart(getBuiltCandles());
+        }
+      }
+    })
+    .catch(() => {})
+    .finally(() => topDownCacheLoadState.delete(key));
+}
+
+function isChartIndicatorNativeTimeframe(value) {
+  return getChartIndicatorTimeframe(value) === getChartTimeframeSeconds();
 }
 
 function getChartIndicatorMenuEntries() {
@@ -11793,6 +12471,9 @@ function loadChartIndicatorTemplates() {
           indicators: Array.isArray(template?.indicators)
             ? template.indicators.filter((value, index, list) => valid.has(value) && list.indexOf(value) === index)
             : [],
+          timeframes: Object.fromEntries(Object.entries(template?.timeframes || {})
+            .filter(([value, seconds]) => valid.has(value) && Number.isFinite(Number(seconds)) && Number(seconds) > 0)
+            .map(([value, seconds]) => [value, Number(seconds)])),
         }))
         .filter((template) => template.indicators.length)
       : [];
@@ -11812,6 +12493,9 @@ function saveCurrentIndicatorTemplate(name) {
     id: `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     name: cleanName,
     indicators,
+    timeframes: Object.fromEntries(indicators
+      .map((value) => [value, chartIndicatorTimeframes.get(value)])
+      .filter(([, seconds]) => Number.isFinite(Number(seconds)) && Number(seconds) > 0)),
   });
   chartIndicatorTemplates = chartIndicatorTemplates.slice(0, 20);
   saveChartIndicatorTemplates();
@@ -11825,7 +12509,15 @@ function applyChartIndicatorTemplate(templateId) {
   const template = chartIndicatorTemplates.find((item) => item.id === templateId);
   if (!template) return;
   activeChartIndicators.clear();
+  chartIndicatorTimeframes.clear();
   template.indicators.forEach((value) => activeChartIndicators.add(value));
+  Object.entries(template.timeframes || {}).forEach(([value, seconds]) => {
+    if (activeChartIndicators.has(value) && Number.isFinite(Number(seconds)) && Number(seconds) > 0) {
+      chartIndicatorTimeframes.set(value, Number(seconds));
+      ensureChartIndicatorTimeframeData(value);
+    }
+  });
+  saveChartIndicatorTimeframes();
   renderChartIndicatorList();
   renderIndicatorMenu();
   renderMiniChart(getBuiltCandles());
@@ -11856,8 +12548,13 @@ function renderIndicatorMenu() {
         <span class="chart-market-icon"></span>
         <span>
           <span class="chart-market-item-name">${escapeHtml(label)}</span>
-          <span class="chart-market-item-meta">${escapeHtml(getChartIndicatorMeta(value))}${active ? " - Added" : ""}</span>
+          <span class="chart-market-item-meta">${escapeHtml(getChartIndicatorMeta(value))}${active ? ` - ${escapeHtml(getChartIndicatorTimeframeLabel(value))}` : ""}</span>
         </span>
+        ${isCurrentView
+          ? `<select class="indicator-timeframe-select" data-indicator-timeframe="${escapeHtml(value)}" aria-label="${escapeHtml(label)} timeframe">
+              ${getIndicatorTimeframeOptionsHtml(value)}
+            </select>`
+          : ""}
         ${isCurrentView
           ? `<span class="indicator-menu-remove" data-indicator-menu-remove="${escapeHtml(value)}" title="Remove indicator">x</span>`
           : `<span class="chart-market-star ${favorite ? "active" : ""}" data-indicator-favorite="${escapeHtml(value)}" title="Toggle favorite">${favorite ? "★" : "☆"}</span>`}
@@ -11998,6 +12695,7 @@ function setChart2DrawingMenuOpen(open) {
 function addChartIndicator(value) {
   if (!value) return;
   activeChartIndicators.add(value);
+  ensureChartIndicatorTimeframeData(value);
   renderChartIndicatorList();
   renderIndicatorMenu();
   renderMiniChart(getBuiltCandles());
@@ -12006,6 +12704,8 @@ function addChartIndicator(value) {
 function removeChartIndicator(value) {
   if (!value) return;
   activeChartIndicators.delete(value);
+  chartIndicatorTimeframes.delete(value);
+  saveChartIndicatorTimeframes();
   renderChartIndicatorList();
   renderIndicatorMenu();
   renderMiniChart(getBuiltCandles());
@@ -13044,6 +13744,31 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSe
           isSetup: false,
         });
       }
+    } else if (indicator === "SMC_WELO_TRADES") {
+      const smc = buildWeloSmartMoneyConcepts(candles, { pivotLen: 4, lookback: 260 });
+      const latest = latestByIndex(smc.signals);
+      if (latest) {
+        pushMainIndicatorVote(votes, {
+          direction: latest.direction,
+          weight: frameWeight * Math.max(2.4, latest.confidence / 24),
+          indicator,
+          frame,
+          price: latest.price,
+          reason: latest.reason || smc.summary,
+          index: latest.entryIndex,
+          candleCount: count,
+        });
+      } else if (smc.bias === "BUY" || smc.bias === "SELL") {
+        pushMainIndicatorVote(votes, {
+          direction: smc.bias,
+          weight: frameWeight * Math.max(1, smc.confidence / 45),
+          indicator,
+          frame,
+          price: candles[count - 1]?.close,
+          reason: smc.summary,
+          isSetup: false,
+        });
+      }
     } else if (indicator === "SMC_SETUP_08") {
       const smc = buildSMCSetup08(candles, 5);
       const all = [
@@ -13287,6 +14012,7 @@ function scanAllMainSignalIndicators(candles, frame, frameWeight, frameSeconds =
     "ICT_STRUCTURE",
     "LIQ_SWEEP_OB",
     "LDMSS",
+    "SMC_WELO_TRADES",
     "SMC_SETUP_08",
     "SMC_PRO_COMBO",
     "ADX_VOL_WAVES",
@@ -13962,6 +14688,35 @@ async function runAskAiAnalysis() {
 function scoreIndicatorMarket(indicator, candles, baseSeconds = getChartTimeframeSeconds()) {
   const sourceCandles = Array.isArray(candles) ? candles.filter(Boolean) : [];
   if (sourceCandles.length < MARKET_SCANNER_MIN_ENTRY_CANDLES) return null;
+  const configuredIndicatorSeconds = Number(chartIndicatorTimeframes.get(indicator));
+  if (Number.isFinite(configuredIndicatorSeconds) && configuredIndicatorSeconds > 0) {
+    const indicatorCandles = configuredIndicatorSeconds > baseSeconds
+      ? aggregateCandlesByTimeframe(sourceCandles, configuredIndicatorSeconds)
+      : sourceCandles;
+    const frame = getTimeframeLabel(configuredIndicatorSeconds);
+    const votes = scanMainSignalIndicator(indicator, indicatorCandles, frame, 2.0, configuredIndicatorSeconds);
+    if (!votes.length) return null;
+    const callWeight = votes.filter((vote) => vote.direction === "CALL").reduce((sum, vote) => sum + vote.weight, 0);
+    const putWeight = votes.filter((vote) => vote.direction === "PUT").reduce((sum, vote) => sum + vote.weight, 0);
+    const totalWeight = callWeight + putWeight;
+    if (!totalWeight || callWeight === putWeight) return null;
+    const direction = callWeight > putWeight ? "CALL" : "PUT";
+    const confidence = Math.round((Math.max(callWeight, putWeight) / totalWeight) * 100);
+    const winningVotes = votes.filter((vote) => vote.direction === direction).sort((a, b) => b.weight - a.weight);
+    return {
+      indicator,
+      indicatorLabel: getChartIndicatorLabel(indicator),
+      direction,
+      confidence,
+      score: Math.round(confidence + Math.min(18, winningVotes.length * 4)),
+      edge: Math.abs(callWeight - putWeight) / totalWeight,
+      votes: votes.length,
+      setupVotes: winningVotes.filter((vote) => vote.isSetup).length,
+      reason: winningVotes[0]?.reason || winningVotes[0]?.system || "configured TF aligned",
+      frame,
+      timeframeSeconds: configuredIndicatorSeconds,
+    };
+  }
   const frameSet = getMtfTimeframeSet(baseSeconds);
   const main = aggregateCandlesByTimeframe(sourceCandles, frameSet.mainSeconds);
   const align = aggregateCandlesByTimeframe(sourceCandles, frameSet.alignSeconds);
@@ -15395,6 +16150,14 @@ function setActiveTab(tabName, options = {}) {
 
 function isDesktopLayout() {
   return window.matchMedia("(min-width: 980px), (orientation: landscape) and (min-width: 640px)").matches;
+}
+
+function isTouchChartContext() {
+  return window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+}
+
+function isDesktopPointerLayout() {
+  return isDesktopLayout() && !isTouchChartContext();
 }
 
 function restoreMovedElement(el, parent, nextSibling) {
@@ -17079,6 +17842,7 @@ function init() {
   loadChartMarketFavorites();
   loadChartIndicatorFavorites();
   loadChartIndicatorTemplates();
+  loadChartIndicatorTimeframes();
   marketSelect.addEventListener("change", updateSymbols);
   symbolSelect.addEventListener("change", onSymbolChange);
   populateRiseFallExpiryOptions();
@@ -17448,10 +18212,8 @@ function init() {
       chartOffset = clamp(chartOffset + (direction * step), min, max);
     } else {
       const delta = Math.sign(event.deltaY);
-      if (delta > 0) chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
-      else chartPoints = Math.max(20, chartPoints - 10);
-      const { min, max } = getChartOffsetBounds(built);
-      chartOffset = clamp(chartOffset, min, max);
+      zoomChartHorizontally(delta > 0 ? 10 : -10, event.clientX);
+      return;
     }
     renderMiniChart(built);
   }, { passive: false });
@@ -17462,7 +18224,8 @@ function init() {
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
-    const pointerPoint = !inAxis ? { x: localX, y: localY } : null;
+    const inTimeAxis = !inAxis && localY >= Math.max(0, miniChartCanvas.clientHeight - 34);
+    const pointerPoint = !inAxis && !inTimeAxis ? { x: localX, y: localY } : null;
     if (replayEngine.isSelectingCandle() && !inAxis) {
       const replayIndex = updateReplaySelectionFromPointer(event);
       if (replayIndex != null) {
@@ -17598,7 +18361,8 @@ function init() {
       chartDragMode = "crosshair";
       updateChartCrosshairFromPointer(event);
     } else {
-      chartDragMode = inAxis ? "scale" : "pan";
+      chartDragMode = inAxis ? "scale" : inTimeAxis ? "time-scale" : "pan";
+      if (chartDragMode === "time-scale") chartTimeScaleDragRemainder = 0;
     }
     chartGestureMoved = false;
     miniChartCanvas.setPointerCapture?.(event.pointerId);
@@ -17608,7 +18372,9 @@ function init() {
     const rect = miniChartCanvas.getBoundingClientRect();
     const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
     const localX = event.clientX - rect.left;
+    const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
+    const inTimeAxis = !inAxis && localY >= Math.max(0, miniChartCanvas.clientHeight - 34);
     if (chartDragMode === "replay-select") {
       updateReplaySelectionFromPointer(event);
       return;
@@ -17640,11 +18406,11 @@ function init() {
     if (chartDragX == null || chartDragY == null) {
       if (!inAxis && chartDrawingTool === "SELECT") {
         const hitId = hitTestChartDrawing({ x: event.clientX - rect.left, y: event.clientY - rect.top });
-        miniChartCanvas.style.cursor = hitId ? "pointer" : (chartCrosshairEnabled ? "crosshair" : "grab");
+        miniChartCanvas.style.cursor = hitId ? "pointer" : inTimeAxis ? "ew-resize" : (chartCrosshairEnabled ? "crosshair" : "grab");
       } else if (chartDrawingTool !== "SELECT") {
-        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : "crosshair";
+        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : inTimeAxis ? "ew-resize" : "crosshair";
       } else {
-        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : (chartCrosshairEnabled ? "crosshair" : "grab");
+        miniChartCanvas.style.cursor = inAxis ? "ns-resize" : inTimeAxis ? "ew-resize" : (chartCrosshairEnabled ? "crosshair" : "grab");
       }
       if (chartCrosshairEnabled && event.pointerType === "mouse") {
         updateChartCrosshairFromPointer(event);
@@ -17685,6 +18451,14 @@ function init() {
       updateChartCrosshairFromPointer(event);
     } else if (chartDragMode === "scale") {
       scaleChartVertically(deltaY);
+    } else if (chartDragMode === "time-scale") {
+      chartTimeScaleDragRemainder += deltaX;
+      const pixelsPerStep = 18;
+      const step = Math.trunc(chartTimeScaleDragRemainder / pixelsPerStep);
+      if (step) {
+        chartTimeScaleDragRemainder -= step * pixelsPerStep;
+        zoomChartHorizontally(-step, event.clientX);
+      }
     } else {
       panChartByPixels(deltaX);
       panChartVertically(deltaY);
@@ -17698,6 +18472,7 @@ function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       miniChartCanvas.releasePointerCapture?.(event.pointerId);
       return;
@@ -17710,6 +18485,7 @@ function init() {
           chartPinchStartDistance = null;
           chartPinchStartPoints = null;
           chartDragMode = null;
+          chartTimeScaleDragRemainder = 0;
           chartDragX = null;
           chartDragY = null;
           chartGestureMoved = false;
@@ -17725,6 +18501,7 @@ function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingHitCandidateId = null;
       return;
@@ -17735,6 +18512,7 @@ function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       if (drawing) {
         addChartDrawing(drawing);
@@ -17753,6 +18531,7 @@ function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingMoveOrigin = null;
       chartDrawingAdjustHandle = null;
@@ -17763,6 +18542,7 @@ function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingMoveOrigin = null;
       chartDrawingAdjustHandle = null;
@@ -17803,8 +18583,9 @@ function init() {
     }
     chartDragX = null;
     chartDragY = null;
-    chartDragMode = null;
-    chartGestureMoved = false;
+      chartDragMode = null;
+      chartTimeScaleDragRemainder = 0;
+      chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
     chartDrawingMoveOrigin = null;
     chartDrawingAdjustHandle = null;
@@ -17822,6 +18603,7 @@ function init() {
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
+    chartTimeScaleDragRemainder = 0;
     chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
     chartDrawingDraft = null;
@@ -17845,6 +18627,7 @@ function init() {
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
+    chartTimeScaleDragRemainder = 0;
     chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
     chartDrawingMoveOrigin = null;
@@ -17895,10 +18678,19 @@ function init() {
     }
   });
 
+  indicatorMenuEl?.addEventListener("change", (event) => {
+    event.stopPropagation();
+    const target = event.target;
+    if (!(target instanceof HTMLSelectElement) || !target.matches("[data-indicator-timeframe]")) return;
+    const value = target.getAttribute("data-indicator-timeframe");
+    if (value) setChartIndicatorTimeframe(value, target.value);
+  });
+
   indicatorMenuEl?.addEventListener("click", (event) => {
     event.stopPropagation();
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
+    if (target.closest("[data-indicator-timeframe]")) return;
     const favoriteBtn = target.closest("[data-indicator-favorite]");
     if (favoriteBtn instanceof HTMLElement) {
       const value = favoriteBtn.getAttribute("data-indicator-favorite");

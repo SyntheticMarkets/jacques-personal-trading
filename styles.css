@@ -1114,6 +1114,12 @@ button.small {
   margin-top: 4px;
 }
 
+.app-panel[data-app-panel="chart"] > .trade-section:first-child {
+  background: #0f141c;
+  padding: 0;
+  overflow: hidden;
+}
+
 .trade-proposals-body {
   display: grid;
   gap: 12px;
@@ -1420,6 +1426,23 @@ button.chart-indicator-select {
   text-align: left;
 }
 
+.indicator-menu-item > span:nth-child(2) {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.indicator-timeframe-select {
+  flex: 0 0 auto;
+  width: 86px;
+  height: 32px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0e141d;
+  color: var(--text);
+  padding: 0 8px;
+  font: 700 12px/1 "Segoe UI", sans-serif;
+}
+
 .indicator-menu-item:hover,
 .indicator-menu-item.active {
   border-color: #253043;
@@ -1567,6 +1590,24 @@ button.chart-indicator-select {
   background: #0f141c;
   color: var(--text);
   font-size: 11px;
+}
+
+.chart-indicator-chip-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.chart-indicator-chip-tf {
+  flex: 0 0 auto;
+  border: 1px solid rgba(96, 165, 250, 0.32);
+  border-radius: 999px;
+  padding: 1px 6px 2px;
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1.2;
+  text-transform: uppercase;
 }
 
 .chart-indicator-remove {
@@ -1762,11 +1803,11 @@ button.chart-indicator-select {
 }
 
 .chart-body {
-  margin-top: 6px;
+  margin-top: 0;
   background: #0f141c;
-  border: 1px solid #1d2635;
-  border-radius: 10px;
-  padding: 6px;
+  border: 0;
+  border-radius: 0;
+  padding: 0;
   position: relative;
   overflow: hidden;
 }
@@ -2092,7 +2133,7 @@ button.chart-indicator-select {
     display: grid;
     grid-template-columns: minmax(0, 1fr) 330px;
     grid-template-rows: minmax(0, 1fr);
-    gap: 12px 14px;
+    gap: 0;
     min-height: 0;
     height: 100%;
     flex: 1 1 auto;
@@ -2184,6 +2225,7 @@ button.chart-indicator-select {
     flex-direction: column;
     position: relative;
     overflow: hidden;
+    background: #0f141c !important;
   }
 
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child > .chart-body #miniChart {
@@ -2453,7 +2495,7 @@ button.chart-indicator-select {
 
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
     grid-template-columns: minmax(0, 1fr) 270px;
-    gap: 8px;
+    gap: 0;
   }
 
   .phone.sidebar-collapsed.desktop-chart-layout {
