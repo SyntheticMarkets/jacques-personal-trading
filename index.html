@@ -50,8 +50,14 @@
               <select id="askAiSymbol" class="field-input" aria-label="AI analysis pair"></select>
               <select id="askAiTimeframe" class="field-input" aria-label="AI analysis timeframe"></select>
               <button id="askAiAnalyse" class="ghost small main-signal-btn" type="button">Analyse</button>
+              <button id="askAiListen" class="ghost small main-signal-btn" type="button" aria-pressed="false">Voice</button>
             </div>
             <div id="askAiStatus" class="main-signal-status">Choose a group, pair, and timeframe.</div>
+            <div id="askAiTranscript" class="ask-ai-transcript" aria-live="polite"></div>
+            <form id="askAiCommandForm" class="ask-ai-command-form">
+              <input id="askAiCommandInput" class="field-input" type="text" autocomplete="off" placeholder="Ask AI to analyse, change timeframe, add indicators, draw a plan..." aria-label="Ask AI command" />
+              <button id="askAiSend" class="ghost small main-signal-btn" type="submit">Send</button>
+            </form>
             <div id="askAiResult" class="ask-ai-result"></div>
           </div>
         </div>

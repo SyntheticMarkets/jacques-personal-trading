@@ -852,8 +852,68 @@ button.small {
 
 .ask-ai-controls {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   gap: 8px;
+}
+
+.ask-ai-command-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+}
+
+.ask-ai-transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 190px;
+  overflow: auto;
+  padding: 10px;
+  border: 1px solid #223047;
+  border-radius: 10px;
+  background: rgba(5, 9, 16, 0.42);
+  overscroll-behavior: contain;
+}
+
+.ask-ai-message {
+  display: grid;
+  gap: 4px;
+  max-width: 86%;
+  padding: 8px 10px;
+  border: 1px solid #25334a;
+  border-radius: 10px;
+  background: rgba(14, 22, 34, 0.86);
+  color: #d8e4f2;
+}
+
+.ask-ai-message.user {
+  align-self: flex-end;
+  border-color: rgba(45, 140, 255, 0.46);
+  background: rgba(25, 47, 79, 0.9);
+}
+
+.ask-ai-message.assistant {
+  align-self: flex-start;
+}
+
+.ask-ai-message span {
+  color: #8ea0b8;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
+.ask-ai-message p {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.ask-ai-controls .main-signal-btn.active,
+.ask-ai-command-form .main-signal-btn.active {
+  border-color: rgba(16, 185, 129, 0.72);
+  background: rgba(16, 185, 129, 0.18);
+  color: #d1fae5;
 }
 
 .ask-ai-result {
@@ -908,6 +968,20 @@ button.small {
   gap: 6px;
   color: var(--muted);
   font-size: 11px;
+}
+
+@media (max-width: 720px) {
+  .ask-ai-controls {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .ask-ai-command-form {
+    grid-template-columns: 1fr;
+  }
+
+  .ask-ai-message {
+    max-width: 96%;
+  }
 }
 
 .market-scanner-controls {
@@ -2844,10 +2918,16 @@ button.chart-indicator-select {
     backdrop-filter: blur(8px);
   }
 
-  .phone.chart2-mode #accountSummary,
   .phone.chart2-mode #toggleSidebar,
   .phone.chart2-mode #toggleSignalSidebar {
     display: none !important;
+  }
+
+  .phone.chart2-mode #accountSummary {
+    display: inline-flex !important;
+    pointer-events: auto;
+    background: rgba(15, 20, 28, 0.86);
+    backdrop-filter: blur(8px);
   }
 
   .phone.chart2-mode .desktop-sidebar {
@@ -3137,7 +3217,9 @@ button.chart-indicator-select {
 
   .phone.desktop-chart-layout .account-summary,
   .phone.chart2-mode .account-summary {
-    display: none !important;
+    display: inline-flex !important;
+    flex: 0 0 auto !important;
+    min-width: max-content !important;
   }
 
   .phone.desktop-chart-layout .topbar-actions,

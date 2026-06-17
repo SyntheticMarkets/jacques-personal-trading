@@ -155,9 +155,22 @@ let askAiGroupSelectEl;
 let askAiSymbolSelectEl;
 let askAiTimeframeSelectEl;
 let askAiAnalyseBtnEl;
+let askAiListenBtnEl;
+let askAiCommandFormEl;
+let askAiCommandInputEl;
+let askAiSendBtnEl;
+let askAiTranscriptEl;
 let askAiStatusEl;
 let askAiResultEl;
 let askAiInFlight = false;
+let askAiListening = false;
+let askAiRealtimePc = null;
+let askAiRealtimeDataChannel = null;
+let askAiRealtimeStream = null;
+let askAiRealtimeAudioEl = null;
+let askAiRealtimeResponseText = "";
+let askAiLastAnalysis = null;
+let askAiMessages = [];
 let replayToggleBtn;
 let replayToolbarEl;
 let replayStartSelectEl;
@@ -304,6 +317,7 @@ const DEFAULT_TIMEFRAME_SEC = 60;
 const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
   { value: "INSTITUTIONAL_FOREX_ENGINE", label: "15m Institutional Forex Engine" },
+  { value: "INSTITUTIONAL_SMC_ENGINE", label: "Institutional SMC Engine" },
   { value: "INST_EXECUTION_MODEL", label: "Institutional Model" },
   { value: "INST_LEVEL_BEHAVIOR", label: "Institutional Level Behavior" },
   { value: "ALGO_BEHAVIOR_ENGINE", label: "Algo Behavior Engine" },
@@ -338,7 +352,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "IEM",
     label: "Institutional",
     category: "SIGNALS",
-    items: ["INSTITUTIONAL_FOREX_ENGINE", "INST_EXECUTION_MODEL", "INST_LEVEL_BEHAVIOR"],
+    items: ["INSTITUTIONAL_FOREX_ENGINE", "INSTITUTIONAL_SMC_ENGINE", "INST_EXECUTION_MODEL", "INST_LEVEL_BEHAVIOR"],
   },
   {
     key: "AB",
@@ -368,7 +382,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "SMC",
     label: "SMC",
     category: "SIGNALS",
-    items: ["SMC_WELO_TRADES", "SMC_SETUP_08", "SMC_PRO_COMBO"],
+    items: ["INSTITUTIONAL_SMC_ENGINE", "SMC_WELO_TRADES", "SMC_SETUP_08", "SMC_PRO_COMBO"],
   },
   {
     key: "VOL_SIG",
@@ -427,6 +441,7 @@ const CHART_INDICATOR_GROUPS = [
 ];
 const MARKET_SCANNER_INDICATORS = [
   "INSTITUTIONAL_FOREX_ENGINE",
+  "INSTITUTIONAL_SMC_ENGINE",
   "INST_EXECUTION_MODEL",
   "INST_LEVEL_BEHAVIOR",
   "ALGO_BEHAVIOR_ENGINE",
@@ -3057,6 +3072,321 @@ function buildWeloSmartMoneyConcepts(candles, options = {}) {
     signals,
     summary: bias === "NEUTRAL" ? "No SMC bias" : `${bias} ${confidence}% smart money confluence`,
   };
+}
+
+function getInstitutionalSmcHierarchy(baseSeconds = getChartTimeframeSeconds()) {
+  const source = Math.max(1, Number(baseSeconds) || DEFAULT_TIMEFRAME_SEC);
+  let htf = 900;
+  let itf = 300;
+  let ltf = 60;
+  if (source <= 60) {
+    htf = 900;
+    itf = 300;
+    ltf = 60;
+  } else if (source <= 300) {
+    htf = 3600;
+    itf = 900;
+    ltf = 300;
+  } else if (source <= 900) {
+    htf = 14400;
+    itf = 3600;
+    ltf = 900;
+  } else {
+    htf = 86400;
+    itf = 14400;
+    ltf = Math.min(source, 3600);
+  }
+  return {
+    sourceSeconds: source,
+    htfSeconds: htf,
+    itfSeconds: itf,
+    ltfSeconds: ltf,
+    htfLabel: getTimeframeLabel(htf).toUpperCase(),
+    itfLabel: getTimeframeLabel(itf).toUpperCase(),
+    ltfLabel: getTimeframeLabel(ltf).toUpperCase(),
+  };
+}
+
+function getInstitutionalSmcCandles(symbol, timeframeSeconds, fallbackCandles, fallbackSeconds) {
+  const target = Math.max(1, Number(timeframeSeconds) || fallbackSeconds || getChartTimeframeSeconds());
+  const base = Math.max(1, Number(fallbackSeconds) || getChartTimeframeSeconds());
+  const source = Array.isArray(fallbackCandles) ? fallbackCandles.filter(Boolean) : [];
+  if (!source.length) return [];
+  if (target === base) return source;
+  if (replayEngine?.isReplayMode?.()) {
+    return target >= base ? aggregateCandlesByTimeframe(source, target) : source;
+  }
+  return resolveTopDownCandles(symbol, target, source, base);
+}
+
+function buildInstitutionalSmcStructureEngine(candles, label = "") {
+  const source = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  const smc = buildWeloSmartMoneyConcepts(source, {
+    pivotLen: source.length > 160 ? 5 : 4,
+    lookback: 320,
+    orderBlockLimit: 10,
+    fvgLimit: 14,
+    minCandles: 35,
+  });
+  const latestStructure = smc.structureEvents[smc.structureEvents.length - 1] || null;
+  const recentEvents = smc.structureEvents.slice(-5);
+  const upEvents = recentEvents.filter((event) => event.direction === "UP").length;
+  const downEvents = recentEvents.filter((event) => event.direction === "DOWN").length;
+  const bias = smc.bias === "BUY"
+    ? "BULLISH"
+    : smc.bias === "SELL"
+      ? "BEARISH"
+      : upEvents > downEvents
+        ? "BULLISH"
+        : downEvents > upEvents
+          ? "BEARISH"
+          : "RANGE";
+  const majorHigh = smc.swings.filter((swing) => swing.type === "HIGH").slice(-1)[0] || null;
+  const majorLow = smc.swings.filter((swing) => swing.type === "LOW").slice(-1)[0] || null;
+  return {
+    label,
+    candles: source,
+    smc,
+    bias,
+    confidence: smc.confidence || (bias === "RANGE" ? 35 : 55),
+    latestStructure,
+    latestBos: [...smc.structureEvents].reverse().find((event) => event.type === "BOS") || null,
+    latestChoch: [...smc.structureEvents].reverse().find((event) => event.type === "MSS") || null,
+    majorHigh,
+    majorLow,
+  };
+}
+
+function buildInstitutionalSmcLiquidityEngine(frame) {
+  const smc = frame?.smc || {};
+  const latestSweep = (smc.sweeps || [])[smc.sweeps.length - 1] || null;
+  const pools = [
+    ...(smc.equalHighs || []).map((zone) => ({ ...zone, side: "BSL", price: zone.price ?? zone.level })),
+    ...(smc.equalLows || []).map((zone) => ({ ...zone, side: "SSL", price: zone.price ?? zone.level })),
+  ].filter((zone) => Number.isFinite(zone.price));
+  return {
+    pools: pools.slice(-8),
+    sweeps: (smc.sweeps || []).slice(-8),
+    latestSweep,
+    direction: latestSweep?.sweepType === "SELL" ? "BUY" : latestSweep?.sweepType === "BUY" ? "SELL" : null,
+  };
+}
+
+function buildInstitutionalSmcFvgEngine(frame) {
+  const zones = (frame?.smc?.fvgs || [])
+    .filter((zone) => zone.active !== false && Number.isFinite(zone.top) && Number.isFinite(zone.bottom))
+    .map((zone) => ({
+      ...zone,
+      kind: "FVG",
+      score: Math.abs(zone.top - zone.bottom),
+    }))
+    .sort((a, b) => b.score - a.score);
+  return { zones: zones.slice(0, 6), strongest: zones[0] || null };
+}
+
+function buildInstitutionalSmcOrderBlockEngine(frame) {
+  const zones = [
+    ...(frame?.smc?.orderBlocks || []).map((zone) => ({ ...zone, kind: "OB" })),
+    ...(frame?.smc?.breakerBlocks || []).map((zone) => ({ ...zone, kind: "Breaker" })),
+  ].filter((zone) => Number.isFinite(zone.top) && Number.isFinite(zone.bottom));
+  const active = zones.filter((zone) => zone.active !== false).slice(-8);
+  return { zones: active, strongest: active[active.length - 1] || null };
+}
+
+function isPriceInsideZone(price, zone, tolerance = 0) {
+  if (!Number.isFinite(price) || !zone || !Number.isFinite(zone.top) || !Number.isFinite(zone.bottom)) return false;
+  const top = Math.max(zone.top, zone.bottom) + tolerance;
+  const bottom = Math.min(zone.top, zone.bottom) - tolerance;
+  return price <= top && price >= bottom;
+}
+
+function buildInstitutionalSmcPoiScoringEngine({ htf, itf, ltf, currentPrice }) {
+  const htfOb = buildInstitutionalSmcOrderBlockEngine(htf);
+  const htfFvg = buildInstitutionalSmcFvgEngine(htf);
+  const itfOb = buildInstitutionalSmcOrderBlockEngine(itf);
+  const itfFvg = buildInstitutionalSmcFvgEngine(itf);
+  const ltfLiquidity = buildInstitutionalSmcLiquidityEngine(ltf);
+  const ltfRange = averageRange(ltf.candles || [], 24) || Math.abs((ltf.candles?.at?.(-1)?.close || 0) * 0.001);
+  const tolerance = Math.max(ltfRange * 0.35, Math.abs(currentPrice || 0) * 0.00002);
+  const directionalBias = htf.bias === "BULLISH" ? "BUY" : htf.bias === "BEARISH" ? "SELL" : null;
+  const ltfStructureDirection = ltf.latestStructure?.direction === "UP" ? "BUY" : ltf.latestStructure?.direction === "DOWN" ? "SELL" : null;
+  const direction = ltfLiquidity.direction || ltfStructureDirection || directionalBias;
+  let score = 0;
+  const conditions = [];
+  const htfObHit = htfOb.zones.find((zone) => (!direction || zone.direction === (direction === "BUY" ? "UP" : "DOWN")) && isPriceInsideZone(currentPrice, zone, tolerance));
+  const htfFvgHit = htfFvg.zones.find((zone) => (!direction || zone.direction === (direction === "BUY" ? "UP" : "DOWN")) && isPriceInsideZone(currentPrice, zone, tolerance));
+  const itfPoiHit = [...itfOb.zones, ...itfFvg.zones].find((zone) => isPriceInsideZone(currentPrice, zone, tolerance * 1.2));
+  const latest = ltf.candles?.[ltf.candles.length - 1] || null;
+  const prev = ltf.candles?.[ltf.candles.length - 2] || null;
+  const displacement = latest && Number.isFinite(ltfRange) && ltfRange > 0
+    ? Math.abs(latest.close - latest.open) >= ltfRange * 0.8
+    : false;
+  const rangeExpansion = latest && prev && Number.isFinite(ltfRange) && ltfRange > 0
+    ? Math.abs(latest.high - latest.low) >= ltfRange * 1.15
+    : false;
+
+  if (htfObHit) { score += 25; conditions.push("HTF order block"); }
+  if (htfFvgHit) { score += 20; conditions.push("HTF fair value gap"); }
+  if (itfPoiHit) { score += 10; conditions.push("ITF refinement POI"); }
+  if (ltfLiquidity.direction && (!directionalBias || ltfLiquidity.direction === directionalBias)) { score += 20; conditions.push("liquidity sweep"); }
+  if (ltf.latestChoch && (!direction || ltf.latestChoch.direction === (direction === "BUY" ? "UP" : "DOWN"))) { score += 15; conditions.push("LTF CHOCH"); }
+  if (ltf.latestBos && (!direction || ltf.latestBos.direction === (direction === "BUY" ? "UP" : "DOWN"))) { score += 10; conditions.push("LTF BOS"); }
+  if (displacement) { score += 10; conditions.push("displacement"); }
+  if (rangeExpansion) { score += 10; conditions.push("range expansion"); }
+  if (directionalBias && direction && direction === directionalBias) { score += 8; conditions.push("HTF bias aligned"); }
+  if (itf.bias !== "RANGE" && direction && ((itf.bias === "BULLISH" && direction === "BUY") || (itf.bias === "BEARISH" && direction === "SELL"))) {
+    score += 7;
+    conditions.push("ITF structure aligned");
+  }
+
+  score = clamp(Math.round(score), 0, 100);
+  const grade = score >= 90 ? "A+" : score >= 80 ? "A" : score >= 70 ? "B" : score >= 60 ? "C" : "D";
+  return {
+    score,
+    grade,
+    direction: score >= 60 && direction ? direction : null,
+    conditions,
+    htfObHit,
+    htfFvgHit,
+    itfPoiHit,
+    htfOb,
+    htfFvg,
+    itfOb,
+    itfFvg,
+    ltfLiquidity,
+  };
+}
+
+function buildInstitutionalSmcSignalEngine(scoreEngine, ltf, currentPrice) {
+  const direction = scoreEngine.direction;
+  const action = direction || (scoreEngine.score >= 45 ? "WAIT" : "NO TRADE");
+  const latest = ltf.candles?.[ltf.candles.length - 1] || null;
+  return {
+    action,
+    direction,
+    entryIndex: latest ? ltf.candles.length - 1 : null,
+    entryTime: latest ? Number(latest.time ?? latest.epoch) : null,
+    price: Number.isFinite(currentPrice) ? currentPrice : latest?.close,
+    confidence: scoreEngine.score,
+    grade: scoreEngine.grade,
+    reason: scoreEngine.conditions.slice(0, 5).join(" + ") || "waiting for institutional confluence",
+  };
+}
+
+function buildInstitutionalSmcStatisticsEngine(signals, candles, lookahead = 5) {
+  const source = Array.isArray(candles) ? candles : [];
+  const completed = (signals || []).filter((signal) => Number.isInteger(signal.entryIndex) && signal.entryIndex + lookahead < source.length);
+  let wins = 0;
+  let losses = 0;
+  completed.forEach((signal) => {
+    const entry = source[signal.entryIndex];
+    const future = source.slice(signal.entryIndex + 1, signal.entryIndex + 1 + lookahead);
+    const risk = Math.max(averageRange(source.slice(0, signal.entryIndex + 1), 20), Math.abs(entry?.close || 0) * 0.0002);
+    const target = signal.direction === "BUY" ? entry.close + risk : entry.close - risk;
+    const stop = signal.direction === "BUY" ? entry.close - risk : entry.close + risk;
+    const hitTarget = future.some((candle) => signal.direction === "BUY" ? candle.high >= target : candle.low <= target);
+    const hitStop = future.some((candle) => signal.direction === "BUY" ? candle.low <= stop : candle.high >= stop);
+    if (hitTarget && !hitStop) wins += 1;
+    else if (hitStop && !hitTarget) losses += 1;
+    else if (hitTarget && hitStop) losses += 1;
+  });
+  const total = wins + losses;
+  return {
+    total,
+    wins,
+    losses,
+    winRate: total ? Math.round((wins / total) * 100) : 0,
+    profitFactor: losses ? Number((wins / losses).toFixed(2)) : wins ? wins : 0,
+    expectancy: total ? Number(((wins - losses) / total).toFixed(2)) : 0,
+  };
+}
+
+function buildInstitutionalSmcAiAnalysisEngine(engine) {
+  const signalText = engine.signal.direction
+    ? `${engine.signal.direction} ${engine.signal.grade} (${engine.signal.confidence}/100)`
+    : `${engine.signal.action} (${engine.score}/100)`;
+  return `${signalText}. HTF ${engine.frames.htf.bias} on ${engine.hierarchy.htfLabel}, ITF ${engine.frames.itf.bias} on ${engine.hierarchy.itfLabel}, LTF ${engine.frames.ltf.bias} on ${engine.hierarchy.ltfLabel}. ${engine.signal.reason}.`;
+}
+
+function buildInstitutionalSmcEngine(candles, options = {}) {
+  const source = Array.isArray(candles) ? candles.filter(Boolean) : [];
+  const baseSeconds = Math.max(1, Number(options.baseSeconds) || getChartTimeframeSeconds());
+  const symbol = options.symbol || currentSymbol;
+  const hierarchy = getInstitutionalSmcHierarchy(baseSeconds);
+  if (source.length < 50) {
+    return {
+      hierarchy,
+      frames: {},
+      score: 0,
+      grade: "D",
+      direction: null,
+      signal: { action: "WAIT", direction: null, confidence: 0, grade: "D", reason: "waiting for candles" },
+      signals: [],
+      stats: buildInstitutionalSmcStatisticsEngine([], source),
+      aiSummary: "Waiting for institutional SMC candles.",
+      replaySafe: Boolean(replayEngine?.isReplayMode?.()),
+    };
+  }
+
+  const htfCandles = getInstitutionalSmcCandles(symbol, hierarchy.htfSeconds, source, baseSeconds);
+  const itfCandles = getInstitutionalSmcCandles(symbol, hierarchy.itfSeconds, source, baseSeconds);
+  const ltfCandles = getInstitutionalSmcCandles(symbol, hierarchy.ltfSeconds, source, baseSeconds);
+  const htf = buildInstitutionalSmcStructureEngine(htfCandles.length >= 35 ? htfCandles : source, hierarchy.htfLabel);
+  const itf = buildInstitutionalSmcStructureEngine(itfCandles.length >= 35 ? itfCandles : source, hierarchy.itfLabel);
+  const ltf = buildInstitutionalSmcStructureEngine(ltfCandles.length >= 35 ? ltfCandles : source, hierarchy.ltfLabel);
+  const currentPrice = Number(source[source.length - 1]?.close);
+  const scoring = buildInstitutionalSmcPoiScoringEngine({ htf, itf, ltf, currentPrice });
+  const signal = buildInstitutionalSmcSignalEngine(scoring, ltf, currentPrice);
+  const historicalSignals = (ltf.smc.signals || [])
+    .filter((item) => item.confidence >= 60)
+    .slice(-24)
+    .map((item) => ({
+      ...item,
+      direction: item.direction,
+      confidence: item.confidence,
+      grade: item.confidence >= 90 ? "A+" : item.confidence >= 80 ? "A" : item.confidence >= 70 ? "B" : "C",
+      conditions: item.reason ? item.reason.split(" + ") : [],
+    }));
+  if (signal.direction && Number.isInteger(signal.entryIndex)) {
+    historicalSignals.push({
+      direction: signal.direction,
+      entryIndex: signal.entryIndex,
+      price: signal.price,
+      confidence: signal.confidence,
+      grade: signal.grade,
+      reason: signal.reason,
+      conditions: scoring.conditions,
+    });
+  }
+  const stats = buildInstitutionalSmcStatisticsEngine(historicalSignals, ltf.candles);
+  const engine = {
+    hierarchy,
+    frames: { htf, itf, ltf },
+    scoring,
+    score: scoring.score,
+    grade: scoring.grade,
+    direction: signal.direction,
+    signal,
+    signals: historicalSignals,
+    stats,
+    poiZones: [
+      ...scoring.htfOb.zones.slice(-3).map((zone) => ({ ...zone, layer: "HTF OB" })),
+      ...scoring.htfFvg.zones.slice(-3).map((zone) => ({ ...zone, layer: "HTF FVG" })),
+      ...scoring.itfOb.zones.slice(-2).map((zone) => ({ ...zone, layer: "ITF OB" })),
+      ...scoring.itfFvg.zones.slice(-2).map((zone) => ({ ...zone, layer: "ITF FVG" })),
+    ],
+    heatmap: {
+      active: scoring.score >= 70,
+      direction: signal.direction,
+      zones: [scoring.htfObHit, scoring.htfFvgHit, scoring.itfPoiHit].filter(Boolean),
+    },
+    replaySafe: Boolean(replayEngine?.isReplayMode?.()),
+  };
+  engine.aiSummary = buildInstitutionalSmcAiAnalysisEngine(engine);
+  engine.summary = signal.direction
+    ? `${signal.direction} ${signal.grade} ${signal.confidence}% institutional SMC`
+    : `${signal.action} ${scoring.score}% institutional SMC`;
+  return engine;
 }
 
 function buildICTFibLevels(structureEvents) {
@@ -8500,6 +8830,94 @@ function getRobustChartPriceRange(points) {
   return max > min ? { min, max } : { min: latestClose - bodyRange / 2, max: latestClose + bodyRange / 2 };
 }
 
+function formatChartAxisTime(candle, previousCandle = null) {
+  const seconds = Number(candle?.time);
+  if (!Number.isFinite(seconds)) return "";
+  const date = new Date(seconds * 1000);
+  const previousSeconds = Number(previousCandle?.time);
+  const previousDate = Number.isFinite(previousSeconds) ? new Date(previousSeconds * 1000) : null;
+  const isNewDay = !previousDate || date.toDateString() !== previousDate.toDateString();
+  if (isNewDay) {
+    return date.toLocaleDateString([], { month: "short", day: "2-digit" });
+  }
+  return date.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+function drawMainChartAxes(ctx, viewport) {
+  if (!ctx || !viewport) return;
+  const {
+    width,
+    height,
+    leftPad,
+    rightPad,
+    topPad,
+    bottomPad,
+    plotW,
+    plotH,
+    slotW,
+    points,
+    visibleSlotCount,
+    min,
+    max,
+    toY,
+  } = viewport;
+  const axisX = width - rightPad;
+  const plotBottom = height - bottomPad;
+  const priceRange = max - min;
+  if (!Number.isFinite(priceRange) || priceRange <= 0) return;
+
+  ctx.save();
+  ctx.lineWidth = 1;
+  ctx.strokeStyle = "rgba(44, 55, 73, 0.72)";
+  ctx.fillStyle = "#738197";
+  ctx.font = "11px Inter, Segoe UI, sans-serif";
+  ctx.textBaseline = "middle";
+  ctx.textAlign = "left";
+
+  ctx.beginPath();
+  ctx.moveTo(axisX + 0.5, topPad);
+  ctx.lineTo(axisX + 0.5, plotBottom);
+  ctx.moveTo(leftPad, plotBottom + 0.5);
+  ctx.lineTo(axisX, plotBottom + 0.5);
+  ctx.stroke();
+
+  const priceTicks = Math.max(3, Math.min(7, Math.floor(plotH / 82)));
+  for (let i = 0; i <= priceTicks; i += 1) {
+    const price = max - ((priceRange * i) / priceTicks);
+    const y = toY(price);
+    if (!Number.isFinite(y) || y < topPad - 1 || y > plotBottom + 1) continue;
+    ctx.strokeStyle = i === priceTicks ? "rgba(44, 55, 73, 0.88)" : "rgba(44, 55, 73, 0.34)";
+    ctx.beginPath();
+    ctx.moveTo(leftPad, y + 0.5);
+    ctx.lineTo(axisX, y + 0.5);
+    ctx.stroke();
+    ctx.fillStyle = "#75839a";
+    ctx.fillText(formatPrice(price, currentPip), axisX + 8, y);
+  }
+
+  const targetLabels = Math.max(2, Math.floor(plotW / 105));
+  const step = Math.max(1, Math.ceil(Math.max(1, visibleSlotCount) / targetLabels));
+  let lastLabelX = -Infinity;
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  points.forEach((candle, index) => {
+    if (index !== 0 && index !== points.length - 1 && index % step !== 0) return;
+    const x = leftPad + (index * slotW) + (slotW / 2);
+    if (x < leftPad + 8 || x > axisX - 8 || x - lastLabelX < 58) return;
+    const label = formatChartAxisTime(candle, points[index - 1]);
+    if (!label) return;
+    ctx.strokeStyle = "rgba(44, 55, 73, 0.30)";
+    ctx.beginPath();
+    ctx.moveTo(x + 0.5, topPad);
+    ctx.lineTo(x + 0.5, plotBottom);
+    ctx.stroke();
+    ctx.fillStyle = "#75839a";
+    ctx.fillText(label, x, plotBottom + 9);
+    lastLabelX = x;
+  });
+  ctx.restore();
+}
+
 function renderMiniChart(candles) {
   if (!miniChartCanvas) return;
   if (!replayEngine.isReplayMode()) hideReplayAxisDateBadge();
@@ -8538,9 +8956,9 @@ function renderMiniChart(candles) {
   const rawMin = priceRange.min;
   const rawMax = priceRange.max;
   const leftPad = 6;
-  const rightPad = 72;
+  const rightPad = 88;
   const topPad = 6;
-  const bottomPad = 6;
+  const bottomPad = 34;
 
   if (width === 0 || height === 0) return;
   ctx.strokeStyle = "#1f2735";
@@ -8603,6 +9021,8 @@ function renderMiniChart(candles) {
     };
   }
 
+  drawMainChartAxes(ctx, chartViewportState);
+
   const hasICTKillzones = activeChartIndicators.has("ICT_KILLZONES") && isChartIndicatorNativeTimeframe("ICT_KILLZONES");
   const hasICTFVG = activeChartIndicators.has("ICT_FVG") && isChartIndicatorNativeTimeframe("ICT_FVG");
   const hasICTBPR = activeChartIndicators.has("ICT_BPR") && isChartIndicatorNativeTimeframe("ICT_BPR");
@@ -8618,6 +9038,7 @@ function renderMiniChart(candles) {
   const hasPriceActionToolkit = activeChartIndicators.has("PRICE_ACTION_TOOLKIT") && isChartIndicatorNativeTimeframe("PRICE_ACTION_TOOLKIT");
   const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB") && isChartIndicatorNativeTimeframe("LIQ_SWEEP_OB");
   const hasLDMSS = activeChartIndicators.has("LDMSS") && isChartIndicatorNativeTimeframe("LDMSS");
+  const hasInstitutionalSMCEngine = activeChartIndicators.has("INSTITUTIONAL_SMC_ENGINE");
   const hasWeloSMC = activeChartIndicators.has("SMC_WELO_TRADES");
   const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08") && isChartIndicatorNativeTimeframe("SMC_SETUP_08");
   const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO") && isChartIndicatorNativeTimeframe("SMC_PRO_COMBO");
@@ -8634,7 +9055,7 @@ function renderMiniChart(candles) {
   const hasChannelsPatterns = activeChartIndicators.has("CHANNELS_PATTERNS") && isChartIndicatorNativeTimeframe("CHANNELS_PATTERNS");
 
   const mtfIndicatorBadges = Array.from(activeChartIndicators)
-    .filter((value) => !isChartIndicatorNativeTimeframe(value) && value !== "SMC_WELO_TRADES")
+    .filter((value) => !isChartIndicatorNativeTimeframe(value) && !["SMC_WELO_TRADES", "INSTITUTIONAL_SMC_ENGINE"].includes(value))
     .map((value) => {
       const tf = getChartIndicatorTimeframe(value);
       const source = getChartIndicatorAnalysisCandles(value, candles);
@@ -9622,6 +10043,153 @@ function renderMiniChart(candles) {
         ctx.restore();
       });
     }
+  }
+
+  if (hasInstitutionalSMCEngine) {
+    const engine = buildInstitutionalSmcEngine(candles, {
+      symbol: currentSymbol,
+      baseSeconds: getChartTimeframeSeconds(),
+    });
+    const visibleStartTime = Number(candles[start]?.time ?? candles[start]?.epoch ?? 0);
+    const visibleEndTime = Number(candles[Math.max(start, end - 1)]?.time ?? candles[Math.max(start, end - 1)]?.epoch ?? visibleStartTime) + getChartTimeframeSeconds();
+    const xForTime = (time, center = true) => {
+      const value = Number(time);
+      if (!Number.isFinite(value) || !Number.isFinite(visibleStartTime)) return NaN;
+      return leftPad + (((value - visibleStartTime) / Math.max(1, getChartTimeframeSeconds())) * slotW) + (center ? slotW / 2 : 0);
+    };
+    const xForFrameIndex = (frame, index, fallbackX = null) => {
+      const candle = frame?.candles?.[index];
+      const time = Number(candle?.time ?? candle?.epoch);
+      const x = xForTime(time, true);
+      return Number.isFinite(x) ? x : fallbackX;
+    };
+    const drawSmcTag = (text, x, y, color, fill = "rgba(12, 17, 25, 0.9)") => {
+      if (!text || !Number.isFinite(x) || !Number.isFinite(y)) return;
+      ctx.save();
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      const padX = 6;
+      const boxW = ctx.measureText(text).width + padX * 2;
+      const boxH = 17;
+      const boxX = clamp(x - boxW / 2, leftPad + 2, width - rightPad - boxW - 2);
+      const boxY = clamp(y - boxH / 2, topPad + 2, topPad + plotH - boxH - 2);
+      ctx.fillStyle = fill;
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 5);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(text, boxX + boxW / 2, boxY + boxH / 2);
+      ctx.restore();
+    };
+    const htfBias = engine.frames?.htf?.bias || "RANGE";
+    const biasFill = htfBias === "BULLISH"
+      ? "rgba(16, 185, 129, 0.045)"
+      : htfBias === "BEARISH"
+        ? "rgba(239, 68, 68, 0.045)"
+        : "rgba(148, 163, 184, 0.035)";
+    ctx.save();
+    ctx.fillStyle = biasFill;
+    ctx.fillRect(leftPad, topPad, plotW, plotH);
+    ctx.restore();
+
+    engine.poiZones.slice(-8).forEach((zone) => {
+      if (!Number.isFinite(zone.top) || !Number.isFinite(zone.bottom)) return;
+      const frame = String(zone.layer || "").startsWith("ITF") ? engine.frames.itf : engine.frames.htf;
+      const sourceSeconds = String(zone.layer || "").startsWith("ITF") ? engine.hierarchy.itfSeconds : engine.hierarchy.htfSeconds;
+      const startTime = Number(frame?.candles?.[Number.isInteger(zone.index) ? zone.index : zone.startIndex]?.time);
+      const endIndexValue = Number.isInteger(zone.drawEndIndex) ? zone.drawEndIndex : Number.isInteger(zone.endIndex) ? zone.endIndex : frame?.candles?.length - 1;
+      const endTime = Number(frame?.candles?.[endIndexValue]?.time) + sourceSeconds;
+      if (Number.isFinite(startTime) && Number.isFinite(endTime) && (endTime < visibleStartTime || startTime > visibleEndTime)) return;
+      const x1 = Number.isFinite(startTime) ? clamp(xForTime(startTime, false), leftPad, width - rightPad) : leftPad;
+      const x2 = Number.isFinite(endTime) ? clamp(xForTime(endTime, false), leftPad, width - rightPad) : width - rightPad;
+      const topY = toY(Math.max(zone.top, zone.bottom));
+      const bottomY = toY(Math.min(zone.top, zone.bottom));
+      if (!Number.isFinite(topY) || !Number.isFinite(bottomY)) return;
+      const isBull = zone.direction === "UP";
+      const color = isBull ? "#10b981" : "#ef4444";
+      const isItf = String(zone.layer || "").startsWith("ITF");
+      ctx.save();
+      ctx.fillStyle = isBull
+        ? (isItf ? "rgba(16, 185, 129, 0.14)" : "rgba(6, 95, 70, 0.18)")
+        : (isItf ? "rgba(239, 68, 68, 0.14)" : "rgba(127, 29, 29, 0.18)");
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isItf ? 1.2 : 1;
+      ctx.setLineDash(isItf ? [4, 3] : []);
+      ctx.fillRect(x1, topY, Math.max(4, x2 - x1), Math.max(3, bottomY - topY));
+      ctx.strokeRect(x1, topY, Math.max(4, x2 - x1), Math.max(3, bottomY - topY));
+      ctx.setLineDash([]);
+      ctx.fillStyle = color;
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "left";
+      ctx.textBaseline = "top";
+      ctx.fillText(zone.layer || zone.kind || "POI", clamp(x1 + 4, leftPad + 4, width - rightPad - 80), clamp(topY + 3, topPad + 3, topPad + plotH - 14));
+      ctx.restore();
+    });
+
+    const ltfFrame = engine.frames?.ltf || {};
+    engine.signals.slice(-12).forEach((signal) => {
+      if (!Number.isInteger(signal.entryIndex)) return;
+      const x = xForFrameIndex(ltfFrame, signal.entryIndex);
+      if (!Number.isFinite(x) || x < leftPad || x > width - rightPad) return;
+      const price = Number(signal.price ?? ltfFrame.candles?.[signal.entryIndex]?.close);
+      const y = toY(price);
+      if (!Number.isFinite(y)) return;
+      const buy = signal.direction === "BUY";
+      const color = buy ? "#10b981" : "#ef4444";
+      ctx.save();
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      if (buy) {
+        ctx.moveTo(x, y - 11);
+        ctx.lineTo(x - 5, y - 2);
+        ctx.lineTo(x + 5, y - 2);
+      } else {
+        ctx.moveTo(x, y + 11);
+        ctx.lineTo(x - 5, y + 2);
+        ctx.lineTo(x + 5, y + 2);
+      }
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+      if (signal === engine.signals[engine.signals.length - 1]) {
+        drawSmcTag(`${signal.direction} ${signal.grade || engine.grade} ${signal.confidence || engine.score}`, x, buy ? y - 24 : y + 24, color);
+      }
+    });
+
+    if (engine.signal?.direction) {
+      const entryIndex = Number.isInteger(engine.signal.entryIndex) ? engine.signal.entryIndex : ltfFrame.candles?.length - 1;
+      const x = xForFrameIndex(ltfFrame, entryIndex, width - rightPad - 80);
+      const y = toY(Number(engine.signal.price));
+      drawSmcTag(`${engine.signal.direction} ${engine.signal.grade} ${engine.signal.confidence}%`, x, y, engine.signal.direction === "BUY" ? "#10b981" : "#ef4444");
+    }
+
+    ctx.save();
+    const panelW = Math.min(330, Math.max(235, plotW * 0.24));
+    const panelH = 82;
+    const panelX = Math.max(leftPad + 8, width - rightPad - panelW - 8);
+    const panelY = topPad + 10;
+    ctx.fillStyle = "rgba(12, 17, 25, 0.88)";
+    ctx.strokeStyle = engine.direction === "BUY" ? "#10b981" : engine.direction === "SELL" ? "#ef4444" : "#475569";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelW, panelH, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = engine.direction === "BUY" ? "#10b981" : engine.direction === "SELL" ? "#ef4444" : "#cbd5e1";
+    ctx.font = "bold 12px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`${engine.signal.action} ${engine.grade} ${engine.score}/100`, panelX + 10, panelY + 8);
+    ctx.fillStyle = "#9fb6d4";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillText(`HTF ${engine.hierarchy.htfLabel}: ${engine.frames.htf?.bias || "--"}`, panelX + 10, panelY + 29);
+    ctx.fillText(`ITF ${engine.hierarchy.itfLabel}: ${engine.frames.itf?.bias || "--"} • LTF ${engine.hierarchy.ltfLabel}: ${engine.frames.ltf?.bias || "--"}`, panelX + 10, panelY + 45);
+    ctx.fillText(`Stats ${engine.stats.winRate}% WR • ${engine.stats.total} tested`, panelX + 10, panelY + 61);
+    ctx.restore();
   }
 
   if (hasWeloSMC) {
@@ -11265,7 +11833,7 @@ function renderMiniChart(candles) {
   ctx.font = "10px Inter, Segoe UI, sans-serif";
   ctx.textAlign = "right";
   ctx.textBaseline = "bottom";
-  ctx.fillText(sizeLabel, width - 8, height - 8);
+  ctx.fillText(sizeLabel, width - rightPad - 8, height - bottomPad - 8);
 }
 
 function getLiveBuiltCandles() {
@@ -11353,7 +11921,7 @@ function getReplayIndexFromPointer(localX) {
 function updateReplaySelectionFromPointer(event) {
   if (!miniChartCanvas || !replayEngine.isSelectingCandle()) return null;
   const rect = miniChartCanvas.getBoundingClientRect();
-  const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+  const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 88);
   const localX = event.clientX - rect.left;
   if (localX >= axisThreshold) return null;
   const replayIndex = getReplayIndexFromPointer(localX);
@@ -11460,13 +12028,7 @@ function updateChartPinchZoom() {
   if (!Number.isFinite(distance) || !Number.isFinite(chartPinchStartDistance) || !Number.isFinite(chartPinchStartPoints) || chartPinchStartDistance < 8) return;
   const ratio = distance / chartPinchStartDistance;
   if (!Number.isFinite(ratio) || ratio <= 0) return;
-  const nextPoints = clamp(Math.round(chartPinchStartPoints / ratio), 10, MAX_CANDLES);
-  if (nextPoints === chartPoints) return;
-  chartPoints = nextPoints;
-  const built = getBuiltCandles();
-  const { min, max } = getChartOffsetBounds(built);
-  chartOffset = clamp(chartOffset, min, max);
-  renderMiniChart(built);
+  setChartHorizontalPoints(chartPinchStartPoints / ratio);
 }
 
 function updateChartCrosshairFromPointer(event) {
@@ -11648,7 +12210,7 @@ function panChartByPixels(deltaX) {
     renderMiniChart(built);
     return;
   }
-  const plotWidth = Math.max(1, miniChartCanvas.clientWidth - 78);
+  const plotWidth = Math.max(1, chartViewportState?.plotW || miniChartCanvas.clientWidth - 94);
   const pixelsPerCandle = plotWidth / Math.max(1, chartPoints);
   const candleShift = Math.round(deltaX / Math.max(1, pixelsPerCandle));
   if (!candleShift) return;
@@ -11660,17 +12222,20 @@ function panChartByPixels(deltaX) {
 function getChartHorizontalZoomAnchor(clientX = null) {
   const viewport = chartViewportState;
   if (!miniChartCanvas || !viewport) return null;
-  if (isDesktopPointerLayout() && chartCrosshairState?.active) {
-    return clamp(chartCrosshairState.x, viewport.leftPad, viewport.width - viewport.rightPad);
+  if (isTouchChartContext()) {
+    return viewport.leftPad + (viewport.plotW * 0.5);
   }
-  if (!isTouchChartContext() && Number.isFinite(clientX)) {
+  if (Number.isFinite(clientX)) {
     const rect = miniChartCanvas.getBoundingClientRect();
     return clamp(clientX - rect.left, viewport.leftPad, viewport.width - viewport.rightPad);
+  }
+  if (isDesktopPointerLayout() && chartCrosshairState?.active) {
+    return clamp(chartCrosshairState.x, viewport.leftPad, viewport.width - viewport.rightPad);
   }
   return viewport.leftPad + (viewport.plotW * 0.5);
 }
 
-function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
+function setChartHorizontalPoints(nextPointsRaw, anchorClientX = null) {
   const built = getBuiltCandles();
   if (!miniChartCanvas || !built.length) {
     renderMiniChart(built);
@@ -11679,7 +12244,8 @@ function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
   if (!chartViewportState) renderMiniChart(built);
   const viewport = chartViewportState;
   if (!viewport) return;
-  const nextPoints = clamp(chartPoints + pointsDelta, 10, MAX_CANDLES);
+  const maxPoints = Math.max(10, Math.min(MAX_CANDLES, built.length + MAX_FUTURE_BARS));
+  const nextPoints = clamp(Math.round(nextPointsRaw), 10, maxPoints);
   if (nextPoints === chartPoints) return;
 
   const anchorX = getChartHorizontalZoomAnchor(anchorClientX);
@@ -11687,11 +12253,8 @@ function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
     ? 0.5
     : clamp((anchorX - viewport.leftPad) / Math.max(1, viewport.plotW), 0, 1);
   const currentSlot = Math.floor(anchorRatio * Math.max(1, viewport.visibleSlotCount));
-  const crosshairIndex = Number.isInteger(chartCrosshairState?.candleIndex)
-    ? chartCrosshairState.candleIndex
-    : null;
   const anchorIndex = clamp(
-    isDesktopPointerLayout() && crosshairIndex != null ? crosshairIndex : viewport.start + currentSlot,
+    viewport.start + currentSlot,
     0,
     Math.max(0, built.length - 1),
   );
@@ -11710,6 +12273,29 @@ function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
     };
   }
   renderMiniChart(built);
+}
+
+function zoomChartHorizontallyByFactor(factor, anchorClientX = null) {
+  if (!Number.isFinite(factor) || factor <= 0) return;
+  setChartHorizontalPoints(chartPoints * factor, anchorClientX);
+}
+
+function zoomChartHorizontallyByWheel(delta, anchorClientX = null) {
+  if (!Number.isFinite(delta) || delta === 0) return;
+  const limitedDelta = clamp(delta, -120, 120);
+  zoomChartHorizontallyByFactor(Math.exp(limitedDelta * 0.0028), anchorClientX);
+}
+
+function zoomChartHorizontallyByTimeAxisDrag(deltaX, anchorClientX = null) {
+  if (!Number.isFinite(deltaX) || deltaX === 0) return;
+  const limitedDelta = clamp(deltaX, -80, 80);
+  zoomChartHorizontallyByFactor(Math.exp(-limitedDelta * 0.006), anchorClientX);
+}
+
+function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
+  const direction = Math.sign(pointsDelta);
+  if (!direction) return;
+  zoomChartHorizontallyByFactor(direction > 0 ? 1.08 : 1 / 1.08, anchorClientX);
 }
 
 function panChartVertically(deltaY) {
@@ -11903,6 +12489,16 @@ function buildIndicatorSignalAlerts(candles) {
     smc.signals.forEach((signal) => {
       addAlert("SMC_WELO_TRADES", signal.entryIndex, signal.direction, signal.reason || `${signal.confidence}% SMC confluence`, source.length);
     });
+  }
+
+  if (activeChartIndicators.has("INSTITUTIONAL_SMC_ENGINE")) {
+    const engine = buildInstitutionalSmcEngine(candles, {
+      symbol: currentSymbol,
+      baseSeconds: getChartTimeframeSeconds(),
+    });
+    if (engine.signal?.direction) {
+      addAlert("INSTITUTIONAL_SMC_ENGINE", candles.length - 1, engine.signal.direction, engine.signal.reason || engine.summary, candles.length);
+    }
   }
 
   if (activeChartIndicators.has("INST_EXECUTION_MODEL")) {
@@ -13769,6 +14365,33 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSe
           isSetup: false,
         });
       }
+    } else if (indicator === "INSTITUTIONAL_SMC_ENGINE") {
+      const engine = buildInstitutionalSmcEngine(candles, {
+        symbol: currentSymbol,
+        baseSeconds: frameSeconds,
+      });
+      if (engine.signal?.direction) {
+        pushMainIndicatorVote(votes, {
+          direction: engine.signal.direction,
+          weight: frameWeight * Math.max(2.8, engine.score / 22),
+          indicator,
+          frame,
+          price: engine.signal.price,
+          reason: engine.signal.reason || engine.summary,
+          index: count - 1,
+          candleCount: count,
+        });
+      } else if (engine.frames?.htf?.bias === "BULLISH" || engine.frames?.htf?.bias === "BEARISH") {
+        pushMainIndicatorVote(votes, {
+          direction: engine.frames.htf.bias === "BULLISH" ? "BUY" : "SELL",
+          weight: frameWeight * Math.max(1, engine.score / 55),
+          indicator,
+          frame,
+          price: candles[count - 1]?.close,
+          reason: engine.summary || engine.aiSummary,
+          isSetup: false,
+        });
+      }
     } else if (indicator === "SMC_SETUP_08") {
       const smc = buildSMCSetup08(candles, 5);
       const all = [
@@ -14005,6 +14628,7 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSe
 
 function scanAllMainSignalIndicators(candles, frame, frameWeight, frameSeconds = getChartTimeframeSeconds()) {
   const signalIndicators = [
+    "INSTITUTIONAL_SMC_ENGINE",
     "INST_EXECUTION_MODEL",
     "INST_LEVEL_BEHAVIOR",
     "ALGO_BEHAVIOR_ENGINE",
@@ -14262,6 +14886,690 @@ function getAutoScannerScopeLabel() {
 
 function getAutoScannerSymbols() {
   return getScannerSymbolsForScope(autoMarketScopeSelectEl?.value || "__rise_fall");
+}
+
+function openAskAiDialog({ focus = false } = {}) {
+  askAiDialogEl?.classList.remove("hidden");
+  syncAskAiControls();
+  if (focus) {
+    requestAnimationFrame(() => askAiCommandInputEl?.focus());
+  }
+}
+
+function closeAskAiDialog() {
+  askAiDialogEl?.classList.add("hidden");
+}
+
+function appendAskAiMessage(role, text) {
+  const cleanText = String(text || "").trim();
+  if (!cleanText) return;
+  askAiMessages.push({ role, text: cleanText, at: Date.now() });
+  askAiMessages = askAiMessages.slice(-40);
+  if (!askAiTranscriptEl) return;
+  askAiTranscriptEl.innerHTML = askAiMessages
+    .map((message) => `
+      <div class="ask-ai-message ${message.role === "user" ? "user" : "assistant"}">
+        <span>${message.role === "user" ? "You" : "AI"}</span>
+        <p>${escapeHtml(message.text)}</p>
+      </div>
+    `)
+    .join("");
+  askAiTranscriptEl.scrollTop = askAiTranscriptEl.scrollHeight;
+}
+
+function speakAskAi(text) {
+  const message = String(text || "").trim();
+  if (!message || !("speechSynthesis" in window)) return;
+  try {
+    window.speechSynthesis.cancel();
+    const utterance = new SpeechSynthesisUtterance(message);
+    utterance.rate = 0.96;
+    utterance.pitch = 1;
+    utterance.volume = 1;
+    window.speechSynthesis.speak(utterance);
+  } catch {
+    // Speech output is optional.
+  }
+}
+
+function respondAskAi(text, { speak = true } = {}) {
+  appendAskAiMessage("assistant", text);
+  if (askAiStatusEl) askAiStatusEl.textContent = text;
+  if (speak) speakAskAi(text);
+}
+
+function getAskAiRecognitionCtor() {
+  return null;
+}
+
+function setAskAiListeningState(enabled) {
+  askAiListening = Boolean(enabled);
+  askAiListenBtnEl?.classList.toggle("active", askAiListening);
+  askAiListenBtnEl?.setAttribute("aria-pressed", askAiListening ? "true" : "false");
+  if (askAiListenBtnEl) askAiListenBtnEl.textContent = askAiListening ? "Voice On" : "Voice";
+}
+
+function getAskAiRealtimeInstructions() {
+  const context = getAskAiCurrentContext();
+  const recent = context.candles.slice(-35).map((candle) => ({
+    time: candle.time,
+    open: Number(candle.open),
+    high: Number(candle.high),
+    low: Number(candle.low),
+    close: Number(candle.close),
+  }));
+  return `
+You are the ChatGPT voice assistant inside Jacques' Deriv Trader UI.
+Speak naturally and keep answers short unless the user asks for detail.
+You can discuss the current market context, explain setups, and tell the user what platform action you recommend.
+Do not promise profit or give certainty. Treat analysis as educational trading insight.
+If the user asks you to operate the platform, tell them the typed command box can execute actions while voice control is being connected to platform tools.
+
+Current chart:
+${JSON.stringify({
+    symbol: context.symbol,
+    symbolCode: context.symbolCode,
+    timeframe: context.timeframe,
+    lastPrice: context.current?.close ?? lastSpot ?? null,
+    trend: context.trend,
+    topDown: context.topDown
+      ? {
+        direction: context.topDown.direction,
+        confidence: context.topDown.confidence,
+        setup: context.topDown.setup,
+      }
+      : null,
+    activeIndicators: context.activeIndicators,
+    recentCandles: recent,
+  }, null, 2)}
+`.trim();
+}
+
+function handleAskAiRealtimeEvent(event) {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch {
+    return;
+  }
+  if (data.type === "conversation.item.input_audio_transcription.completed" && data.transcript) {
+    appendAskAiMessage("user", data.transcript);
+  }
+  if (data.type === "response.audio_transcript.delta" || data.type === "response.output_text.delta") {
+    askAiRealtimeResponseText += data.delta || "";
+  }
+  if ((data.type === "response.audio_transcript.done" || data.type === "response.output_text.done") && (data.transcript || data.text)) {
+    askAiRealtimeResponseText = data.transcript || data.text;
+  }
+  if (data.type === "response.done" && askAiRealtimeResponseText.trim()) {
+    appendAskAiMessage("assistant", askAiRealtimeResponseText.trim());
+    if (askAiStatusEl) askAiStatusEl.textContent = askAiRealtimeResponseText.trim();
+    askAiRealtimeResponseText = "";
+  }
+  if (data.type === "error") {
+    const message = data.error?.message || "OpenAI Realtime voice error.";
+    respondAskAi(message, { speak: false });
+  }
+}
+
+async function startAskAiListening() {
+  if (askAiListening) return;
+  if (!navigator.mediaDevices?.getUserMedia || !window.RTCPeerConnection) {
+    respondAskAi("ChatGPT voice needs a browser with microphone and WebRTC support. You can still type commands.");
+    return;
+  }
+
+  try {
+    setAskAiListeningState(true);
+    if (askAiStatusEl) askAiStatusEl.textContent = "Connecting ChatGPT voice...";
+    askAiRealtimeStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    askAiRealtimePc = new RTCPeerConnection();
+    askAiRealtimeAudioEl = new Audio();
+    askAiRealtimeAudioEl.autoplay = true;
+    askAiRealtimePc.ontrack = (event) => {
+      askAiRealtimeAudioEl.srcObject = event.streams[0];
+    };
+    askAiRealtimeStream.getTracks().forEach((track) => {
+      askAiRealtimePc.addTrack(track, askAiRealtimeStream);
+    });
+    askAiRealtimeDataChannel = askAiRealtimePc.createDataChannel("oai-events");
+    askAiRealtimeDataChannel.onmessage = handleAskAiRealtimeEvent;
+    askAiRealtimeDataChannel.onopen = () => {
+      askAiRealtimeDataChannel.send(JSON.stringify({
+        type: "response.create",
+        response: {
+          instructions: "Greet Jacques briefly and say you are ready to analyse the current chart.",
+        },
+      }));
+    };
+
+    const offer = await askAiRealtimePc.createOffer();
+    await askAiRealtimePc.setLocalDescription(offer);
+    const response = await fetch("/api/realtime-sdp", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        sdp: offer.sdp,
+        instructions: getAskAiRealtimeInstructions(),
+      }),
+    });
+    const answer = await response.text();
+    if (!response.ok) {
+      let errorMessage = answer;
+      try {
+        errorMessage = JSON.parse(answer).error || answer;
+      } catch {
+        // keep raw response
+      }
+      throw new Error(errorMessage || "OpenAI Realtime connection failed.");
+    }
+    await askAiRealtimePc.setRemoteDescription({ type: "answer", sdp: answer });
+    respondAskAi("ChatGPT voice is connected. Speak normally; press Voice again to disconnect.", { speak: false });
+  } catch (err) {
+    stopAskAiListening({ quiet: true });
+    respondAskAi(`ChatGPT voice could not connect: ${err?.message || "unknown error"}`, { speak: false });
+  }
+}
+
+function stopAskAiListening({ quiet = false } = {}) {
+  try {
+    askAiRealtimeDataChannel?.close();
+  } catch {
+    // ignore close errors
+  }
+  try {
+    askAiRealtimePc?.close();
+  } catch {
+    // ignore close errors
+  }
+  askAiRealtimeStream?.getTracks().forEach((track) => track.stop());
+  askAiRealtimeDataChannel = null;
+  askAiRealtimePc = null;
+  askAiRealtimeStream = null;
+  askAiRealtimeAudioEl = null;
+  askAiRealtimeResponseText = "";
+  setAskAiListeningState(false);
+  if (!quiet) respondAskAi("ChatGPT voice disconnected.", { speak: false });
+}
+
+function toggleAskAiListening() {
+  if (askAiListening) {
+    stopAskAiListening();
+  } else {
+    startAskAiListening();
+  }
+}
+
+function parseAskAiTimeframe(command) {
+  const text = String(command || "").toLowerCase();
+  const direct = TIMEFRAME_OPTIONS.find((option) => {
+    const label = option.label.toLowerCase();
+    return text.includes(label) || text.includes(label.replace(/\s+/g, ""));
+  });
+  if (direct) return direct.seconds;
+  const match = text.match(/(\d+)\s*(second|seconds|sec|s|minute|minutes|min|m|hour|hours|h|day|days|d)\b/);
+  if (!match) return null;
+  const value = Number(match[1]);
+  const unit = match[2];
+  if (!Number.isFinite(value) || value <= 0) return null;
+  if (unit.startsWith("s") || unit === "sec") return value;
+  if (unit.startsWith("m")) return value * 60;
+  if (unit.startsWith("h")) return value * 3600;
+  if (unit.startsWith("d")) return value * 86400;
+  return null;
+}
+
+function findAskAiSymbolFromCommand(command) {
+  const text = String(command || "").toLowerCase();
+  return activeSymbols
+    .filter((symbol) => isTradableActiveSymbol(symbol))
+    .map((symbol) => ({
+      symbol,
+      label: String(symbol.display_name || symbol.symbol || "").toLowerCase(),
+      code: String(symbol.symbol || "").toLowerCase(),
+    }))
+    .filter((item) => item.label && (text.includes(item.label) || text.includes(item.code)))
+    .sort((a, b) => b.label.length - a.label.length)[0]?.symbol || null;
+}
+
+function findAskAiIndicatorFromCommand(command) {
+  const text = String(command || "").toLowerCase();
+  const aliases = [
+    ["INSTITUTIONAL_SMC_ENGINE", ["institutional smc", "smc engine", "smart money engine", "multi timeframe smc", "mtf smc"]],
+    ["SMC_WELO_TRADES", ["welo", "welo smc", "smart money concepts"]],
+    ["ICT_LIQUIDITY", ["liquidity"]],
+    ["ICT_STRUCTURE", ["structure", "ict structure"]],
+    ["LIQ_SWEEP_OB", ["sweep", "liquidity sweep"]],
+    ["LDMSS", ["ldmss", "liquidity driven"]],
+    ["EMA", ["ema"]],
+  ];
+  for (const [value, names] of aliases) {
+    if (names.some((name) => text.includes(name))) return value;
+  }
+  return CHART_INDICATOR_OPTIONS.find((option) => text.includes(option.label.toLowerCase()))?.value || null;
+}
+
+function getAskAiCurrentContext() {
+  const candles = getBuiltCandles();
+  const current = candles[candles.length - 1] || null;
+  const trend = candles.length ? detectTrend(candles) : null;
+  const topDown = candles.length ? buildTopDownMainSignal(candles, current?.close, getChartTimeframeSeconds()) : null;
+  const activeIndicators = Array.from(activeChartIndicators).map((value) => ({
+    value,
+    label: getChartIndicatorLabel(value),
+    timeframe: getChartIndicatorTimeframeLabel(value),
+  }));
+  return {
+    symbol: symbolSelect?.selectedOptions?.[0]?.textContent || currentSymbol || "--",
+    symbolCode: currentSymbol,
+    timeframe: getTimeframeLabel(getChartTimeframeSeconds()),
+    candles,
+    current,
+    trend,
+    topDown,
+    activeIndicators,
+    drawings: getChartDrawings(),
+    proposals,
+  };
+}
+
+function getAskAiApiContext(command) {
+  const context = getAskAiCurrentContext();
+  const recentCandles = context.candles.slice(-90).map((candle) => ({
+    time: candle.time,
+    open: Number(candle.open),
+    high: Number(candle.high),
+    low: Number(candle.low),
+    close: Number(candle.close),
+  }));
+  const availableSymbols = activeSymbols
+    .filter((symbol) => isTradableActiveSymbol(symbol))
+    .slice(0, 240)
+    .map((symbol) => ({
+      symbol: symbol.symbol,
+      display_name: symbol.display_name,
+      market: symbol.market,
+      market_display_name: symbol.market_display_name,
+    }));
+  return {
+    command,
+    chart: {
+      symbol: context.symbol,
+      symbol_code: context.symbolCode,
+      timeframe: context.timeframe,
+      timeframe_seconds: getChartTimeframeSeconds(),
+      last_price: context.current?.close ?? lastSpot ?? null,
+      trend: context.trend,
+      top_down: context.topDown
+        ? {
+          direction: context.topDown.direction,
+          confidence: context.topDown.confidence,
+          setup: context.topDown.setup,
+        }
+        : null,
+      active_indicators: context.activeIndicators,
+      drawings_count: context.drawings.length,
+      proposals: (context.proposals || []).slice(0, 3).map((proposal) => ({
+        type: proposal.contract_type,
+        display: proposal.display_value,
+        payout: proposal.payout,
+        profit: proposal.profit,
+      })),
+      recent_candles: recentCandles,
+    },
+    supported_timeframes: TIMEFRAME_OPTIONS.map((option) => ({
+      label: option.label,
+      seconds: option.seconds,
+    })),
+    supported_indicators: CHART_INDICATOR_OPTIONS.map((option) => ({
+      value: option.value,
+      label: option.label,
+      group: option.group,
+    })),
+    available_symbols: availableSymbols,
+  };
+}
+
+async function requestAskAiModel(command) {
+  const response = await fetch("/api/ask-ai", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(getAskAiApiContext(command)),
+  });
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload?.error || "OpenAI bridge is unavailable.");
+  return payload;
+}
+
+function findAskAiSymbolByCode(symbolCode) {
+  const target = String(symbolCode || "").trim().toLowerCase();
+  if (!target) return null;
+  return activeSymbols.find((symbol) => String(symbol.symbol || "").toLowerCase() === target) || null;
+}
+
+function normalizeAskAiIndicatorValue(value) {
+  const target = String(value || "").trim().toLowerCase();
+  if (!target) return null;
+  const exact = CHART_INDICATOR_OPTIONS.find((option) => String(option.value).toLowerCase() === target);
+  if (exact) return exact.value;
+  return CHART_INDICATOR_OPTIONS.find((option) => String(option.label || "").toLowerCase() === target)?.value || null;
+}
+
+async function executeAskAiModelAction(action) {
+  const type = String(action?.type || "");
+  if (!type || type === "no_action") return "";
+
+  if (type === "analyse_market") {
+    return runAskAiCommandAnalysis({
+      scanGroup: Boolean(action.scan_group),
+      drawPlan: Boolean(action.draw_plan),
+    });
+  }
+
+  if (type === "draw_trade_plan") {
+    return drawAskAiTradePlan();
+  }
+
+  if (type === "change_timeframe") {
+    const seconds = Number(action.timeframe_seconds);
+    if (!TIMEFRAME_OPTIONS.some((option) => option.seconds === seconds)) return "That timeframe is not available on this chart.";
+    await setChartTimeframe(seconds);
+    if (askAiTimeframeSelectEl) askAiTimeframeSelectEl.value = String(seconds);
+    return `Changed the chart to ${getTimeframeLabel(seconds)}.`;
+  }
+
+  if (type === "open_symbol") {
+    const symbol = findAskAiSymbolByCode(action.symbol_code);
+    if (!symbol) return "I could not find that market in the loaded Deriv symbols.";
+    const seconds = Number(action.timeframe_seconds) || getChartTimeframeSeconds();
+    await openAskAiChart(symbol.symbol, seconds);
+    return `Opened ${symbol.display_name || symbol.symbol} on ${getTimeframeLabel(seconds)}.`;
+  }
+
+  if (type === "add_indicator" || type === "set_indicator_timeframe" || type === "remove_indicator") {
+    const indicator = normalizeAskAiIndicatorValue(action.indicator_value);
+    if (!indicator) return "I could not match that indicator to the platform indicator list.";
+    if (type === "remove_indicator") {
+      removeChartIndicator(indicator);
+      return `Removed ${getChartIndicatorLabel(indicator)}.`;
+    }
+    if (!activeChartIndicators.has(indicator)) addChartIndicator(indicator);
+    const seconds = Number(action.timeframe_seconds);
+    if (Number.isFinite(seconds) && seconds > 0) setChartIndicatorTimeframe(indicator, seconds);
+    return `Added ${getChartIndicatorLabel(indicator)}${Number.isFinite(seconds) && seconds > 0 ? ` on ${getTimeframeLabel(seconds)}` : ""}.`;
+  }
+
+  if (type === "toggle_crosshair") {
+    setCrosshairEnabled(!chartCrosshairEnabled);
+    return `Crosshair ${chartCrosshairEnabled ? "enabled" : "disabled"}.`;
+  }
+
+  if (type === "start_replay") {
+    replayToggleBtn?.click();
+    return "Replay mode toggled.";
+  }
+
+  if (type === "select_replay_from") {
+    replayEngine.armCandleSelection();
+    return "Replay candle selection is armed. Click the candle where replay should start.";
+  }
+
+  if (type === "live_replay") {
+    replayEngine.goLive();
+    return "Returned replay to live data.";
+  }
+
+  if (type === "clear_ai_drawings") {
+    return clearAskAiDrawings();
+  }
+
+  if (type === "summarize_context") {
+    return summarizeAskAiCurrentChart();
+  }
+
+  return "";
+}
+
+async function handleAskAiModelCommand(command) {
+  const plan = await requestAskAiModel(command);
+  const actions = Array.isArray(plan?.actions) ? plan.actions : [];
+  const actionResponses = [];
+  for (const action of actions) {
+    const response = await executeAskAiModelAction(action);
+    if (response) actionResponses.push(response);
+  }
+  return [plan?.reply, ...actionResponses].filter(Boolean).join(" ");
+}
+
+function summarizeAskAiCurrentChart() {
+  const context = getAskAiCurrentContext();
+  if (!context.candles.length || !context.current) return "I need chart candles loaded before I can analyse this market.";
+  const direction = context.topDown?.direction || null;
+  const bias = direction === "CALL" ? "Rise / BUY" : direction === "PUT" ? "Fall / SELL" : "WAIT";
+  const confidence = Number(context.topDown?.confidence || context.trend?.trendStrength || 0);
+  const trendText = context.trend?.trend || "--";
+  const setup = context.topDown?.setup || "No complete setup yet.";
+  const indicators = context.activeIndicators.length
+    ? context.activeIndicators.map((item) => `${item.label}${item.timeframe !== "Chart" ? ` ${item.timeframe}` : ""}`).join(", ")
+    : "none";
+  return `${context.symbol} on ${context.timeframe}: bias is ${bias}, confidence ${confidence}%. Trend reads ${trendText}. ${setup}. Active indicators: ${indicators}.`;
+}
+
+function drawAskAiTradePlan() {
+  const context = getAskAiCurrentContext();
+  const candles = context.candles;
+  if (candles.length < 20 || !context.current) {
+    return "I need more candles before I can draw a practical plan.";
+  }
+  const recent = candles.slice(-40);
+  const current = context.current;
+  const avg = averageRange(recent, Math.min(20, recent.length)) || Math.abs(current.close) * 0.002 || currentPip || 0.0001;
+  const direction = context.topDown?.direction || (context.trend?.trend === "UP" ? "CALL" : context.trend?.trend === "DOWN" ? "PUT" : null);
+  if (!direction) return "The chart is mixed. I will not draw a trade plan until there is a clearer bias.";
+  const isBuy = direction === "CALL";
+  const startCandle = candles[Math.max(0, candles.length - 18)];
+  const endCandle = candles[candles.length - 1];
+  const highs = recent.map((candle) => candle.high);
+  const lows = recent.map((candle) => candle.low);
+  const zoneTop = isBuy ? current.close + avg * 0.5 : Math.max(...highs.slice(-14));
+  const zoneBottom = isBuy ? Math.min(...lows.slice(-14)) : current.close - avg * 0.5;
+  const entry = current.close;
+  const target = isBuy ? entry + avg * 2 : entry - avg * 2;
+  const stop = isBuy ? entry - avg : entry + avg;
+  const now = Date.now();
+  const zone = {
+    id: `ai_zone_${now}`,
+    tool: "RECT",
+    symbol: currentSymbol,
+    createdAt: now,
+    locked: false,
+    style: {
+      color: isBuy ? "#10b981" : "#ef4444",
+      width: 1,
+      lineStyle: "solid",
+    },
+    start: {
+      time: snapChartTime(startCandle.time),
+      price: Math.max(zoneTop, zoneBottom),
+    },
+    end: {
+      time: snapChartTime(endCandle.time + getChartTimeframeSeconds() * 8),
+      price: Math.min(zoneTop, zoneBottom),
+    },
+  };
+  const position = {
+    id: `ai_position_${now}`,
+    tool: isBuy ? "LONG_POSITION" : "SHORT_POSITION",
+    symbol: currentSymbol,
+    createdAt: now + 1,
+    locked: false,
+    style: {
+      color: isBuy ? "#10b981" : "#ef4444",
+      width: 2,
+      lineStyle: "solid",
+    },
+    start: {
+      time: snapChartTime(endCandle.time),
+      price: entry,
+    },
+    end: {
+      time: snapChartTime(endCandle.time + getChartTimeframeSeconds() * 10),
+      price: entry,
+    },
+    position: {
+      targetPrice: target,
+      stopPrice: stop,
+    },
+  };
+  addChartDrawing(zone);
+  addChartDrawing(position);
+  chartSelectedDrawingId = position.id;
+  chartDrawingToolbarVisible = true;
+  setDrawingTool("SELECT");
+  renderMiniChart(candles);
+  return `I drew a ${isBuy ? "long" : "short"} example plan: entry near ${formatPrice(entry, currentPip)}, target ${formatPrice(target, currentPip)}, invalidation ${formatPrice(stop, currentPip)}. Treat it as a plan, not an automatic trade.`;
+}
+
+function clearAskAiDrawings() {
+  const drawings = getChartDrawings();
+  const next = drawings.filter((drawing) => !String(drawing.id || "").startsWith("ai_"));
+  chartDrawingStore[getDrawingSymbolKey()] = next;
+  clearChartDrawingSelection();
+  saveChartDrawingStore();
+  renderMiniChart(getBuiltCandles());
+  return drawings.length === next.length ? "There were no AI drawings to clear." : "I cleared the AI drawings from this chart.";
+}
+
+async function runAskAiCommandAnalysis({ scanGroup = false, drawPlan = false } = {}) {
+  const previousSymbol = askAiSymbolSelectEl?.value;
+  if (scanGroup && askAiSymbolSelectEl) askAiSymbolSelectEl.value = "__scan_group";
+  const result = await runAskAiAnalysis();
+  if (scanGroup && askAiSymbolSelectEl && previousSymbol) askAiSymbolSelectEl.value = previousSymbol;
+  if (!result) return "I could not find enough clean data for the analysis.";
+  askAiLastAnalysis = result;
+  let response = result.decision
+    ? `${result.symbol}: my next candle bias is ${result.decision === "CALL" ? "Rise / BUY" : "Fall / SELL"} with ${result.confidence}% confidence. ${result.setup}`
+    : `${result.symbol}: I would wait. Confidence is ${result.confidence}%. ${result.setup}`;
+  if (drawPlan && result.symbolCode === currentSymbol) {
+    response += ` ${drawAskAiTradePlan()}`;
+  }
+  return response;
+}
+
+async function handleAskAiCommand(rawCommand, options = {}) {
+  const command = String(rawCommand || "").trim();
+  if (!command) return;
+  openAskAiDialog();
+  appendAskAiMessage("user", command);
+  if (askAiCommandInputEl) askAiCommandInputEl.value = "";
+  const text = command.toLowerCase();
+  if (askAiStatusEl) askAiStatusEl.textContent = "AI is working...";
+  let modelErrorMessage = "";
+
+  try {
+    try {
+      const modelResponse = await handleAskAiModelCommand(command);
+      if (modelResponse) {
+        respondAskAi(modelResponse);
+        return;
+      }
+    } catch (err) {
+      modelErrorMessage = err?.message || "OpenAI bridge is unavailable.";
+    }
+
+    if (text.includes("clear") && text.includes("drawing")) {
+      respondAskAi(clearAskAiDrawings());
+      return;
+    }
+
+    if (text.includes("draw") && (text.includes("plan") || text.includes("trade") || text.includes("example"))) {
+      respondAskAi(drawAskAiTradePlan());
+      return;
+    }
+
+    if (text.includes("analyse") || text.includes("analyze") || text.includes("analysis") || text.includes("what do you think")) {
+      const response = await runAskAiCommandAnalysis({ scanGroup: text.includes("scan all") || text.includes("all market"), drawPlan: text.includes("draw") || text.includes("example") });
+      respondAskAi(response);
+      return;
+    }
+
+    if (text.includes("scan")) {
+      const response = await runAskAiCommandAnalysis({ scanGroup: true, drawPlan: text.includes("draw") || text.includes("example") });
+      respondAskAi(response);
+      return;
+    }
+
+    if (text.includes("timeframe") || text.includes("change to") || text.includes("switch to")) {
+      const seconds = parseAskAiTimeframe(text);
+      if (seconds && TIMEFRAME_OPTIONS.some((option) => option.seconds === seconds)) {
+        await setChartTimeframe(seconds);
+        if (askAiTimeframeSelectEl) askAiTimeframeSelectEl.value = String(seconds);
+        respondAskAi(`Changed the chart to ${getTimeframeLabel(seconds)}.`);
+        return;
+      }
+    }
+
+    const symbol = findAskAiSymbolFromCommand(text);
+    if (symbol && (text.includes("open") || text.includes("change") || text.includes("switch"))) {
+      const seconds = parseAskAiTimeframe(text) || getChartTimeframeSeconds();
+      await openAskAiChart(symbol.symbol, seconds);
+      respondAskAi(`Opened ${symbol.display_name || symbol.symbol} on ${getTimeframeLabel(seconds)}.`);
+      return;
+    }
+
+    const indicator = findAskAiIndicatorFromCommand(text);
+    if (indicator && (text.includes("set") || text.includes("timeframe")) && parseAskAiTimeframe(text)) {
+      const seconds = parseAskAiTimeframe(text);
+      if (!activeChartIndicators.has(indicator)) addChartIndicator(indicator);
+      setChartIndicatorTimeframe(indicator, seconds);
+      respondAskAi(`Set ${getChartIndicatorLabel(indicator)} to ${getTimeframeLabel(seconds)}.`);
+      return;
+    }
+
+    if (indicator && (text.includes("add") || text.includes("show") || text.includes("enable"))) {
+      addChartIndicator(indicator);
+      const seconds = parseAskAiTimeframe(text);
+      if (seconds) setChartIndicatorTimeframe(indicator, seconds);
+      respondAskAi(`Added ${getChartIndicatorLabel(indicator)}${seconds ? ` on ${getTimeframeLabel(seconds)}` : ""}.`);
+      return;
+    }
+
+    if (indicator && text.includes("remove")) {
+      removeChartIndicator(indicator);
+      respondAskAi(`Removed ${getChartIndicatorLabel(indicator)}.`);
+      return;
+    }
+
+    if (text.includes("crosshair")) {
+      setCrosshairEnabled(!chartCrosshairEnabled);
+      respondAskAi(`Crosshair ${chartCrosshairEnabled ? "enabled" : "disabled"}.`);
+      return;
+    }
+
+    if (text.includes("replay")) {
+      if (text.includes("select") || text.includes("from")) {
+        replayEngine.armCandleSelection();
+        respondAskAi("Replay selection is armed. Click the candle where you want replay to start.");
+      } else {
+        replayToggleBtn?.click();
+        respondAskAi(`Replay ${replayEngine.isReplayMode() ? "enabled" : "requested"}.`);
+      }
+      return;
+    }
+
+    if (text.includes("context") || text.includes("summarise") || text.includes("summarize")) {
+      respondAskAi(summarizeAskAiCurrentChart());
+      return;
+    }
+
+    respondAskAi(modelErrorMessage
+      ? `I can analyse the chart, scan markets, change timeframe, open markets, add indicators, draw a trade plan, clear AI drawings, toggle crosshair, or toggle replay. OpenAI is not connected yet: ${modelErrorMessage}`
+      : "I can analyse the chart, scan markets, change timeframe, open markets, add indicators, draw a trade plan, clear AI drawings, toggle crosshair, or toggle replay.");
+  } catch (err) {
+    respondAskAi(`I could not complete that: ${err?.message || "unknown error"}`);
+  } finally {
+    if (options.fromVoice && askAiListening && askAiCommandInputEl) askAiCommandInputEl.focus();
+  }
 }
 
 function populateAskAiGroups() {
@@ -14664,8 +15972,10 @@ async function runAskAiAnalysis() {
       .sort((a, b) => Number(Boolean(b.decision)) - Number(Boolean(a.decision)) || b.confidence - a.confidence)[0];
     if (!best) {
       if (askAiStatusEl) askAiStatusEl.textContent = "Analysis complete. No market returned enough data.";
-      return;
+      askAiLastAnalysis = null;
+      return null;
     }
+    askAiLastAnalysis = best;
     renderAskAiResult(best);
     if (askAiStatusEl) {
       const prefix = scanAll ? `Scan complete. Best market: ${best.symbol}. ` : "Analysis complete. ";
@@ -14674,8 +15984,10 @@ async function runAskAiAnalysis() {
         ? `${prefix}Next candle bias: ${best.decision === "CALL" ? "BUY / Rise" : "SELL / Fall"} (${best.confidence}%).${skippedText}`
         : `${prefix}Skip next candle unless alignment improves (${best.confidence}%).${skippedText}`;
     }
+    return best;
   } catch (err) {
     if (askAiStatusEl) askAiStatusEl.textContent = `AI analysis failed: ${err?.message || "unknown error"}`;
+    return null;
   } finally {
     askAiInFlight = false;
     if (askAiAnalyseBtnEl) {
@@ -17741,6 +19053,11 @@ function init() {
   askAiSymbolSelectEl = document.getElementById("askAiSymbol");
   askAiTimeframeSelectEl = document.getElementById("askAiTimeframe");
   askAiAnalyseBtnEl = document.getElementById("askAiAnalyse");
+  askAiListenBtnEl = document.getElementById("askAiListen");
+  askAiCommandFormEl = document.getElementById("askAiCommandForm");
+  askAiCommandInputEl = document.getElementById("askAiCommandInput");
+  askAiSendBtnEl = document.getElementById("askAiSend");
+  askAiTranscriptEl = document.getElementById("askAiTranscript");
   askAiStatusEl = document.getElementById("askAiStatus");
   askAiResultEl = document.getElementById("askAiResult");
   replayToggleBtn = document.getElementById("replayToggle");
@@ -18129,17 +19446,9 @@ function init() {
     } else if (action === "reset") {
       resetChartView();
     } else if (action === "zoom-in") {
-      chartPoints = Math.max(10, chartPoints - 10);
-      const built = getBuiltCandles();
-      const { min, max } = getChartOffsetBounds(built);
-      chartOffset = clamp(chartOffset, min, max);
-      renderMiniChart(built);
+      zoomChartHorizontallyByFactor(1 / 1.12);
     } else if (action === "zoom-out") {
-      chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
-      const built = getBuiltCandles();
-      const { min, max } = getChartOffsetBounds(built);
-      chartOffset = clamp(chartOffset, min, max);
-      renderMiniChart(built);
+      zoomChartHorizontallyByFactor(1.12);
     }
   });
 
@@ -18205,22 +19514,31 @@ function init() {
   miniChartCanvas?.addEventListener("wheel", (event) => {
     event.preventDefault();
     const built = getBuiltCandles();
+    if (!built.length) return;
+    if (chartCrosshairEnabled && event instanceof MouseEvent && isDesktopPointerLayout()) {
+      updateChartCrosshairFromPointer(event);
+    }
     if (event.shiftKey) {
       const step = Math.max(1, Math.floor(chartPoints / 6));
       const direction = Math.sign(event.deltaY || event.deltaX);
       const { min, max } = getChartOffsetBounds(built);
       chartOffset = clamp(chartOffset + (direction * step), min, max);
-    } else {
-      const delta = Math.sign(event.deltaY);
-      zoomChartHorizontally(delta > 0 ? 10 : -10, event.clientX);
+      renderMiniChart(built);
       return;
     }
-    renderMiniChart(built);
+    if (Math.abs(event.deltaX) > Math.abs(event.deltaY) && !event.ctrlKey && !event.metaKey) {
+      panChartByPixels(event.deltaX);
+      return;
+    } else {
+      const delta = Math.abs(event.deltaY) >= Math.abs(event.deltaX) ? event.deltaY : event.deltaX;
+      zoomChartHorizontallyByWheel(delta, event.clientX);
+      return;
+    }
   }, { passive: false });
 
   miniChartCanvas?.addEventListener("pointerdown", (event) => {
     const rect = miniChartCanvas.getBoundingClientRect();
-    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 88);
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
@@ -18370,7 +19688,7 @@ function init() {
 
   miniChartCanvas?.addEventListener("pointermove", (event) => {
     const rect = miniChartCanvas.getBoundingClientRect();
-    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 72);
+    const axisThreshold = Math.max(58, miniChartCanvas.clientWidth - 88);
     const localX = event.clientX - rect.left;
     const localY = event.clientY - rect.top;
     const inAxis = localX >= axisThreshold;
@@ -18452,16 +19770,9 @@ function init() {
     } else if (chartDragMode === "scale") {
       scaleChartVertically(deltaY);
     } else if (chartDragMode === "time-scale") {
-      chartTimeScaleDragRemainder += deltaX;
-      const pixelsPerStep = 18;
-      const step = Math.trunc(chartTimeScaleDragRemainder / pixelsPerStep);
-      if (step) {
-        chartTimeScaleDragRemainder -= step * pixelsPerStep;
-        zoomChartHorizontally(-step, event.clientX);
-      }
+      zoomChartHorizontallyByTimeAxisDrag(deltaX, event.clientX);
     } else {
       panChartByPixels(deltaX);
-      panChartVertically(deltaY);
     }
   });
 
@@ -18776,19 +20087,11 @@ function init() {
   });
 
   zoomInBtn?.addEventListener("click", () => {
-    chartPoints = Math.max(10, chartPoints - 10);
-    const built = getBuiltCandles();
-    const { min, max } = getChartOffsetBounds(built);
-    chartOffset = clamp(chartOffset, min, max);
-    renderMiniChart(built);
+    zoomChartHorizontallyByFactor(1 / 1.12);
   });
 
   zoomOutBtn?.addEventListener("click", () => {
-    chartPoints = Math.min(MAX_CANDLES, chartPoints + 10);
-    const built = getBuiltCandles();
-    const { min, max } = getChartOffsetBounds(built);
-    chartOffset = clamp(chartOffset, min, max);
-    renderMiniChart(built);
+    zoomChartHorizontallyByFactor(1.12);
   });
 
   resetChartBtn?.addEventListener("click", () => {
@@ -18848,14 +20151,13 @@ function init() {
   });
 
   askAiToggleBtnEl?.addEventListener("click", () => {
-    askAiDialogEl?.classList.remove("hidden");
-    syncAskAiControls();
+    openAskAiDialog({ focus: true });
   });
   askAiCloseBtnEl?.addEventListener("click", () => {
-    askAiDialogEl?.classList.add("hidden");
+    closeAskAiDialog();
   });
   askAiDialogEl?.addEventListener("click", (event) => {
-    if (event.target === askAiDialogEl) askAiDialogEl.classList.add("hidden");
+    if (event.target === askAiDialogEl) closeAskAiDialog();
   });
   askAiGroupSelectEl?.addEventListener("change", () => {
     populateAskAiSymbols();
@@ -18865,6 +20167,11 @@ function init() {
     refreshAskAiTimeframeRules().catch(() => {});
   });
   askAiAnalyseBtnEl?.addEventListener("click", runAskAiAnalysis);
+  askAiListenBtnEl?.addEventListener("click", toggleAskAiListening);
+  askAiCommandFormEl?.addEventListener("submit", (event) => {
+    event.preventDefault();
+    handleAskAiCommand(askAiCommandInputEl?.value || "");
+  });
   askAiResultEl?.addEventListener("click", (event) => {
     const target = event.target instanceof HTMLElement ? event.target.closest("[data-ask-ai-open-symbol]") : null;
     const symbol = target?.getAttribute("data-ask-ai-open-symbol");
