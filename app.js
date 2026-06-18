@@ -17979,6 +17979,23 @@ function loadStoredAccounts() {
   }
 }
 
+async function restoreOAuthSession() {
+  if (storedAccounts.length) return false;
+  const token = localStorage.getItem(DERIV_ACCESS_TOKEN_KEY);
+  if (!token) return false;
+  setStatus("Restoring Deriv session...");
+  try {
+    const accounts = await fetchOAuthAccounts(token);
+    localStorage.setItem("deriv_accounts", JSON.stringify(accounts));
+    storedAccounts = accounts;
+    await activateDerivAccount(accounts[0], { silent: true });
+    return true;
+  } catch (err) {
+    setStatus(err?.message || "Could not restore Deriv login. Please log in again.", true);
+    return false;
+  }
+}
+
 function renderAccountList() {
   if (!accountListEl) return;
   if (!storedAccounts.length) {
@@ -20579,6 +20596,9 @@ async function init() {
 
   loadStoredAccounts();
   await parseOAuthTokens();
+  if (!storedAccounts.length) {
+    await restoreOAuthSession();
+  }
   renderAccountList();
   if (activeToken && !activeAuthWsUrl) {
     authorizeWithToken(activeToken).catch(() => {});
