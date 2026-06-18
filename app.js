@@ -59,6 +59,7 @@ let toggleProposalsBtn;
 let toggleResultsBtn;
 
 let ws;
+let privateWs;
 let wsIndex = 0;
 let activeSymbols = [];
 let symbolsByMarket = new Map();
@@ -70,6 +71,7 @@ let tickStreamId = null;
 let currentSymbol = null;
 let currentPip = null;
 let reconnectTimer = null;
+let privateReconnectTimer = null;
 let reqIdCounter = 1;
 let baseMinutes = 1;
 let minDurationSec = 30;
@@ -85,6 +87,7 @@ let countdownTimer = null;
 let lastProposalError = null;
 let rateLimitUntil = 0;
 let pingTimer = null;
+let privatePingTimer = null;
 let tickWatchdogTimer = null;
 const PING_INTERVAL_MS = 30000;
 const RATE_LIMIT_COOLDOWN_MS = 15000;
@@ -113,8 +116,10 @@ let activeToken = null;
 let activeLoginId = null;
 let activeAuthWsUrl = "";
 let activeAccountCurrency = "";
+let activeAccountFilter = "all";
 let isAuthorized = false;
 let balanceSubscriptionLoginId = null;
+let balanceSubscribeInFlightLoginId = null;
 let tradeResults = [];
 let openContractSubs = new Map();
 let autoTradeResults = [];
@@ -8579,7 +8584,7 @@ function scheduleAutoContractCloseCheck(contractId, expiry) {
 
 async function checkAutoOpenContractClosed(contractId) {
   if (!contractId || String(autoOpenContractId || "") !== String(contractId)) return;
-  const res = await wsRequest({ proposal_open_contract: 1, contract_id: contractId });
+  const res = await privateWsRequest({ proposal_open_contract: 1, contract_id: contractId });
   const contract = res.proposal_open_contract;
   if (contract) {
     handleOpenContractUpdate(contract, null);
@@ -8717,7 +8722,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
   });
   const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
   await authorizeWithToken(account.token, { subscribeBalance: false });
-  const res = await wsRequest({ buy: proposal.id, price: askPrice });
+  const res = await privateWsRequest({ buy: proposal.id, price: askPrice });
   const buy = res.buy;
   const contractId = buy?.contract_id ?? null;
   const buyPrice = buy?.buy_price ?? askPrice;
@@ -13418,11 +13423,11 @@ function prepareWsPayload(payload) {
 }
 
 function getActiveWsUrl() {
-  return activeAuthWsUrl || WS_URLS[wsIndex % WS_URLS.length];
+  return WS_URLS[wsIndex % WS_URLS.length];
 }
 
 function isUsingAuthenticatedWs() {
-  return Boolean(activeAuthWsUrl && ws?.url === activeAuthWsUrl);
+  return false;
 }
 
 function connectWS() {
@@ -13436,10 +13441,6 @@ function connectWS() {
     startPing();
     startTickWatchdog();
     subscribeToCurrentSymbol();
-    if (activeAuthWsUrl && activeLoginId) {
-      isAuthorized = true;
-      subscribeBalance().catch(() => {});
-    }
   });
 
   ws.addEventListener("close", () => {
@@ -13448,6 +13449,7 @@ function connectWS() {
     stopTickWatchdog();
     tickStreamId = null;
     balanceSubscriptionLoginId = null;
+    balanceSubscribeInFlightLoginId = null;
     scheduleReconnect();
   });
 
@@ -13457,6 +13459,7 @@ function connectWS() {
     stopTickWatchdog();
     tickStreamId = null;
     balanceSubscriptionLoginId = null;
+    balanceSubscribeInFlightLoginId = null;
     scheduleReconnect(true);
   });
 
@@ -13476,6 +13479,63 @@ function stopPing() {
     clearInterval(pingTimer);
     pingTimer = null;
   }
+}
+
+function connectPrivateWS() {
+  if (!activeAuthWsUrl) return;
+  if (privateWs && (privateWs.readyState === WebSocket.OPEN || privateWs.readyState === WebSocket.CONNECTING)) return;
+
+  privateWs = new WebSocket(activeAuthWsUrl);
+  privateWs.addEventListener("open", () => {
+    isAuthorized = true;
+    startPrivatePing();
+    subscribeBalance().catch(() => {});
+  });
+  privateWs.addEventListener("close", () => {
+    stopPrivatePing();
+    balanceSubscriptionLoginId = null;
+    balanceSubscribeInFlightLoginId = null;
+    schedulePrivateReconnect();
+  });
+  privateWs.addEventListener("error", () => {
+    stopPrivatePing();
+    balanceSubscriptionLoginId = null;
+    balanceSubscribeInFlightLoginId = null;
+    schedulePrivateReconnect();
+  });
+  privateWs.addEventListener("message", onPrivateMessage);
+}
+
+function startPrivatePing() {
+  stopPrivatePing();
+  privatePingTimer = setInterval(() => {
+    if (!privateWs || privateWs.readyState !== WebSocket.OPEN) return;
+    privateWs.send(JSON.stringify({ ping: 1 }));
+  }, PING_INTERVAL_MS);
+}
+
+function stopPrivatePing() {
+  if (privatePingTimer) {
+    clearInterval(privatePingTimer);
+    privatePingTimer = null;
+  }
+}
+
+function schedulePrivateReconnect() {
+  if (!activeToken || !activeLoginId || privateReconnectTimer) return;
+  privateReconnectTimer = setTimeout(async () => {
+    privateReconnectTimer = null;
+    const account = storedAccounts.find((acc) => acc.loginid === activeLoginId) || storedAccounts.find((acc) => acc.token === activeToken);
+    if (!account) return;
+    try {
+      activeAuthWsUrl = await getAuthenticatedWsUrl(account);
+      connectPrivateWS();
+    } catch (err) {
+      activeAuthWsUrl = "";
+      isAuthorized = false;
+      setStatus(err?.message || "Could not reconnect Deriv account.", true);
+    }
+  }, 1000);
 }
 
 function startTickWatchdog() {
@@ -13499,31 +13559,25 @@ function stopTickWatchdog() {
 
 function scheduleReconnect(forceNext = false) {
   if (reconnectTimer) return;
-  reconnectTimer = setTimeout(async () => {
+  reconnectTimer = setTimeout(() => {
     reconnectTimer = null;
-    if (activeToken && activeLoginId) {
-      const account = storedAccounts.find((acc) => acc.loginid === activeLoginId) || storedAccounts.find((acc) => acc.token === activeToken);
-      if (account) {
-        try {
-          activeAuthWsUrl = await getAuthenticatedWsUrl(account);
-          connectWS();
-          return;
-        } catch (err) {
-          activeAuthWsUrl = "";
-          isAuthorized = false;
-          setStatus(err?.message || "Could not reconnect Deriv account.", true);
-        }
-      }
-    }
-    if (forceNext && !activeAuthWsUrl) wsIndex += 1;
+    if (forceNext) wsIndex += 1;
     connectWS();
   }, 800);
 }
 
 function wsRequest(payload) {
+  return socketRequest(() => ensureOpen(), () => ws, payload);
+}
+
+function privateWsRequest(payload) {
+  return socketRequest(() => ensurePrivateOpen(), () => privateWs, payload);
+}
+
+function socketRequest(openFn, socketFn, payload) {
   return new Promise(async (resolve, reject) => {
     try {
-      await ensureOpen();
+      await openFn();
     } catch (err) {
       reject(err);
       return;
@@ -13532,6 +13586,11 @@ function wsRequest(payload) {
     const reqId = reqIdCounter++;
     payload = prepareWsPayload(payload);
     payload.req_id = reqId;
+    const socket = socketFn();
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      reject(new Error("WebSocket is not connected."));
+      return;
+    }
 
     const handler = (event) => {
       let data;
@@ -13542,13 +13601,19 @@ function wsRequest(payload) {
       }
       data = normalizeDerivPayload(data);
       if (data.req_id !== reqId) return;
-      ws.removeEventListener("message", handler);
+      clearTimeout(timeout);
+      socket.removeEventListener("message", handler);
       if (data.error) reject(new Error(data.error.message || data.error.code || "API error"));
       else resolve(data);
     };
 
-    ws.addEventListener("message", handler);
-    ws.send(JSON.stringify(payload));
+    const timeout = setTimeout(() => {
+      socket.removeEventListener("message", handler);
+      reject(new Error("WebSocket request timeout"));
+    }, 12000);
+
+    socket.addEventListener("message", handler);
+    socket.send(JSON.stringify(payload));
   });
 }
 
@@ -13591,6 +13656,26 @@ function onMessage(event) {
     } catch (err) {
       setStatus(`Market update error: ${err?.message || "unknown error"}`, true);
     }
+  }
+  if (data.msg_type === "balance" && data.balance) {
+    updateAccountSummary(data.balance);
+  }
+  if (data.msg_type === "proposal_open_contract" && data.proposal_open_contract) {
+    handleOpenContractUpdate(data.proposal_open_contract, data.subscription?.id);
+  }
+}
+
+function onPrivateMessage(event) {
+  let data;
+  try {
+    data = JSON.parse(event.data);
+  } catch (err) {
+    return;
+  }
+  normalizeDerivPayload(data);
+  if (data.error) {
+    if (!data.req_id) setStatus(data.error.message || "Deriv account error", true);
+    return;
   }
   if (data.msg_type === "balance" && data.balance) {
     updateAccountSummary(data.balance);
@@ -16899,7 +16984,7 @@ function executeProposalBuy(proposalId, price, direction) {
     return Promise.resolve(false);
   }
   setStatus("Placing trade...");
-  return wsRequest({ buy: proposalId, price: buyPrice })
+  return privateWsRequest({ buy: proposalId, price: buyPrice })
     .then((res) => {
       const buy = res.buy;
       const contractId = buy?.contract_id ?? "--";
@@ -17851,6 +17936,18 @@ function normalizeOAuthAccount(account, token) {
   };
 }
 
+function getAccountKind(account) {
+  const text = [
+    account?.loginid,
+    account?.account_id,
+    account?.account_type,
+    account?.type,
+    account?.category,
+  ].filter(Boolean).join(" ").toLowerCase();
+  if (text.includes("demo") || text.includes("virtual") || text.startsWith("vrtc") || text.startsWith("dot")) return "demo";
+  return "real";
+}
+
 async function derivApi(path, options = {}) {
   const headers = { ...(options.headers || {}) };
   if (options.token) headers.authorization = `Bearer ${options.token}`;
@@ -17896,11 +17993,12 @@ async function activateDerivAccount(account, options = {}) {
   activeAuthWsUrl = await getAuthenticatedWsUrl(account);
   isAuthorized = true;
   balanceSubscriptionLoginId = null;
-  if (ws) {
-    try { ws.close(); } catch {}
-    ws = null;
+  balanceSubscribeInFlightLoginId = null;
+  if (privateWs) {
+    try { privateWs.close(); } catch {}
+    privateWs = null;
   }
-  connectWS();
+  connectPrivateWS();
   renderAccountList();
   if (!options.silent) setStatus(`Logged in as ${activeLoginId}`);
   return true;
@@ -18002,11 +18100,17 @@ function renderAccountList() {
     accountListEl.innerHTML = "<div class=\"trade-meta\">Not logged in</div>";
     return;
   }
-  accountListEl.innerHTML = storedAccounts.map((acc) => {
+  document.querySelectorAll("[data-account-filter]").forEach((button) => {
+    button.classList.toggle("active", button.getAttribute("data-account-filter") === activeAccountFilter);
+  });
+  const visibleAccounts = activeAccountFilter === "all"
+    ? storedAccounts
+    : storedAccounts.filter((acc) => getAccountKind(acc) === activeAccountFilter);
+  accountListEl.innerHTML = visibleAccounts.length ? visibleAccounts.map((acc) => {
     const label = `${acc.loginid} ${acc.currency || ""}`.trim();
     const active = acc.loginid === activeLoginId ? "active" : "";
     return `<button class="account-item ${active}" data-loginid="${acc.loginid}">${label}</button>`;
-  }).join("");
+  }).join("") : `<div class="trade-meta">No ${activeAccountFilter} accounts found</div>`;
 
   if (accountSummary && activeLoginId) {
     const current = storedAccounts.find((acc) => acc.loginid === activeLoginId);
@@ -18027,7 +18131,9 @@ function renderAccountList() {
 
 function subscribeOpenContract(contractId) {
   if (!contractId) return;
-  ws.send(JSON.stringify({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }));
+  privateWsRequest({ proposal_open_contract: 1, contract_id: contractId, subscribe: 1 }).catch((err) => {
+    setStatus(err?.message || "Could not subscribe to contract updates.", true);
+  });
 }
 
 function handleOpenContractUpdate(contract, subscriptionId) {
@@ -18077,7 +18183,7 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   }
 
   if (isSold && subscriptionId) {
-    ws.send(JSON.stringify({ forget: subscriptionId }));
+    privateWsRequest({ forget: subscriptionId }).catch(() => {});
     openContractSubs.delete(contractId);
   }
 
@@ -18088,8 +18194,10 @@ function handleOpenContractUpdate(contract, subscriptionId) {
 async function subscribeBalance() {
   if (!activeAuthWsUrl || !activeLoginId) return null;
   if (balanceSubscriptionLoginId === activeLoginId) return null;
+  if (balanceSubscribeInFlightLoginId === activeLoginId) return null;
+  balanceSubscribeInFlightLoginId = activeLoginId;
   try {
-    const res = await wsRequest({ balance: 1, subscribe: 1 });
+    const res = await privateWsRequest({ balance: 1, subscribe: 1 });
     balanceSubscriptionLoginId = activeLoginId;
     return res.balance;
   } catch (err) {
@@ -18097,6 +18205,8 @@ async function subscribeBalance() {
     if (!message.toLowerCase().includes("already subscribed to balance")) throw err;
     balanceSubscriptionLoginId = activeLoginId;
     return null;
+  } finally {
+    balanceSubscribeInFlightLoginId = null;
   }
 }
 
@@ -19209,6 +19319,26 @@ function ensureOpen() {
     ws.addEventListener("open", () => {
       clearTimeout(t);
       resolve();
+    }, { once: true });
+  });
+}
+
+function ensurePrivateOpen() {
+  return new Promise((resolve, reject) => {
+    if (!activeAuthWsUrl) {
+      reject(new Error("Please log in to your Deriv account."));
+      return;
+    }
+    connectPrivateWS();
+    if (privateWs?.readyState === WebSocket.OPEN) return resolve();
+    const t = setTimeout(() => reject(new Error("Account WebSocket timeout")), 8000);
+    privateWs?.addEventListener("open", () => {
+      clearTimeout(t);
+      resolve();
+    }, { once: true });
+    privateWs?.addEventListener("error", () => {
+      clearTimeout(t);
+      reject(new Error("Account WebSocket error"));
     }, { once: true });
   });
 }
@@ -20448,6 +20578,13 @@ async function init() {
     });
   }
 
+  document.querySelectorAll("[data-account-filter]").forEach((button) => {
+    button.addEventListener("click", () => {
+      activeAccountFilter = button.getAttribute("data-account-filter") || "all";
+      renderAccountList();
+    });
+  });
+
   accountListEl?.addEventListener("click", async (event) => {
     const target = event.target;
     if (!(target instanceof HTMLElement)) return;
@@ -20455,11 +20592,18 @@ async function init() {
     if (!loginid) return;
     const account = storedAccounts.find((acc) => acc.loginid === loginid);
     if (!account) return;
-    activeLoginId = account.loginid;
-    activeToken = account.token;
-    autoTradeLoginId = account.loginid;
-    renderAccountList();
-    await authorizeWithToken(activeToken);
+    setStatus(`Switching to ${account.loginid}...`);
+    try {
+      activeLoginId = account.loginid;
+      activeToken = account.token;
+      autoTradeLoginId = account.loginid;
+      renderAccountList();
+      await authorizeWithToken(activeToken);
+      accountPanel?.classList.add("hidden");
+    } catch (err) {
+      setStatus(err?.message || "Could not switch account.", true);
+      renderAccountList();
+    }
   });
 
   logoutBtn?.addEventListener("click", () => {
@@ -20471,7 +20615,8 @@ async function init() {
     activeAccountCurrency = "";
     isAuthorized = false;
     balanceSubscriptionLoginId = null;
-    if (ws) { try { ws.close(); } catch {} ws = null; }
+    balanceSubscribeInFlightLoginId = null;
+    if (privateWs) { try { privateWs.close(); } catch {} privateWs = null; }
     connectWS();
     if (accountSummary) {
       accountSummary.innerHTML = "<span class=\"acct-label\">Log in</span>";
