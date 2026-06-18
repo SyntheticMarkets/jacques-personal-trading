@@ -156,6 +156,8 @@ body {
   padding: 4px 10px;
   font-size: 12px;
   cursor: pointer;
+  position: relative;
+  z-index: 140;
 }
 
 .acct-label {
@@ -1142,7 +1144,8 @@ button.small {
   border-radius: 14px;
   padding: 12px;
   box-shadow: 0 16px 40px rgba(0, 0, 0, 0.45);
-  z-index: 10;
+  z-index: 150;
+  isolation: isolate;
 }
 
 .account-panel.hidden {
@@ -2565,6 +2568,14 @@ button.chart-indicator-select {
   .account-summary,
   .status {
     font-size: 11px;
+  }
+
+  .account-summary {
+    z-index: 140 !important;
+  }
+
+  .account-panel {
+    z-index: 150 !important;
   }
 
   .phone.desktop-chart-layout .app-panel[data-app-panel="chart"].active > .trade-section:first-child {
