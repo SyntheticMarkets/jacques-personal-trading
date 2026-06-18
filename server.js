@@ -6,6 +6,10 @@ const PORT = Number(process.env.PORT || 8080);
 const ROOT = __dirname;
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4.1-mini";
 const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
+const DERIV_CLIENT_ID = process.env.DERIV_CLIENT_ID || "33A3COZawHjD8XFQlwkg9";
+const DERIV_CLIENT_SECRET = process.env.DERIV_CLIENT_SECRET || "";
+const DERIV_REST_BASE_URL = process.env.DERIV_REST_BASE_URL || "https://api.derivws.com";
+const DERIV_AUTH_TOKEN_URL = process.env.DERIV_AUTH_TOKEN_URL || "https://auth.deriv.com/oauth2/token";
 const MAX_BODY_BYTES = 1024 * 1024;
 
 const MIME_TYPES = {
@@ -202,6 +206,109 @@ async function handleAskAi(req, res) {
   }
 }
 
+function getBearerToken(req) {
+  const header = req.headers.authorization || "";
+  const match = header.match(/^Bearer\s+(.+)$/i);
+  return match ? match[1].trim() : "";
+}
+
+async function readJsonBody(req) {
+  return JSON.parse(await readRequestBody(req));
+}
+
+async function handleDerivToken(req, res) {
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON request." });
+    return;
+  }
+
+  const code = String(payload?.code || "");
+  const codeVerifier = String(payload?.code_verifier || "");
+  const redirectUri = String(payload?.redirect_uri || "");
+  if (!code || !codeVerifier || !redirectUri) {
+    sendJson(res, 400, { error: "Missing OAuth code, code_verifier, or redirect_uri." });
+    return;
+  }
+
+  const body = new URLSearchParams({
+    grant_type: "authorization_code",
+    client_id: DERIV_CLIENT_ID,
+    code,
+    code_verifier: codeVerifier,
+    redirect_uri: redirectUri,
+  });
+  if (DERIV_CLIENT_SECRET) body.set("client_secret", DERIV_CLIENT_SECRET);
+
+  try {
+    const derivResponse = await fetch(DERIV_AUTH_TOKEN_URL, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body,
+    });
+    const data = await derivResponse.json().catch(async () => ({ error: await derivResponse.text() }));
+    if (!derivResponse.ok) {
+      sendJson(res, derivResponse.status, { error: data?.error_description || data?.error || "Deriv token exchange failed." });
+      return;
+    }
+    sendJson(res, 200, data);
+  } catch (err) {
+    sendJson(res, 500, { error: err?.message || "Deriv token exchange failed." });
+  }
+}
+
+async function derivRest(req, res, restPath, options = {}) {
+  const token = getBearerToken(req);
+  if (!token) {
+    sendJson(res, 401, { error: "Missing Deriv access token." });
+    return;
+  }
+
+  try {
+    const derivResponse = await fetch(`${DERIV_REST_BASE_URL}${restPath}`, {
+      method: options.method || "GET",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "deriv-app-id": DERIV_CLIENT_ID,
+        "content-type": "application/json",
+      },
+      body: options.body ? JSON.stringify(options.body) : undefined,
+    });
+    const data = await derivResponse.json().catch(async () => ({ error: await derivResponse.text() }));
+    if (!derivResponse.ok) {
+      sendJson(res, derivResponse.status, { error: data?.error?.message || data?.message || data?.error || "Deriv REST request failed." });
+      return;
+    }
+    sendJson(res, 200, data);
+  } catch (err) {
+    sendJson(res, 500, { error: err?.message || "Deriv REST request failed." });
+  }
+}
+
+async function handleDerivAccounts(req, res) {
+  await derivRest(req, res, "/trading/v1/options/accounts");
+}
+
+async function handleDerivOtp(req, res) {
+  let payload;
+  try {
+    payload = await readJsonBody(req);
+  } catch {
+    sendJson(res, 400, { error: "Invalid JSON request." });
+    return;
+  }
+  const accountId = String(payload?.account_id || payload?.loginid || "");
+  if (!accountId) {
+    sendJson(res, 400, { error: "Missing Deriv account id." });
+    return;
+  }
+  await derivRest(req, res, `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/otp`, {
+    method: "POST",
+  });
+}
+
 async function handleRealtimeSdp(req, res) {
   if (!process.env.OPENAI_API_KEY) {
     sendJson(res, 500, {
@@ -278,6 +385,18 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === "POST" && req.url === "/api/realtime-sdp") {
     handleRealtimeSdp(req, res);
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/deriv/token") {
+    handleDerivToken(req, res);
+    return;
+  }
+  if (req.method === "GET" && req.url === "/api/deriv/accounts") {
+    handleDerivAccounts(req, res);
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/deriv/ws-auth") {
+    handleDerivOtp(req, res);
     return;
   }
   if (req.method === "GET" || req.method === "HEAD") {
