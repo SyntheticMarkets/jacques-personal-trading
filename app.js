@@ -116,7 +116,7 @@ let activeToken = null;
 let activeLoginId = null;
 let activeAuthWsUrl = "";
 let activeAccountCurrency = "";
-let activeAccountFilter = "all";
+let activeAccountFilter = "real";
 let isAuthorized = false;
 let balanceSubscriptionLoginId = null;
 let balanceSubscribeInFlightLoginId = null;
@@ -8721,7 +8721,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
     durationUnit: "s",
   });
   const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
-  await authorizeWithToken(account.token, { subscribeBalance: false });
+  await activateDerivAccount(account, { silent: true, subscribeBalance: false });
   const res = await privateWsRequest({ buy: proposal.id, price: askPrice });
   const buy = res.buy;
   const contractId = buy?.contract_id ?? null;
@@ -13481,7 +13481,7 @@ function stopPing() {
   }
 }
 
-function connectPrivateWS() {
+function connectPrivateWS(options = {}) {
   if (!activeAuthWsUrl) return;
   if (privateWs && (privateWs.readyState === WebSocket.OPEN || privateWs.readyState === WebSocket.CONNECTING)) return;
 
@@ -13489,7 +13489,7 @@ function connectPrivateWS() {
   privateWs.addEventListener("open", () => {
     isAuthorized = true;
     startPrivatePing();
-    subscribeBalance().catch(() => {});
+    if (options.subscribeBalance !== false) subscribeBalance().catch(() => {});
   });
   privateWs.addEventListener("close", () => {
     stopPrivatePing();
@@ -17998,7 +17998,7 @@ async function activateDerivAccount(account, options = {}) {
     try { privateWs.close(); } catch {}
     privateWs = null;
   }
-  connectPrivateWS();
+  connectPrivateWS({ subscribeBalance: options.subscribeBalance !== false });
   renderAccountList();
   if (!options.silent) setStatus(`Logged in as ${activeLoginId}`);
   return true;
@@ -18211,9 +18211,10 @@ async function subscribeBalance() {
 }
 
 async function authorizeWithToken(token, options = {}) {
-  const account = storedAccounts.find((acc) => acc.token === token) || storedAccounts.find((acc) => acc.loginid === activeLoginId);
+  const account = storedAccounts.find((acc) => acc.loginid === activeLoginId)
+    || storedAccounts.find((acc) => acc.token === token);
   if (!account) return null;
-  await activateDerivAccount(account, { silent: true });
+  await activateDerivAccount(account, { silent: true, subscribeBalance: options.subscribeBalance !== false });
   if (options.subscribeBalance === false) return account;
   await subscribeBalance();
   return account;
@@ -20551,9 +20552,7 @@ async function init() {
     if (autoTradeLoginId) {
       const account = storedAccounts.find((acc) => acc.loginid === autoTradeLoginId);
       if (account) {
-        activeLoginId = account.loginid;
-        activeToken = account.token;
-        authorizeWithToken(activeToken).catch(() => {});
+        activateDerivAccount(account, { silent: true }).catch((err) => setStatus(err?.message || "Could not switch account.", true));
         renderAccountList();
         if (autoTradeEnabled && !autoOpenContractId) {
           scheduleAutoScanner(0);
@@ -20594,11 +20593,8 @@ async function init() {
     if (!account) return;
     setStatus(`Switching to ${account.loginid}...`);
     try {
-      activeLoginId = account.loginid;
-      activeToken = account.token;
       autoTradeLoginId = account.loginid;
-      renderAccountList();
-      await authorizeWithToken(activeToken);
+      await activateDerivAccount(account, { silent: true });
       accountPanel?.classList.add("hidden");
     } catch (err) {
       setStatus(err?.message || "Could not switch account.", true);
