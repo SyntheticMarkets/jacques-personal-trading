@@ -8947,7 +8947,7 @@ function renderMiniChart(candles) {
     updateVisibleCandleCountUI(null, null);
     return;
   }
-  const barrierOffset = Number(barrierInput?.value || "0");
+  const barrierOffset = getBarrierOffsetValue();
   let blueCount = 0;
   let whiteCount = 0;
   points.forEach((candle) => {
@@ -8979,12 +8979,22 @@ function renderMiniChart(candles) {
   if (range === 0) return;
   const rangePadding = Math.max(range * 0.08, Math.abs(rawMax) * 0.0002, 0.0000001);
   const baseSpan = range + (rangePadding * 2);
-  chartVerticalScale = clamp(chartVerticalScale, 0.5, 8);
+  const minReadableSpan = Math.max(range * 0.72, rangePadding * 4, 0.0000001);
+  const maxReadableScale = Math.max(1, baseSpan / minReadableSpan);
+  chartVerticalScale = clamp(chartVerticalScale, 0.5, Math.min(8, maxReadableScale));
   const scaledSpan = baseSpan / chartVerticalScale;
   const baseCenter = (rawMax + rawMin) / 2;
   const maxVerticalShift = Math.max(baseSpan * 0.75, rangePadding * 2);
   chartVerticalOffset = Math.max(-maxVerticalShift, Math.min(chartVerticalOffset, maxVerticalShift));
-  const center = baseCenter + chartVerticalOffset;
+  let center = baseCenter + chartVerticalOffset;
+  if (scaledSpan >= range) {
+    const minCenter = rawMax - (scaledSpan / 2) + (rangePadding * 0.35);
+    const maxCenter = rawMin + (scaledSpan / 2) - (rangePadding * 0.35);
+    if (minCenter <= maxCenter) {
+      center = clamp(center, minCenter, maxCenter);
+      chartVerticalOffset = center - baseCenter;
+    }
+  }
   const min = center - (scaledSpan / 2);
   const max = center + (scaledSpan / 2);
   // Candlesticks
@@ -12327,7 +12337,7 @@ function scaleChartVertically(deltaY) {
     renderMiniChart(built);
     return;
   }
-  const sensitivity = 0.012;
+  const sensitivity = 0.006;
   const nextScale = chartVerticalScale * Math.exp((-deltaY) * sensitivity);
   chartVerticalScale = clamp(nextScale, 0.5, 8);
   renderMiniChart(built);
@@ -13772,6 +13782,26 @@ function formatOffset(value, pip) {
   return `${sign}${formatPrice(abs, pip)}`;
 }
 
+function parseTradeNumber(value, fallback = 0) {
+  const parsed = Number(String(value ?? "").replace(",", ".").trim());
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function getBarrierOffsetValue() {
+  return Math.abs(parseTradeNumber(barrierInput?.value ?? sidebarBarrierInputEl?.value, 0));
+}
+
+function getHigherLowerBarrier(direction = currentDirection) {
+  const offset = getBarrierOffsetValue();
+  if (!offset) return null;
+  const signedOffset = direction === "PUT" ? -offset : offset;
+  return {
+    offset: signedOffset,
+    barrier: formatOffset(signedOffset, currentPip),
+    display: (lastSpot ?? 0) + signedOffset,
+  };
+}
+
 function getActiveTradeMode() {
   const activeTab = Array.from(tabs || []).find((tab) => tab.classList.contains("active"));
   return activeTab?.dataset.tab === "rise_fall" ? "rise_fall" : "higher_lower";
@@ -13808,24 +13838,37 @@ async function executeDirectionQuote(direction) {
     setStatus("Market price not ready yet", true);
     return false;
   }
-  const stake = Number(stakeInput?.value || sidebarStakeInputEl?.value || "0");
+  const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
   if (!stake) {
     setStatus("Enter a valid stake first", true);
     return false;
   }
-  const expiryChoice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
+  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
   let durationSec;
   let durationUnit = "s";
   let expiry = proposalExpiries[0];
-  if (expiryChoice.mode === "candle_end") {
+  let barrierInfo = null;
+  if (isRiseFall && expiryChoice.mode === "candle_end") {
     if (!expiry) buildExpiries();
     expiry = proposalExpiries[0];
     const nowSec = Math.floor(Date.now() / 1000);
     durationSec = Math.max(minDurationSec, (expiry || nowSec + minDurationSec) - nowSec);
-  } else {
+  } else if (isRiseFall) {
     const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
     durationSec = effectiveExpiry.seconds;
     durationUnit = effectiveExpiry.unit;
+    expiry = durationUnit === "s" ? Math.floor(Date.now() / 1000) + durationSec : null;
+  } else {
+    if (!expiry) buildExpiries();
+    expiry = proposalExpiries[0];
+    const nowSec = Math.floor(Date.now() / 1000);
+    durationSec = Math.max(minDurationSec, (expiry || nowSec + minDurationSec) - nowSec);
+    barrierInfo = getHigherLowerBarrier(tradeDirection);
+    if (!barrierInfo) {
+      setStatus("Enter a valid barrier offset first", true);
+      return false;
+    }
   }
 
   setStatus(`Getting ${getDirectionLabel(tradeDirection)} proposal...`);
@@ -13833,7 +13876,7 @@ async function executeDirectionQuote(direction) {
     const proposal = await getProposal({
       symbol: currentSymbol,
       contractType: tradeDirection,
-      barrier: null,
+      barrier: barrierInfo?.barrier ?? null,
       stake,
       durationSec,
       durationUnit,
@@ -13844,10 +13887,10 @@ async function executeDirectionQuote(direction) {
       profitPct: stake ? ((proposal.payout - stake) / stake) * 100 : null,
       proposalId: proposal.id,
       askPrice,
-      barrier: null,
-      offset: null,
+      barrier: barrierInfo?.display ?? null,
+      offset: barrierInfo?.offset ?? null,
       expiry,
-      expiryLabel: durationUnit === "t" ? expiryChoice.label : formatDurationLabel(durationSec),
+      expiryLabel: durationUnit === "t" ? expiryChoice?.label : formatDurationLabel(durationSec),
     };
     quickDirectionQuotes[tradeDirection] = quote;
     updateProposalDirectionButtons();
@@ -13859,7 +13902,7 @@ async function executeDirectionQuote(direction) {
       rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
     }
     setStatus(`Proposal failed: ${lastProposalError}`, true);
-    scheduleProposalRefresh(true);
+    if (shouldAutoQuoteProposals()) scheduleProposalRefresh(true);
     return false;
   }
 }
@@ -18849,6 +18892,10 @@ function isRiseFallCandleEndExpiry() {
     && parseRiseFallExpiryChoice(getRiseFallExpiryValue()).mode === "candle_end";
 }
 
+function shouldAutoQuoteProposals() {
+  return isRiseFallCandleEndExpiry();
+}
+
 function buildCandleEndExpiries(now, step) {
   let firstAligned = Math.ceil(now / step) * step;
   if (firstAligned <= now) firstAligned += step;
@@ -18870,8 +18917,16 @@ function buildExpiries() {
     const firstAligned = Math.ceil((now + minHold) / step) * step;
     proposalExpiries = Array.from({ length: 3 }, (_, i) => firstAligned + step * i);
   }
-  renderTradeList();
-  scheduleProposalRefresh(true);
+  if (!shouldAutoQuoteProposals()) {
+    proposals = [];
+    quickDirectionQuotes = { CALL: null, PUT: null };
+    updateProposalDirectionButtons();
+    updateTradeProfitSummary();
+    renderTradeList();
+  } else {
+    renderTradeList();
+    scheduleProposalRefresh(true);
+  }
 }
 
 function rollExpiries() {
@@ -18910,6 +18965,14 @@ async function getProposal({ symbol, contractType, barrier, stake, durationSec, 
 
 function scheduleProposalRefresh(force = false) {
   if (!currentSymbol || !lastSpot) return;
+  if (!shouldAutoQuoteProposals()) {
+    proposals = [];
+    quickDirectionQuotes = { CALL: null, PUT: null };
+    proposalLoadingDirection = null;
+    lastProposalError = null;
+    renderTradeList();
+    return;
+  }
   if (calcInFlight) return;
   if (Date.now() < rateLimitUntil) return;
   const now = Date.now();
@@ -18936,7 +18999,7 @@ async function refreshProposals() {
     lastProposalError = null;
     const tradeMode = getActiveTradeMode();
     const isRiseFall = tradeMode === "rise_fall";
-    const stake = Number(stakeInput?.value || "0");
+    const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
     const primaryExpiry = proposalExpiries[0];
     quickDirectionQuotes = { CALL: null, PUT: null };
 
@@ -19037,7 +19100,7 @@ async function refreshProposals() {
         }
       }
     } else {
-      const offsetVal = Number(barrierInput?.value || "0");
+      const offsetVal = getBarrierOffsetValue();
       for (const expiry of proposalExpiries) {
         const nowSec = Math.floor(Date.now() / 1000);
         const durationSec = Math.max(minDurationSec, expiry - nowSec);
@@ -19207,14 +19270,26 @@ function renderTradeList() {
     return;
   }
 
-  const stake = Number(stakeInput?.value || "0");
+  const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
   const directionLabel = getDirectionLabel(currentDirection);
   const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
   const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
   const listItems = isRiseFall
-    ? proposals
+    ? (proposals.length
+      ? proposals
+      : expiryChoice?.mode === "fixed"
+        ? ["CALL", "PUT"].map((direction) => ({
+          direction,
+          payout: null,
+          profitPct: null,
+          proposalId: null,
+          askPrice: null,
+          expiry: null,
+          expiryLabel: expiryChoice.label,
+        }))
+        : [])
     : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
 
   if (isRiseFall && calcInFlight && !listItems.length) {
@@ -19227,8 +19302,13 @@ function renderTradeList() {
     const itemDirectionLabel = getDirectionLabel(itemDirection);
     const itemDirClass = itemDirection === "CALL" ? "higher" : "lower";
     const countdown = item.expiry ? formatCountdown(item.expiry) : item.expiryLabel || "--";
-    const barrierText = item.barrier == null ? "--" : formatPrice(item.barrier, currentPip);
-    const offsetText = item.offset == null ? "--" : formatOffset(item.offset, currentPip);
+    const fallbackBarrier = !isRiseFall && item.barrier == null ? getHigherLowerBarrier(itemDirection) : null;
+    const barrierText = item.barrier == null
+      ? fallbackBarrier?.display == null ? "--" : formatPrice(fallbackBarrier.display, currentPip)
+      : formatPrice(item.barrier, currentPip);
+    const offsetText = item.offset == null
+      ? fallbackBarrier?.offset == null ? "--" : formatOffset(fallbackBarrier.offset, currentPip)
+      : formatOffset(item.offset, currentPip);
     const profit = item.payout == null || !stake ? null : item.payout - stake;
     const profitText = profit == null ? "--" : profit.toFixed(2);
     const pctText = item.profitPct == null ? "--" : item.profitPct.toFixed(1);
@@ -19306,7 +19386,7 @@ function startCountdowns() {
     const changed = rollExpiries();
     renderTradeList();
     renderTradeResults();
-    if (changed) {
+    if (changed && shouldAutoQuoteProposals()) {
       scheduleProposalRefresh(true);
     }
   }, 1000);
@@ -19554,17 +19634,17 @@ async function init() {
 
     const proposalId = target.getAttribute("data-proposal");
     const priceStr = target.getAttribute("data-price");
-    if (!proposalId) {
-      setStatus("Proposal not ready yet", true);
-      return;
-    }
+    const rowDirection = target.getAttribute("data-direction");
     if (!activeToken || !isAuthorized) {
       setStatus("Please log in to execute trades.", true);
       beginDerivLogin().catch((err) => setStatus(err?.message || "Deriv login failed", true));
       return;
     }
-    const price = priceStr ? Number(priceStr) : Number(stakeInput?.value || "0");
-    const rowDirection = target.getAttribute("data-direction");
+    if (!proposalId) {
+      executeDirectionQuote(rowDirection === "PUT" ? "PUT" : rowDirection === "CALL" ? "CALL" : currentDirection);
+      return;
+    }
+    const price = priceStr ? Number(priceStr) : parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
     executeProposalBuy(proposalId, price, rowDirection === "PUT" ? "PUT" : rowDirection === "CALL" ? "CALL" : currentDirection);
   });
 
@@ -20138,6 +20218,7 @@ async function init() {
       zoomChartHorizontallyByTimeAxisDrag(deltaX, event.clientX);
     } else {
       panChartByPixels(deltaX);
+      panChartVertically(deltaY);
     }
   });
 
