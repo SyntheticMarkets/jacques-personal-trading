@@ -695,6 +695,7 @@ let chartLastTouchTapAt = 0;
 let chartTouchPointers = new Map();
 let chartPinchStartDistance = null;
 let chartPinchStartPoints = null;
+let chartPanDragRemainderX = 0;
 let chartTimeScaleDragRemainder = 0;
 let chartLongPressTimer = null;
 let replaySelectionState = null;
@@ -8979,22 +8980,14 @@ function renderMiniChart(candles) {
   if (range === 0) return;
   const rangePadding = Math.max(range * 0.08, Math.abs(rawMax) * 0.0002, 0.0000001);
   const baseSpan = range + (rangePadding * 2);
-  const minReadableSpan = Math.max(range * 0.72, rangePadding * 4, 0.0000001);
+  const minReadableSpan = Math.max(range + (rangePadding * 0.75), rangePadding * 4, 0.0000001);
   const maxReadableScale = Math.max(1, baseSpan / minReadableSpan);
   chartVerticalScale = clamp(chartVerticalScale, 0.5, Math.min(8, maxReadableScale));
   const scaledSpan = baseSpan / chartVerticalScale;
   const baseCenter = (rawMax + rawMin) / 2;
   const maxVerticalShift = Math.max(baseSpan * 0.75, rangePadding * 2);
   chartVerticalOffset = Math.max(-maxVerticalShift, Math.min(chartVerticalOffset, maxVerticalShift));
-  let center = baseCenter + chartVerticalOffset;
-  if (scaledSpan >= range) {
-    const minCenter = rawMax - (scaledSpan / 2) + (rangePadding * 0.35);
-    const maxCenter = rawMin + (scaledSpan / 2) - (rangePadding * 0.35);
-    if (minCenter <= maxCenter) {
-      center = clamp(center, minCenter, maxCenter);
-      chartVerticalOffset = center - baseCenter;
-    }
-  }
+  const center = baseCenter + chartVerticalOffset;
   const min = center - (scaledSpan / 2);
   const max = center + (scaledSpan / 2);
   // Candlesticks
@@ -12221,19 +12214,25 @@ function adjustSelectedDrawingHandle(point) {
   return updateChartDrawing(next);
 }
 
-function panChartByPixels(deltaX) {
+function panChartByPixels(deltaX, options = {}) {
   const built = getBuiltCandles();
   if (!miniChartCanvas || !built.length) {
     renderMiniChart(built);
-    return;
+    return false;
   }
   const plotWidth = Math.max(1, chartViewportState?.plotW || miniChartCanvas.clientWidth - 94);
-  const pixelsPerCandle = plotWidth / Math.max(1, chartPoints);
-  const candleShift = Math.round(deltaX / Math.max(1, pixelsPerCandle));
-  if (!candleShift) return;
+  const slotPixels = plotWidth / Math.max(1, chartPoints);
+  const pixelsPerCandle = clamp(slotPixels * 0.32, 8, 22);
+  const rawShiftPixels = chartPanDragRemainderX + deltaX;
+  const candleShift = rawShiftPixels > 0
+    ? Math.floor(rawShiftPixels / Math.max(1, pixelsPerCandle))
+    : Math.ceil(rawShiftPixels / Math.max(1, pixelsPerCandle));
+  chartPanDragRemainderX = rawShiftPixels - (candleShift * Math.max(1, pixelsPerCandle));
+  if (!candleShift) return false;
   const { min, max } = getChartOffsetBounds(built);
   chartOffset = clamp(chartOffset + candleShift, min, max);
-  renderMiniChart(built);
+  if (options.render !== false) renderMiniChart(built);
+  return true;
 }
 
 function getChartHorizontalZoomAnchor(clientX = null) {
@@ -12315,20 +12314,29 @@ function zoomChartHorizontally(pointsDelta, anchorClientX = null) {
   zoomChartHorizontallyByFactor(direction > 0 ? 1.08 : 1 / 1.08, anchorClientX);
 }
 
-function panChartVertically(deltaY) {
+function panChartVertically(deltaY, options = {}) {
   const built = getBuiltCandles();
   if (!miniChartCanvas || !built.length) {
     renderMiniChart(built);
-    return;
+    return false;
   }
   const { points } = getVisibleChartWindow(built);
-  if (!points.length) return;
+  if (!points.length) return false;
   const lows = points.map((c) => c.low);
   const highs = points.map((c) => c.high);
   const range = Math.max(0.0000001, Math.max(...highs) - Math.min(...lows));
-  const plotHeight = Math.max(1, miniChartCanvas.clientHeight - 12);
+  const plotHeight = Math.max(1, chartViewportState?.plotH || miniChartCanvas.clientHeight - 40);
   chartVerticalOffset += (deltaY / plotHeight) * range;
-  renderMiniChart(built);
+  if (options.render !== false) renderMiniChart(built);
+  return true;
+}
+
+function panChartFreely(deltaX, deltaY) {
+  const movedX = panChartByPixels(deltaX, { render: false });
+  const movedY = panChartVertically(deltaY, { render: false });
+  if (movedX || movedY) {
+    renderMiniChart(getBuiltCandles());
+  }
 }
 
 function scaleChartVertically(deltaY) {
@@ -12348,6 +12356,7 @@ function resetChartView() {
   chartDragX = null;
   chartDragY = null;
   chartDragMode = null;
+  chartPanDragRemainderX = 0;
   chartTimeScaleDragRemainder = 0;
   chartVerticalOffset = 0;
   chartVerticalScale = 1;
@@ -12359,6 +12368,7 @@ function resetChartViewportState({ render = true } = {}) {
   chartDragX = null;
   chartDragY = null;
   chartDragMode = null;
+  chartPanDragRemainderX = 0;
   chartTimeScaleDragRemainder = 0;
   chartGestureMoved = false;
   chartVerticalOffset = 0;
@@ -20126,6 +20136,7 @@ async function init() {
     } else {
       chartDragMode = inAxis ? "scale" : inTimeAxis ? "time-scale" : "pan";
       if (chartDragMode === "time-scale") chartTimeScaleDragRemainder = 0;
+      if (chartDragMode === "pan") chartPanDragRemainderX = 0;
     }
     chartGestureMoved = false;
     miniChartCanvas.setPointerCapture?.(event.pointerId);
@@ -20217,8 +20228,7 @@ async function init() {
     } else if (chartDragMode === "time-scale") {
       zoomChartHorizontallyByTimeAxisDrag(deltaX, event.clientX);
     } else {
-      panChartByPixels(deltaX);
-      panChartVertically(deltaY);
+      panChartFreely(deltaX, deltaY);
     }
   });
 
@@ -20229,6 +20239,7 @@ async function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartPanDragRemainderX = 0;
       chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       miniChartCanvas.releasePointerCapture?.(event.pointerId);
@@ -20242,6 +20253,7 @@ async function init() {
           chartPinchStartDistance = null;
           chartPinchStartPoints = null;
           chartDragMode = null;
+          chartPanDragRemainderX = 0;
           chartTimeScaleDragRemainder = 0;
           chartDragX = null;
           chartDragY = null;
@@ -20258,6 +20270,7 @@ async function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartPanDragRemainderX = 0;
       chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingHitCandidateId = null;
@@ -20269,6 +20282,7 @@ async function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartPanDragRemainderX = 0;
       chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       if (drawing) {
@@ -20288,6 +20302,7 @@ async function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartPanDragRemainderX = 0;
       chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingMoveOrigin = null;
@@ -20299,6 +20314,7 @@ async function init() {
       chartDragX = null;
       chartDragY = null;
       chartDragMode = null;
+      chartPanDragRemainderX = 0;
       chartTimeScaleDragRemainder = 0;
       chartGestureMoved = false;
       chartDrawingMoveOrigin = null;
@@ -20340,9 +20356,10 @@ async function init() {
     }
     chartDragX = null;
     chartDragY = null;
-      chartDragMode = null;
-      chartTimeScaleDragRemainder = 0;
-      chartGestureMoved = false;
+    chartDragMode = null;
+    chartPanDragRemainderX = 0;
+    chartTimeScaleDragRemainder = 0;
+    chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
     chartDrawingMoveOrigin = null;
     chartDrawingAdjustHandle = null;
@@ -20360,6 +20377,7 @@ async function init() {
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
+    chartPanDragRemainderX = 0;
     chartTimeScaleDragRemainder = 0;
     chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
@@ -20384,6 +20402,7 @@ async function init() {
     chartDragX = null;
     chartDragY = null;
     chartDragMode = null;
+    chartPanDragRemainderX = 0;
     chartTimeScaleDragRemainder = 0;
     chartGestureMoved = false;
     chartDrawingHitCandidateId = null;
