@@ -13883,14 +13883,28 @@ async function executeDirectionQuote(direction) {
 
   setStatus(`Getting ${getDirectionLabel(tradeDirection)} proposal...`);
   try {
-    const proposal = await getProposal({
-      symbol: currentSymbol,
-      contractType: tradeDirection,
-      barrier: barrierInfo?.barrier ?? null,
-      stake,
-      durationSec,
-      durationUnit,
-    });
+    let proposal;
+    try {
+      proposal = await getProposal({
+        symbol: currentSymbol,
+        contractType: tradeDirection,
+        barrier: barrierInfo?.barrier ?? null,
+        stake,
+        durationSec,
+        durationUnit,
+      });
+    } catch (err) {
+      const canRetryAbsoluteBarrier = barrierInfo?.display != null && /barrier/i.test(err?.message || "");
+      if (!canRetryAbsoluteBarrier) throw err;
+      proposal = await getProposal({
+        symbol: currentSymbol,
+        contractType: tradeDirection,
+        barrier: formatPrice(barrierInfo.display, currentPip),
+        stake,
+        durationSec,
+        durationUnit,
+      });
+    }
     const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
     const quote = {
       payout: proposal.payout,
@@ -18999,6 +19013,14 @@ function scheduleProposalRefresh(force = false) {
 async function refreshProposals() {
   if (calcInFlight) return;
   if (!currentSymbol || !lastSpot) return;
+  if (!shouldAutoQuoteProposals()) {
+    proposals = [];
+    quickDirectionQuotes = { CALL: null, PUT: null };
+    proposalLoadingDirection = null;
+    lastProposalError = null;
+    renderTradeList();
+    return;
+  }
 
   calcInFlight = true;
   const loadingDirectionAtStart = proposalLoadingDirection;
