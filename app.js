@@ -8980,12 +8980,10 @@ function renderMiniChart(candles) {
   if (range === 0) return;
   const rangePadding = Math.max(range * 0.08, Math.abs(rawMax) * 0.0002, 0.0000001);
   const baseSpan = range + (rangePadding * 2);
-  const minReadableSpan = Math.max(range + (rangePadding * 0.75), rangePadding * 4, 0.0000001);
-  const maxReadableScale = Math.max(1, baseSpan / minReadableSpan);
-  chartVerticalScale = clamp(chartVerticalScale, 0.5, Math.min(8, maxReadableScale));
+  chartVerticalScale = clamp(chartVerticalScale, 0.25, 12);
   const scaledSpan = baseSpan / chartVerticalScale;
   const baseCenter = (rawMax + rawMin) / 2;
-  const maxVerticalShift = Math.max(baseSpan * 0.75, rangePadding * 2);
+  const maxVerticalShift = Math.max(baseSpan * 3, rangePadding * 4);
   chartVerticalOffset = Math.max(-maxVerticalShift, Math.min(chartVerticalOffset, maxVerticalShift));
   const center = baseCenter + chartVerticalOffset;
   const min = center - (scaledSpan / 2);
@@ -12339,15 +12337,40 @@ function panChartFreely(deltaX, deltaY) {
   }
 }
 
-function scaleChartVertically(deltaY) {
+function scaleChartVertically(deltaY, anchorClientY = null) {
   const built = getBuiltCandles();
   if (!miniChartCanvas || !built.length) {
     renderMiniChart(built);
     return;
   }
-  const sensitivity = 0.006;
+  const viewport = chartViewportState;
+  const anchorY = Number.isFinite(anchorClientY) && miniChartCanvas
+    ? anchorClientY - miniChartCanvas.getBoundingClientRect().top
+    : viewport
+      ? viewport.topPad + (viewport.plotH * 0.5)
+      : null;
+  const anchorRatio = viewport && Number.isFinite(anchorY)
+    ? clamp((viewport.height - viewport.bottomPad - anchorY) / Math.max(1, viewport.plotH), 0, 1)
+    : 0.5;
+  const anchorPrice = viewport
+    ? viewport.min + (anchorRatio * (viewport.max - viewport.min))
+    : null;
+  const sensitivity = 0.0048;
   const nextScale = chartVerticalScale * Math.exp((-deltaY) * sensitivity);
-  chartVerticalScale = clamp(nextScale, 0.5, 8);
+  chartVerticalScale = clamp(nextScale, 0.25, 12);
+  if (viewport && Number.isFinite(anchorPrice)) {
+    const lows = viewport.points.map((c) => c.low);
+    const highs = viewport.points.map((c) => c.high);
+    const rawMin = Math.min(...lows);
+    const rawMax = Math.max(...highs);
+    const range = Math.max(0.0000001, rawMax - rawMin);
+    const rangePadding = Math.max(range * 0.08, Math.abs(rawMax) * 0.0002, 0.0000001);
+    const baseSpan = range + (rangePadding * 2);
+    const scaledSpan = baseSpan / chartVerticalScale;
+    const baseCenter = (rawMax + rawMin) / 2;
+    const desiredCenter = anchorPrice + (0.5 - anchorRatio) * scaledSpan;
+    chartVerticalOffset = desiredCenter - baseCenter;
+  }
   renderMiniChart(built);
 }
 
@@ -20246,7 +20269,7 @@ async function init() {
     } else if (chartDragMode === "crosshair") {
       updateChartCrosshairFromPointer(event);
     } else if (chartDragMode === "scale") {
-      scaleChartVertically(deltaY);
+      scaleChartVertically(deltaY, event.clientY);
     } else if (chartDragMode === "time-scale") {
       zoomChartHorizontallyByTimeAxisDrag(deltaX, event.clientX);
     } else {
