@@ -10071,28 +10071,6 @@ function renderMiniChart(candles) {
       const x = xForTime(time, true);
       return Number.isFinite(x) ? x : fallbackX;
     };
-    const drawSmcTag = (text, x, y, color, fill = "rgba(12, 17, 25, 0.9)") => {
-      if (!text || !Number.isFinite(x) || !Number.isFinite(y)) return;
-      ctx.save();
-      ctx.font = "bold 9px Segoe UI, sans-serif";
-      const padX = 6;
-      const boxW = ctx.measureText(text).width + padX * 2;
-      const boxH = 17;
-      const boxX = clamp(x - boxW / 2, leftPad + 2, width - rightPad - boxW - 2);
-      const boxY = clamp(y - boxH / 2, topPad + 2, topPad + plotH - boxH - 2);
-      ctx.fillStyle = fill;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = 1;
-      ctx.beginPath();
-      ctx.roundRect(boxX, boxY, boxW, boxH, 5);
-      ctx.fill();
-      ctx.stroke();
-      ctx.fillStyle = color;
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(text, boxX + boxW / 2, boxY + boxH / 2);
-      ctx.restore();
-    };
     const htfBias = engine.frames?.htf?.bias || "RANGE";
     const biasFill = htfBias === "BULLISH"
       ? "rgba(16, 185, 129, 0.045)"
@@ -10163,17 +10141,7 @@ function renderMiniChart(candles) {
       ctx.closePath();
       ctx.fill();
       ctx.restore();
-      if (signal === engine.signals[engine.signals.length - 1]) {
-        drawSmcTag(`${signal.direction} ${signal.grade || engine.grade} ${signal.confidence || engine.score}`, x, buy ? y - 24 : y + 24, color);
-      }
     });
-
-    if (engine.signal?.direction) {
-      const entryIndex = Number.isInteger(engine.signal.entryIndex) ? engine.signal.entryIndex : ltfFrame.candles?.length - 1;
-      const x = xForFrameIndex(ltfFrame, entryIndex, width - rightPad - 80);
-      const y = toY(Number(engine.signal.price));
-      drawSmcTag(`${engine.signal.direction} ${engine.signal.grade} ${engine.signal.confidence}%`, x, y, engine.signal.direction === "BUY" ? "#10b981" : "#ef4444");
-    }
 
     ctx.save();
     const panelW = Math.min(330, Math.max(235, plotW * 0.24));
