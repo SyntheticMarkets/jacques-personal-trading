@@ -8713,6 +8713,7 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
   if (!currentCandle) {
     throw new Error(`current candle end is below this market's minimum duration (${formatDurationLabel(durationLimits.minSec)})`);
   }
+  await activateDerivAccount(account, { silent: true, subscribeBalance: false });
   const proposal = await getProposal({
     symbol: signal.symbol,
     contractType: signal.direction,
@@ -8722,7 +8723,6 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
     durationUnit: "s",
   });
   const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
-  await activateDerivAccount(account, { silent: true, subscribeBalance: false });
   const res = await privateWsRequest({ buy: proposal.id, price: askPrice });
   const buy = res.buy;
   const contractId = buy?.contract_id ?? null;
@@ -13876,28 +13876,24 @@ async function executeDirectionQuote(direction) {
 
   setStatus(`Getting ${getDirectionLabel(tradeDirection)} proposal...`);
   try {
-    let proposal;
-    try {
-      proposal = await getProposal({
+    const proposal = barrierInfo
+      ? await getBarrierProposal({
+        symbol: currentSymbol,
+        direction: tradeDirection,
+        barrier: barrierInfo.barrier,
+        fallbackBarrier: formatPrice(barrierInfo.display, currentPip),
+        stake,
+        durationSec,
+        durationUnit,
+      })
+      : await getProposal({
         symbol: currentSymbol,
         contractType: tradeDirection,
-        barrier: barrierInfo?.barrier ?? null,
+        barrier: null,
         stake,
         durationSec,
         durationUnit,
       });
-    } catch (err) {
-      const canRetryAbsoluteBarrier = barrierInfo?.display != null && /barrier/i.test(err?.message || "");
-      if (!canRetryAbsoluteBarrier) throw err;
-      proposal = await getProposal({
-        symbol: currentSymbol,
-        contractType: tradeDirection,
-        barrier: formatPrice(barrierInfo.display, currentPip),
-        stake,
-        durationSec,
-        durationUnit,
-      });
-    }
     const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
     const quote = {
       payout: proposal.payout,
@@ -18961,22 +18957,65 @@ function rollExpiries() {
   return changed;
 }
 
+function getApiProposalContractType(contractType, barrier = null) {
+  const hasBarrier = barrier != null && barrier !== "";
+  if (hasBarrier && contractType === "CALL") return "HIGHER";
+  if (hasBarrier && contractType === "PUT") return "LOWER";
+  return contractType;
+}
+
 async function getProposal({ symbol, contractType, barrier, stake, durationSec, durationUnit = "s" }) {
+  const numericStake = Number(stake);
+  const apiContractType = getApiProposalContractType(contractType, barrier);
   const payload = {
     proposal: 1,
-    amount: stake,
+    amount: numericStake,
     basis: "stake",
-    contract_type: contractType,
+    contract_type: apiContractType,
     duration: Math.max(1, Math.floor(durationSec)),
     duration_unit: durationUnit,
-    symbol,
-    currency: "USD",
+    underlying_symbol: symbol,
+    currency: activeAccountCurrency || "USD",
   };
   if (barrier != null && barrier !== "") {
     payload.barrier = barrier;
   }
-  const res = await wsRequest(payload);
-  return res.proposal;
+  const request = activeToken && isAuthorized && activeAuthWsUrl ? privateWsRequest : wsRequest;
+  const res = await request(payload);
+  const proposal = res.proposal || {};
+  const payout = Number(proposal.payout);
+  const askPrice = Number(proposal.ask_price);
+  const buyPrice = Number(proposal.buy_price);
+  return {
+    ...proposal,
+    payout: Number.isFinite(payout) ? payout : proposal.payout,
+    ask_price: Number.isFinite(askPrice) ? askPrice : proposal.ask_price,
+    buy_price: Number.isFinite(buyPrice) ? buyPrice : proposal.buy_price,
+  };
+}
+
+async function getBarrierProposal({ symbol, direction, barrier, fallbackBarrier, stake, durationSec, durationUnit = "s" }) {
+  try {
+    return await getProposal({
+      symbol,
+      contractType: direction,
+      barrier,
+      stake,
+      durationSec,
+      durationUnit,
+    });
+  } catch (err) {
+    const canRetryAbsoluteBarrier = fallbackBarrier != null && /barrier/i.test(err?.message || "");
+    if (!canRetryAbsoluteBarrier) throw err;
+    return getProposal({
+      symbol,
+      contractType: direction,
+      barrier: fallbackBarrier,
+      stake,
+      durationSec,
+      durationUnit,
+    });
+  }
 }
 
 function scheduleProposalRefresh(force = false) {
@@ -19098,10 +19137,11 @@ async function refreshProposals() {
         const signedOffset = currentDirection === "CALL" ? offsetVal : -offsetVal;
         const barrier = formatOffset(signedOffset, currentPip);
         try {
-          const proposal = await getProposal({
+          const proposal = await getBarrierProposal({
             symbol: currentSymbol,
-            contractType: currentDirection,
+            direction: currentDirection,
             barrier,
+            fallbackBarrier: formatPrice(spot + signedOffset, currentPip),
             stake,
             durationSec,
           });
