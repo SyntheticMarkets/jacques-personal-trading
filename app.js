@@ -4,7 +4,7 @@
 const DERIV_LEGACY_APP_ID = 101122;
 const DERIV_NEW_APP_ID = "33A3COZawHjD8XFQlwkg9";
 const DERIV_OAUTH_APP_ID = DERIV_NEW_APP_ID;
-const DERIV_OAUTH_SCOPE = "trade account_manage";
+const DERIV_OAUTH_SCOPE = "trade";
 const DERIV_AUTH_URL = "https://auth.deriv.com/oauth2/auth";
 const DERIV_PUBLIC_WS_URL = "wss://api.derivws.com/trading/v1/options/ws/public";
 const DERIV_AUTH_STATE_KEY = "deriv_oauth_pkce_state_v1";
