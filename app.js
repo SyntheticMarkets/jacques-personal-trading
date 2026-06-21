@@ -12188,7 +12188,7 @@ function panChartByPixels(deltaX, options = {}) {
   }
   const plotWidth = Math.max(1, chartViewportState?.plotW || miniChartCanvas.clientWidth - 94);
   const slotPixels = plotWidth / Math.max(1, chartPoints);
-  const pixelsPerCandle = clamp(slotPixels * 0.32, 8, 22);
+  const pixelsPerCandle = clamp(slotPixels, 1, 22);
   const rawShiftPixels = chartPanDragRemainderX + deltaX;
   const candleShift = rawShiftPixels > 0
     ? Math.floor(rawShiftPixels / Math.max(1, pixelsPerCandle))
@@ -13399,7 +13399,7 @@ async function setChartTimeframe(seconds, options = {}) {
   if (wasReplayMode && !shouldLoad) {
     replayEngine.reloadFromLiveHistory({ anchorTime: replayAnchorTime });
   }
-  if (isRiseFallCandleEndExpiry()) {
+  if (isCandleEndTradeExpiry()) {
     buildExpiries();
   }
 }
@@ -13822,6 +13822,10 @@ function getRiseFallExpiryValue() {
   return mainRiseFallExpirySelectEl?.value || riseFallExpirySelectEl?.value || "candle_end";
 }
 
+function getTradeExpiryChoice() {
+  return parseRiseFallExpiryChoice(getRiseFallExpiryValue());
+}
+
 function syncRiseFallExpiryControls(sourceEl = null) {
   const value = sourceEl?.value || getRiseFallExpiryValue();
   if (mainRiseFallExpirySelectEl && mainRiseFallExpirySelectEl !== sourceEl && mainRiseFallExpirySelectEl.value !== value) {
@@ -13845,26 +13849,24 @@ async function executeDirectionQuote(direction) {
     return false;
   }
   const isRiseFall = getActiveTradeMode() === "rise_fall";
-  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
+  const expiryChoice = getTradeExpiryChoice();
   let durationSec;
   let durationUnit = "s";
   let expiry = proposalExpiries[0];
   let barrierInfo = null;
-  if (isRiseFall && expiryChoice.mode === "candle_end") {
+  if (expiryChoice.mode === "candle_end") {
     if (!expiry) buildExpiries();
     expiry = proposalExpiries[0];
     const nowSec = Math.floor(Date.now() / 1000);
     durationSec = Math.max(minDurationSec, (expiry || nowSec + minDurationSec) - nowSec);
-  } else if (isRiseFall) {
+  } else {
     const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
     durationSec = effectiveExpiry.seconds;
     durationUnit = effectiveExpiry.unit;
     expiry = durationUnit === "s" ? Math.floor(Date.now() / 1000) + durationSec : null;
-  } else {
-    if (!expiry) buildExpiries();
-    expiry = proposalExpiries[0];
-    const nowSec = Math.floor(Date.now() / 1000);
-    durationSec = Math.max(minDurationSec, (expiry || nowSec + minDurationSec) - nowSec);
+  }
+
+  if (!isRiseFall) {
     barrierInfo = getHigherLowerBarrier(tradeDirection);
     if (!barrierInfo) {
       setStatus("Enter a valid barrier offset first", true);
@@ -17647,8 +17649,8 @@ function setActiveTab(tabName, options = {}) {
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
   if (sidebarBarrierFieldEl) sidebarBarrierFieldEl.style.display = isHL ? "block" : "none";
-  if (riseFallExpiryFieldEl) riseFallExpiryFieldEl.style.display = isRiseFall ? "block" : "none";
-  if (mainRiseFallExpiryFieldEl) mainRiseFallExpiryFieldEl.style.display = isRiseFall ? "block" : "none";
+  if (riseFallExpiryFieldEl) riseFallExpiryFieldEl.style.display = "block";
+  if (mainRiseFallExpiryFieldEl) mainRiseFallExpiryFieldEl.style.display = "block";
   syncRiseFallExpiryControls();
   proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
@@ -18902,13 +18904,12 @@ function setExpiryMinutes(minutes) {
   buildExpiries();
 }
 
-function isRiseFallCandleEndExpiry() {
-  return getActiveTradeMode() === "rise_fall"
-    && parseRiseFallExpiryChoice(getRiseFallExpiryValue()).mode === "candle_end";
+function isCandleEndTradeExpiry() {
+  return getTradeExpiryChoice().mode === "candle_end";
 }
 
 function shouldAutoQuoteProposals() {
-  return isRiseFallCandleEndExpiry();
+  return isCandleEndTradeExpiry();
 }
 
 function buildCandleEndExpiries(now, step) {
@@ -18922,10 +18923,10 @@ function buildCandleEndExpiries(now, step) {
 
 function buildExpiries() {
   const now = Math.floor(Date.now() / 1000);
-  const step = isRiseFallCandleEndExpiry()
+  const step = isCandleEndTradeExpiry()
     ? Math.max(1, getChartTimeframeSeconds())
     : baseMinutes * 60;
-  if (isRiseFallCandleEndExpiry()) {
+  if (isCandleEndTradeExpiry()) {
     proposalExpiries = buildCandleEndExpiries(now, step);
   } else {
     const minHold = Math.max(minDurationSec, step);
@@ -18951,7 +18952,7 @@ function rollExpiries() {
   while (proposalExpiries.length && proposalExpiries[0] - now <= minDurationSec) {
     proposalExpiries.shift();
     const last = proposalExpiries[proposalExpiries.length - 1] || now;
-    const step = isRiseFallCandleEndExpiry()
+    const step = isCandleEndTradeExpiry()
       ? Math.max(1, getChartTimeframeSeconds())
       : baseMinutes * 60;
     proposalExpiries.push(last + step);
@@ -19027,7 +19028,7 @@ async function refreshProposals() {
     quickDirectionQuotes = { CALL: null, PUT: null };
 
     if (isRiseFall) {
-      const expiryChoice = parseRiseFallExpiryChoice(getRiseFallExpiryValue());
+      const expiryChoice = getTradeExpiryChoice();
       proposals = [];
       if (expiryChoice.mode === "candle_end") {
         const visibleExpiries = proposalExpiries.slice(0, 2);
@@ -19078,47 +19079,6 @@ async function refreshProposals() {
                 proposals.push({ expiry, direction, payout: null, profitPct: null, proposalId: null, askPrice: null, expiryLabel });
               }
             }
-          }
-        }
-      } else if (primaryExpiry && stake) {
-        const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
-        const durationSec = effectiveExpiry.seconds;
-        const durationUnit = effectiveExpiry.unit;
-        const displayExpiry = durationUnit === "s"
-          ? Math.floor(Date.now() / 1000) + durationSec
-          : null;
-        for (const direction of ["CALL", "PUT"]) {
-          try {
-            const proposal = await getProposal({
-              symbol: currentSymbol,
-              contractType: direction,
-              barrier: null,
-              stake,
-              durationSec,
-              durationUnit,
-            });
-            const payout = proposal.payout;
-            quickDirectionQuotes[direction] = {
-              payout,
-              profitPct: stake ? ((payout - stake) / stake) * 100 : null,
-              proposalId: proposal.id,
-              askPrice: proposal.ask_price ?? proposal.buy_price ?? stake,
-              barrier: null,
-              offset: null,
-              expiry: displayExpiry,
-              expiryLabel: durationUnit === "t" ? expiryChoice.label : formatDurationLabel(durationSec),
-            };
-            proposals.push({
-              ...quickDirectionQuotes[direction],
-              direction,
-            });
-            ok += 1;
-          } catch (err) {
-            lastProposalError = err?.message || "Proposal error";
-            if (lastProposalError.toLowerCase().includes("rate limit")) {
-              rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
-            }
-            quickDirectionQuotes[direction] = null;
           }
         }
       }
@@ -19298,22 +19258,21 @@ function renderTradeList() {
   const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
-  const expiryChoice = isRiseFall ? parseRiseFallExpiryChoice(getRiseFallExpiryValue()) : null;
-  const listItems = isRiseFall
-    ? (proposals.length
+  const expiryChoice = getTradeExpiryChoice();
+  const fixedExpiryItems = ["CALL", "PUT"].map((direction) => ({
+    direction,
+    payout: null,
+    profitPct: null,
+    proposalId: null,
+    askPrice: null,
+    expiry: null,
+    expiryLabel: expiryChoice.label,
+  }));
+  const listItems = expiryChoice.mode === "fixed"
+    ? fixedExpiryItems
+    : isRiseFall
       ? proposals
-      : expiryChoice?.mode === "fixed"
-        ? ["CALL", "PUT"].map((direction) => ({
-          direction,
-          payout: null,
-          profitPct: null,
-          proposalId: null,
-          askPrice: null,
-          expiry: null,
-          expiryLabel: expiryChoice.label,
-        }))
-        : [])
-    : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
+      : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
 
   if (isRiseFall && calcInFlight && !listItems.length) {
     tradeListEl.innerHTML = "";
@@ -19338,13 +19297,15 @@ function renderTradeList() {
     const proposalId = item.proposalId ? `data-proposal=\"${item.proposalId}\"` : "";
     const priceAttr = item.askPrice != null ? `data-price=\"${item.askPrice}\"` : "";
     const directionAttr = itemDirection ? `data-direction=\"${itemDirection}\"` : "";
+    const expiryText = `Expiry: ${item.expiryLabel || "Candle end"}${item.expiry ? ` (${countdown})` : ""}`;
     const metaText = isRiseFall
-      ? `Expiry: ${item.expiryLabel || "Candle end"}${item.expiry ? ` (${countdown})` : ""}`
-      : `Barrier: ${barrierText} (offset ${offsetText})`;
+      ? expiryText
+      : `${expiryText} • Barrier: ${barrierText} (offset ${offsetText})`;
+    const titleTimeText = item.expiry ? `ends in ${countdown}` : item.expiryLabel || "on click";
     return `
       <div class="trade-row">
         <button class="trade-btn ${itemDirClass}" data-expiry="${item.expiry || ""}" ${directionAttr} ${proposalId} ${priceAttr}>
-          <div class="trade-title"><span class="trade-tag">${itemDirectionLabel}</span> • ends in ${countdown}</div>
+          <div class="trade-title"><span class="trade-tag">${itemDirectionLabel}</span> • ${titleTimeText}</div>
           <div class="trade-meta">Profit: ${profitText} (${pctText}%)</div>
           <div class="trade-meta">${metaText}</div>
         </button>
@@ -20775,12 +20736,10 @@ async function init() {
   });
   riseFallExpirySelectEl?.addEventListener("change", () => {
     syncRiseFallExpiryControls(riseFallExpirySelectEl);
-    if (getActiveTradeMode() !== "rise_fall") return;
     buildExpiries();
   });
   mainRiseFallExpirySelectEl?.addEventListener("change", () => {
     syncRiseFallExpiryControls(mainRiseFallExpirySelectEl);
-    if (getActiveTradeMode() !== "rise_fall") return;
     buildExpiries();
   });
   generateBacktestSignalBtn?.addEventListener("click", handleGenerateBacktestSignalClick);
