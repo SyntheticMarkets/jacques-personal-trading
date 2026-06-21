@@ -53,6 +53,19 @@ let mainRiseFallExpiryFieldEl;
 let mainRiseFallExpirySelectEl;
 let sidebarStakeInputEl;
 let sidebarBarrierInputEl;
+let advancedTradeFieldsEl;
+let barrierModeFieldEl;
+let barrierModeSelectEl;
+let barrierValueFieldEl;
+let barrierValueInputEl;
+let multiplierValueFieldEl;
+let multiplierValueInputEl;
+let multiplierTpFieldEl;
+let multiplierTpInputEl;
+let multiplierSlFieldEl;
+let multiplierSlInputEl;
+let multiplierCancelFieldEl;
+let multiplierCancelSelectEl;
 let tradeProfitSummaryEl;
 let tradeResultsEl;
 let toggleProposalsBtn;
@@ -66,6 +79,9 @@ let symbolsByMarket = new Map();
 let symbolsByTradeMode = {
   rise_fall: new Map(),
   higher_lower: new Map(),
+  touch_no_touch: new Map(),
+  multipliers: new Map(),
+  vanillas: new Map(),
 };
 let tickStreamId = null;
 let currentSymbol = null;
@@ -123,6 +139,8 @@ let balanceSubscribeInFlightLoginId = null;
 let tradeResults = [];
 let openContractSubs = new Map();
 let autoTradeResults = [];
+let tradeChartMarkers = new Map();
+let tradeChartMarkerRedrawTimer = null;
 let autoTradeEnabled = false;
 let autoTradeLoginId = "";
 let lastAutoTradeCandle = null;
@@ -1174,6 +1192,253 @@ function getChartPlotBounds(viewport = chartViewportState) {
     top: viewport.topPad,
     bottom: viewport.height - viewport.bottomPad,
   };
+}
+
+function toFiniteNumber(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function getTradeMarkerSymbol(contract, fallbackSymbol) {
+  return contract?.underlying_symbol
+    || contract?.underlying
+    || contract?.symbol
+    || fallbackSymbol
+    || currentSymbol
+    || null;
+}
+
+function scheduleTradeMarkerRedraw(delayMs = 10100) {
+  clearTimeout(tradeChartMarkerRedrawTimer);
+  tradeChartMarkerRedrawTimer = setTimeout(() => {
+    tradeChartMarkerRedrawTimer = null;
+    renderMiniChart(getBuiltCandles());
+  }, delayMs);
+}
+
+function upsertTradeChartMarkerFromBuy({ contractId, symbol, direction, entryPrice, entryTime }) {
+  if (!contractId || contractId === "--") return;
+  const nowSec = Math.floor(Date.now() / 1000);
+  const key = String(contractId);
+  const marker = tradeChartMarkers.get(key) || {};
+  tradeChartMarkers.set(key, {
+    ...marker,
+    contractId,
+    symbol: symbol || marker.symbol || currentSymbol,
+    direction: direction || marker.direction || currentDirection,
+    entryPrice: toFiniteNumber(entryPrice) ?? marker.entryPrice ?? toFiniteNumber(lastSpot),
+    entryTime: toFiniteNumber(entryTime) ?? marker.entryTime ?? nowSec,
+    isClosed: marker.isClosed || false,
+  });
+  renderMiniChart(getBuiltCandles());
+}
+
+function upsertTradeChartMarkerFromContract(contract, previousTrade) {
+  const contractId = contract?.contract_id;
+  if (!contractId) return;
+  const key = String(contractId);
+  const existing = tradeChartMarkers.get(key) || {};
+  const nowSec = Math.floor(Date.now() / 1000);
+  const isClosed = Boolean(contract.is_sold ?? contract.status === "sold");
+  const entryPrice = toFiniteNumber(contract.entry_spot)
+    ?? toFiniteNumber(contract.entry_tick)
+    ?? existing.entryPrice
+    ?? toFiniteNumber(lastSpot);
+  const entryTime = toFiniteNumber(contract.date_start)
+    ?? toFiniteNumber(contract.purchase_time)
+    ?? existing.entryTime
+    ?? nowSec;
+  const exitPrice = toFiniteNumber(contract.exit_tick)
+    ?? toFiniteNumber(contract.sell_spot)
+    ?? (isClosed ? toFiniteNumber(contract.current_spot) : null)
+    ?? existing.exitPrice;
+  const exitTime = toFiniteNumber(contract.date_expiry)
+    ?? toFiniteNumber(contract.date_settlement)
+    ?? (isClosed ? nowSec : null)
+    ?? existing.exitTime;
+  const profit = toFiniteNumber(contract.profit) ?? existing.profit ?? toFiniteNumber(previousTrade?.profit);
+  const closedAtMs = isClosed ? (existing.closedAtMs || Date.now()) : null;
+  tradeChartMarkers.set(key, {
+    ...existing,
+    contractId,
+    symbol: getTradeMarkerSymbol(contract, previousTrade?.symbol || existing.symbol),
+    direction: contract.contract_type || previousTrade?.direction || existing.direction || currentDirection,
+    entryPrice,
+    entryTime,
+    exitPrice,
+    exitTime,
+    profit,
+    isClosed,
+    closedAtMs,
+  });
+  if (isClosed) scheduleTradeMarkerRedraw();
+  if (tradeChartMarkers.size > 40) {
+    Array.from(tradeChartMarkers.entries())
+      .filter(([, marker]) => marker.isClosed)
+      .sort((a, b) => (a[1].closedAtMs || 0) - (b[1].closedAtMs || 0))
+      .slice(0, Math.max(0, tradeChartMarkers.size - 40))
+      .forEach(([markerKey]) => tradeChartMarkers.delete(markerKey));
+  }
+  renderMiniChart(getBuiltCandles());
+}
+
+function renderTradeChartMarkers(ctx, viewport = chartViewportState) {
+  if (!viewport || !tradeChartMarkers.size) return;
+  const bounds = getChartPlotBounds(viewport);
+  if (!bounds) return;
+  const now = Date.now();
+  const activeSymbol = currentSymbol || symbolSelect?.value || null;
+  ctx.save();
+  ctx.font = "700 11px Inter, Segoe UI, sans-serif";
+  ctx.textBaseline = "middle";
+  for (const marker of tradeChartMarkers.values()) {
+    if (activeSymbol && marker.symbol && marker.symbol !== activeSymbol) continue;
+    const entryPrice = toFiniteNumber(marker.entryPrice);
+    const entryTime = toFiniteNumber(marker.entryTime);
+    if (entryPrice == null || entryTime == null) continue;
+    const entryX = getChartXForTime(entryTime, viewport);
+    const entryY = viewport.toY(entryPrice);
+    if (!Number.isFinite(entryX) || !Number.isFinite(entryY)) continue;
+    const visibleEntryX = clamp(entryX, bounds.left, bounds.right);
+    const visibleEntryY = clamp(entryY, bounds.top, bounds.bottom);
+    const showEntryCross = !marker.isClosed || !marker.closedAtMs || now - marker.closedAtMs < 10000;
+    if (showEntryCross) {
+      ctx.strokeStyle = "rgba(45, 140, 255, 0.72)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([6, 5]);
+      ctx.beginPath();
+      ctx.moveTo(visibleEntryX, bounds.top);
+      ctx.lineTo(visibleEntryX, bounds.bottom);
+      ctx.moveTo(Math.max(bounds.left, visibleEntryX), visibleEntryY);
+      ctx.lineTo(bounds.right, visibleEntryY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const label = `Entry ${formatPrice(entryPrice, currentPip)}`;
+      const labelW = Math.max(70, ctx.measureText(label).width + 14);
+      const labelX = clamp(bounds.right - labelW - 8, bounds.left + 4, bounds.right - labelW);
+      const labelY = clamp(visibleEntryY - 14, bounds.top + 12, bounds.bottom - 12);
+      ctx.fillStyle = "rgba(45, 140, 255, 0.92)";
+      ctx.beginPath();
+      ctx.roundRect(labelX, labelY - 10, labelW, 20, 6);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, labelX + 7, labelY);
+    }
+    if (marker.isClosed && marker.exitPrice != null && marker.exitTime != null) {
+      const exitX = getChartXForTime(Number(marker.exitTime), viewport);
+      const exitY = viewport.toY(Number(marker.exitPrice));
+      if (!Number.isFinite(exitX) || !Number.isFinite(exitY)) continue;
+      const clippedExitX = clamp(exitX, bounds.left, bounds.right);
+      const clippedExitY = clamp(exitY, bounds.top, bounds.bottom);
+      const won = Number(marker.profit || 0) >= 0;
+      const color = won ? "#10b981" : "#ef4444";
+      ctx.strokeStyle = won ? "rgba(16, 185, 129, 0.75)" : "rgba(239, 68, 68, 0.75)";
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([3, 5]);
+      ctx.beginPath();
+      ctx.moveTo(visibleEntryX, visibleEntryY);
+      ctx.lineTo(clippedExitX, clippedExitY);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      const flagText = marker.profit == null ? (won ? "WIN" : "LOSS") : `${won ? "+" : ""}${Number(marker.profit).toFixed(2)}`;
+      const flagW = Math.max(48, ctx.measureText(flagText).width + 16);
+      const flagX = clamp(clippedExitX + 8, bounds.left + 2, bounds.right - flagW - 2);
+      const flagY = clamp(clippedExitY - 14, bounds.top + 12, bounds.bottom - 12);
+      ctx.fillStyle = color;
+      ctx.beginPath();
+      ctx.moveTo(clippedExitX, clippedExitY);
+      ctx.lineTo(flagX, flagY - 9);
+      ctx.lineTo(flagX, flagY + 9);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.roundRect(flagX, flagY - 10, flagW, 20, 6);
+      ctx.fill();
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(flagText, flagX + 8, flagY);
+    }
+  }
+  ctx.restore();
+}
+
+function renderTradeSetupLine(ctx, viewport, price, color, label, dash = [7, 5]) {
+  const bounds = getChartPlotBounds(viewport);
+  if (!bounds || price == null || !Number.isFinite(Number(price))) return;
+  const y = viewport.toY(Number(price));
+  if (!Number.isFinite(y)) return;
+  const clippedY = clamp(y, bounds.top, bounds.bottom);
+  const labelText = `${label} ${formatPrice(Number(price), currentPip)}`;
+  ctx.save();
+  ctx.strokeStyle = color;
+  ctx.lineWidth = 1.4;
+  ctx.setLineDash(dash);
+  ctx.beginPath();
+  ctx.moveTo(bounds.left, clippedY);
+  ctx.lineTo(bounds.right, clippedY);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.font = "700 11px Inter, Segoe UI, sans-serif";
+  ctx.textBaseline = "middle";
+  const labelW = Math.max(64, ctx.measureText(labelText).width + 16);
+  const labelH = 20;
+  const labelX = clamp(bounds.right - labelW - 8, bounds.left + 4, bounds.right - labelW - 4);
+  const labelY = clamp(clippedY - labelH / 2, bounds.top + 2, bounds.bottom - labelH - 2);
+  ctx.fillStyle = color;
+  ctx.beginPath();
+  ctx.roundRect(labelX, labelY, labelW, labelH, 6);
+  ctx.fill();
+  ctx.fillStyle = "#ffffff";
+  ctx.fillText(labelText, labelX + 8, labelY + labelH / 2);
+  ctx.restore();
+}
+
+function getMultiplierPreviewPrices(direction = currentDirection) {
+  const spot = toFiniteNumber(lastSpot);
+  if (spot == null) return null;
+  const stake = Math.max(0, parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0));
+  const settings = getMultiplierSettings();
+  const sensitivity = Math.max(stake * settings.multiplier, 1);
+  const minDelta = Math.max(currentPip || 0.0001, Math.abs(spot) * 0.0005);
+  const priceFromLimit = (amount) => {
+    if (!amount || amount <= 0) return null;
+    return Math.max(minDelta, Math.abs(spot) * (amount / sensitivity) * 0.01);
+  };
+  const tpDelta = priceFromLimit(settings.limitOrder?.take_profit);
+  const slDelta = priceFromLimit(settings.limitOrder?.stop_loss);
+  const isUp = direction !== "PUT";
+  return {
+    takeProfit: tpDelta == null ? null : spot + (isUp ? tpDelta : -tpDelta),
+    stopLoss: slDelta == null ? null : spot + (isUp ? -slDelta : slDelta),
+  };
+}
+
+function renderTradeSetupPreview(ctx, viewport = chartViewportState) {
+  if (!viewport || !lastSpot) return;
+  const tradeMode = getActiveTradeMode();
+  if (tradeMode === "higher_lower") {
+    const barrierInfo = getHigherLowerBarrier(currentDirection);
+    if (barrierInfo?.display != null) {
+      renderTradeSetupLine(ctx, viewport, barrierInfo.display, "rgba(250, 204, 21, 0.9)", `${getDirectionLabel(currentDirection)} barrier`);
+    }
+    return;
+  }
+  if (tradeMode === "touch_no_touch") {
+    const barrierInfo = getAdvancedBarrierInfo();
+    if (barrierInfo?.display != null) {
+      renderTradeSetupLine(ctx, viewport, barrierInfo.display, "rgba(250, 204, 21, 0.9)", "Touch barrier");
+    }
+    return;
+  }
+  if (tradeMode === "multipliers") {
+    const preview = getMultiplierPreviewPrices(currentDirection);
+    if (!preview) return;
+    if (preview.takeProfit != null) {
+      renderTradeSetupLine(ctx, viewport, preview.takeProfit, "rgba(16, 185, 129, 0.88)", "TP");
+    }
+    if (preview.stopLoss != null) {
+      renderTradeSetupLine(ctx, viewport, preview.stopLoss, "rgba(239, 68, 68, 0.88)", "SL");
+    }
+  }
 }
 
 function getExtendedLinePoints(x1, y1, x2, y2, viewport = chartViewportState) {
@@ -8741,6 +9006,13 @@ async function buyAutoScannerProposal(signal, account, stake, timeframeSeconds) 
     symbol: signal.displayName || signal.symbol,
   });
   autoTradeResults = autoTradeResults.slice(0, 100);
+  upsertTradeChartMarkerFromBuy({
+    contractId,
+    symbol: signal.symbol,
+    direction: signal.direction,
+    entryPrice: null,
+    entryTime: Math.floor(Date.now() / 1000),
+  });
   renderAutoTradeResults();
   subscribeOpenContract(contractId);
   scheduleAutoContractCloseCheck(contractId, currentCandle.expiry);
@@ -11643,6 +11915,8 @@ function renderMiniChart(candles) {
     });
   }
 
+  renderTradeChartMarkers(ctx, chartViewportState);
+  renderTradeSetupPreview(ctx, chartViewportState);
   renderChartDrawings(ctx, chartViewportState);
 
   // Current price dot and right-side labels
@@ -13803,15 +14077,52 @@ function getHigherLowerBarrier(direction = currentDirection) {
   };
 }
 
+function getAdvancedBarrierInfo() {
+  const rawValue = parseTradeNumber(barrierValueInputEl?.value ?? sidebarBarrierInputEl?.value ?? barrierInput?.value, 0);
+  if (!rawValue) return null;
+  const mode = barrierModeSelectEl?.value || "positive";
+  if (mode === "absolute") {
+    return {
+      offset: null,
+      barrier: formatPrice(rawValue, currentPip),
+      display: rawValue,
+      mode,
+    };
+  }
+  const signedOffset = mode === "negative" ? -Math.abs(rawValue) : Math.abs(rawValue);
+  return {
+    offset: signedOffset,
+    barrier: formatOffset(signedOffset, currentPip),
+    display: (lastSpot ?? 0) + signedOffset,
+    mode,
+  };
+}
+
+function getTradeModeLabel(mode = getActiveTradeMode()) {
+  if (mode === "rise_fall") return "Rise/Fall";
+  if (mode === "higher_lower") return "Higher/Lower";
+  if (mode === "touch_no_touch") return "Touch/No Touch";
+  if (mode === "multipliers") return "Multipliers";
+  if (mode === "vanillas") return "Vanillas";
+  return "Trade";
+}
+
 function getActiveTradeMode() {
   const activeTab = Array.from(tabs || []).find((tab) => tab.classList.contains("active"));
-  return activeTab?.dataset.tab === "rise_fall" ? "rise_fall" : "higher_lower";
+  const mode = activeTab?.dataset.tab;
+  return ["rise_fall", "higher_lower", "touch_no_touch", "multipliers", "vanillas"].includes(mode)
+    ? mode
+    : "higher_lower";
 }
 
 function getDirectionLabel(direction) {
-  const isRiseFall = getActiveTradeMode() === "rise_fall";
-  if (direction === "PUT") return isRiseFall ? "Fall" : "Lower";
-  return isRiseFall ? "Rise" : "Higher";
+  const mode = getActiveTradeMode();
+  if (mode === "rise_fall") return direction === "PUT" ? "Fall" : "Rise";
+  if (mode === "higher_lower") return direction === "PUT" ? "Lower" : "Higher";
+  if (mode === "touch_no_touch") return direction === "PUT" ? "No Touch" : "Touch";
+  if (mode === "multipliers") return direction === "PUT" ? "Mult Down" : "Mult Up";
+  if (mode === "vanillas") return direction === "PUT" ? "Put" : "Call";
+  return direction === "PUT" ? "Sell" : "Buy";
 }
 
 function getQuoteForDirection(direction) {
@@ -13848,13 +14159,16 @@ async function executeDirectionQuote(direction) {
     setStatus("Enter a valid stake first", true);
     return false;
   }
-  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const tradeMode = getActiveTradeMode();
   const expiryChoice = getTradeExpiryChoice();
   let durationSec;
   let durationUnit = "s";
   let expiry = proposalExpiries[0];
-  let barrierInfo = null;
-  if (expiryChoice.mode === "candle_end") {
+  if (tradeMode === "multipliers") {
+    durationSec = 1;
+    durationUnit = "s";
+    expiry = null;
+  } else if (expiryChoice.mode === "candle_end") {
     if (!expiry) buildExpiries();
     expiry = proposalExpiries[0];
     const nowSec = Math.floor(Date.now() / 1000);
@@ -13866,34 +14180,16 @@ async function executeDirectionQuote(direction) {
     expiry = durationUnit === "s" ? Math.floor(Date.now() / 1000) + durationSec : null;
   }
 
-  if (!isRiseFall) {
-    barrierInfo = getHigherLowerBarrier(tradeDirection);
-    if (!barrierInfo) {
-      setStatus("Enter a valid barrier offset first", true);
-      return false;
-    }
-  }
-
   setStatus(`Getting ${getDirectionLabel(tradeDirection)} proposal...`);
   try {
-    const proposal = barrierInfo
-      ? await getBarrierProposal({
-        symbol: currentSymbol,
-        direction: tradeDirection,
-        barrier: barrierInfo.barrier,
-        fallbackBarrier: formatPrice(barrierInfo.display, currentPip),
-        stake,
-        durationSec,
-        durationUnit,
-      })
-      : await getProposal({
-        symbol: currentSymbol,
-        contractType: tradeDirection,
-        barrier: null,
-        stake,
-        durationSec,
-        durationUnit,
-      });
+    const { proposal, barrierInfo } = await getTradeModeProposal({
+      symbol: currentSymbol,
+      direction: tradeDirection,
+      stake,
+      durationSec,
+      durationUnit,
+      tradeMode,
+    });
     const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
     const quote = {
       payout: proposal.payout,
@@ -13903,7 +14199,7 @@ async function executeDirectionQuote(direction) {
       barrier: barrierInfo?.display ?? null,
       offset: barrierInfo?.offset ?? null,
       expiry,
-      expiryLabel: durationUnit === "t" ? expiryChoice?.label : formatDurationLabel(durationSec),
+      expiryLabel: tradeMode === "multipliers" ? `x${getMultiplierSettings().multiplier}` : durationUnit === "t" ? expiryChoice?.label : formatDurationLabel(durationSec),
     };
     quickDirectionQuotes[tradeDirection] = quote;
     updateProposalDirectionButtons();
@@ -14045,15 +14341,17 @@ function getDefaultBarrierForDisplay(displayName) {
 
 function updateProposalDirectionButtons() {
   if (!directionButtons?.length) return;
-  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const tradeMode = getActiveTradeMode();
+  const isRiseFall = tradeMode === "rise_fall";
   const isFixedExpiry = getTradeExpiryChoice().mode === "fixed";
+  const isButtonQuoteMode = isFixedExpiry || tradeMode === "multipliers";
   directionButtons.forEach((btn) => {
     const btnDirection = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
     const quote = getQuoteForDirection(btnDirection);
-    const isLoading = isFixedExpiry
+    const isLoading = isButtonQuoteMode
       ? calcInFlight
       : !isRiseFall && proposalLoadingDirection === btnDirection && calcInFlight;
-    const pctText = isFixedExpiry && Number.isFinite(quote?.payout)
+    const pctText = isButtonQuoteMode && Number.isFinite(quote?.payout)
       ? `Payout ${quote.payout.toFixed(2)}`
       : isLoading
       ? "Loading..."
@@ -17066,6 +17364,13 @@ function executeProposalBuy(proposalId, price, direction) {
         expiry: null,
       });
       tradeResults = tradeResults.slice(0, 20);
+      upsertTradeChartMarkerFromBuy({
+        contractId,
+        symbol: currentSymbol,
+        direction: direction || currentDirection,
+        entryPrice: lastSpot,
+        entryTime: Math.floor(Date.now() / 1000),
+      });
       renderTradeResults();
       if (contractId && contractId !== "--") {
         subscribeOpenContract(contractId);
@@ -17642,6 +17947,9 @@ function updateTradeProfitSummary() {
 }
 
 function setActiveTab(tabName, options = {}) {
+  if (!["rise_fall", "higher_lower", "touch_no_touch", "multipliers", "vanillas"].includes(tabName)) {
+    tabName = "rise_fall";
+  }
   tabs.forEach((t) => {
     const isActive = t.dataset.tab === tabName;
     t.classList.toggle("active", isActive);
@@ -17649,16 +17957,29 @@ function setActiveTab(tabName, options = {}) {
   });
 
   const isHL = tabName === "higher_lower";
-  const isRiseFall = !isHL;
+  const isRiseFall = tabName === "rise_fall";
+  const isTouch = tabName === "touch_no_touch";
+  const isMultipliers = tabName === "multipliers";
+  const isVanillas = tabName === "vanillas";
   if (hlButtons) hlButtons.style.display = "grid";
   if (quickRow) quickRow.style.display = isHL ? "grid" : "none";
   if (barrierField) barrierField.style.display = isHL ? "block" : "none";
   if (sidebarBarrierFieldEl) sidebarBarrierFieldEl.style.display = isHL ? "block" : "none";
   if (riseFallExpiryFieldEl) riseFallExpiryFieldEl.style.display = "block";
   if (mainRiseFallExpiryFieldEl) mainRiseFallExpiryFieldEl.style.display = "block";
+  if (advancedTradeFieldsEl) advancedTradeFieldsEl.style.display = (isTouch || isMultipliers) ? "block" : "none";
+  if (barrierModeFieldEl) barrierModeFieldEl.style.display = isTouch ? "block" : "none";
+  if (barrierValueFieldEl) barrierValueFieldEl.style.display = isTouch ? "block" : "none";
+  if (multiplierValueFieldEl) multiplierValueFieldEl.style.display = isMultipliers ? "block" : "none";
+  if (multiplierTpFieldEl) multiplierTpFieldEl.style.display = isMultipliers ? "block" : "none";
+  if (multiplierSlFieldEl) multiplierSlFieldEl.style.display = isMultipliers ? "block" : "none";
+  if (multiplierCancelFieldEl) multiplierCancelFieldEl.style.display = isMultipliers ? "block" : "none";
   syncRiseFallExpiryControls();
   proposalsCardEl?.classList.toggle("mode-rise-fall", isRiseFall);
   proposalsCardEl?.classList.toggle("mode-higher-lower", isHL);
+  proposalsCardEl?.classList.toggle("mode-touch-no-touch", isTouch);
+  proposalsCardEl?.classList.toggle("mode-multipliers", isMultipliers);
+  proposalsCardEl?.classList.toggle("mode-vanillas", isVanillas);
   syncTradeTypeControls(tabName);
   rebuildSymbolsForTradeMode({ preserveSelection: options.preserveSelection !== false });
   buildExpiries();
@@ -18218,6 +18539,7 @@ function handleOpenContractUpdate(contract, subscriptionId) {
   const profit = contract.profit ?? (sellPrice != null && buyPrice != null ? sellPrice - buyPrice : previousTrade?.profit ?? null);
   const isSold = contract.is_sold ?? contract.status === "sold";
   const expiry = contract.date_expiry ?? previousTrade?.expiry ?? null;
+  upsertTradeChartMarkerFromContract(contract, previousTrade);
 
   if (index !== -1) {
     tradeResults[index] = {
@@ -18606,6 +18928,9 @@ async function loadActiveSymbols() {
   symbolsByTradeMode = {
     rise_fall: buildSymbolsByMarket(riseFallSymbols, "Markets"),
     higher_lower: buildSymbolsByMarket(derivedSymbols, "Derived"),
+    touch_no_touch: buildSymbolsByMarket(riseFallSymbols, "Markets"),
+    multipliers: buildSymbolsByMarket(tradeableSymbols, "Markets"),
+    vanillas: buildSymbolsByMarket(riseFallSymbols, "Markets"),
   };
 
   populateMarketScannerScopeSelect();
@@ -18914,7 +19239,7 @@ function isCandleEndTradeExpiry() {
 }
 
 function shouldAutoQuoteProposals() {
-  return isCandleEndTradeExpiry();
+  return isCandleEndTradeExpiry() && getActiveTradeMode() !== "multipliers";
 }
 
 function buildCandleEndExpiries(now, step) {
@@ -18967,26 +19292,47 @@ function rollExpiries() {
   return changed;
 }
 
-function getApiProposalContractType(contractType, barrier = null) {
+function getApiProposalContractType(contractType, barrier = null, tradeMode = getActiveTradeMode()) {
+  if (tradeMode === "touch_no_touch") return contractType === "PUT" ? "NOTOUCH" : "ONETOUCH";
+  if (tradeMode === "multipliers") return contractType === "PUT" ? "MULTDOWN" : "MULTUP";
+  if (tradeMode === "vanillas") return contractType === "PUT" ? "VANILLALONGPUT" : "VANILLALONGCALL";
   const hasBarrier = barrier != null && barrier !== "";
   if (hasBarrier && contractType === "CALL") return "HIGHER";
   if (hasBarrier && contractType === "PUT") return "LOWER";
   return contractType;
 }
 
-async function getProposal({ symbol, contractType, barrier, stake, durationSec, durationUnit = "s" }) {
+function getMultiplierSettings() {
+  const multiplier = Math.max(1, Math.floor(parseTradeNumber(multiplierValueInputEl?.value, 50)));
+  const takeProfit = parseTradeNumber(multiplierTpInputEl?.value, 0);
+  const stopLoss = parseTradeNumber(multiplierSlInputEl?.value, 0);
+  const cancellation = String(multiplierCancelSelectEl?.value || "").trim();
+  const limitOrder = {};
+  if (takeProfit > 0) limitOrder.take_profit = Number(takeProfit.toFixed(2));
+  if (stopLoss > 0) limitOrder.stop_loss = Number(stopLoss.toFixed(2));
+  return {
+    multiplier,
+    cancellation,
+    limitOrder: Object.keys(limitOrder).length ? limitOrder : null,
+  };
+}
+
+async function getProposal({ symbol, contractType, barrier, stake, durationSec, durationUnit = "s", tradeMode = getActiveTradeMode(), extraPayload = {} }) {
   const numericStake = Number(stake);
-  const apiContractType = getApiProposalContractType(contractType, barrier);
+  const apiContractType = getApiProposalContractType(contractType, barrier, tradeMode);
   const payload = {
     proposal: 1,
     amount: numericStake,
     basis: "stake",
     contract_type: apiContractType,
-    duration: Math.max(1, Math.floor(durationSec)),
-    duration_unit: durationUnit,
     underlying_symbol: symbol,
     currency: activeAccountCurrency || "USD",
+    ...extraPayload,
   };
+  if (tradeMode !== "multipliers") {
+    payload.duration = Math.max(1, Math.floor(durationSec));
+    payload.duration_unit = durationUnit;
+  }
   if (barrier != null && barrier !== "") {
     payload.barrier = barrier;
   }
@@ -19002,6 +19348,64 @@ async function getProposal({ symbol, contractType, barrier, stake, durationSec, 
     ask_price: Number.isFinite(askPrice) ? askPrice : proposal.ask_price,
     buy_price: Number.isFinite(buyPrice) ? buyPrice : proposal.buy_price,
   };
+}
+
+async function getTradeModeProposal({ symbol, direction, stake, durationSec, durationUnit = "s", tradeMode = getActiveTradeMode() }) {
+  if (tradeMode === "higher_lower") {
+    const barrierInfo = getHigherLowerBarrier(direction);
+    if (!barrierInfo) throw new Error("Enter a valid barrier offset first");
+    const proposal = await getBarrierProposal({
+      symbol,
+      direction,
+      barrier: barrierInfo.barrier,
+      fallbackBarrier: formatPrice(barrierInfo.display, currentPip),
+      stake,
+      durationSec,
+      durationUnit,
+    });
+    return { proposal, barrierInfo };
+  }
+  if (tradeMode === "touch_no_touch") {
+    const barrierInfo = getAdvancedBarrierInfo();
+    if (!barrierInfo) throw new Error("Enter a valid touch barrier first");
+    const proposal = await getProposal({
+      symbol,
+      contractType: direction,
+      barrier: barrierInfo.barrier,
+      stake,
+      durationSec,
+      durationUnit,
+      tradeMode,
+    });
+    return { proposal, barrierInfo };
+  }
+  if (tradeMode === "multipliers") {
+    const settings = getMultiplierSettings();
+    const extraPayload = { multiplier: settings.multiplier };
+    if (settings.limitOrder) extraPayload.limit_order = settings.limitOrder;
+    if (settings.cancellation) extraPayload.cancellation = settings.cancellation;
+    const proposal = await getProposal({
+      symbol,
+      contractType: direction,
+      barrier: null,
+      stake,
+      durationSec: 1,
+      durationUnit: "s",
+      tradeMode,
+      extraPayload,
+    });
+    return { proposal, barrierInfo: null };
+  }
+  const proposal = await getProposal({
+    symbol,
+    contractType: direction,
+    barrier: null,
+    stake,
+    durationSec,
+    durationUnit,
+    tradeMode,
+  });
+  return { proposal, barrierInfo: null };
 }
 
 async function getBarrierProposal({ symbol, direction, barrier, fallbackBarrier, stake, durationSec, durationUnit = "s" }) {
@@ -19030,7 +19434,7 @@ async function getBarrierProposal({ symbol, direction, barrier, fallbackBarrier,
 
 function scheduleProposalRefresh(force = false) {
   if (!currentSymbol || !lastSpot) return;
-  if (getTradeExpiryChoice().mode === "fixed") {
+  if (getTradeExpiryChoice().mode === "fixed" || getActiveTradeMode() === "multipliers") {
     if (calcInFlight) return;
     if (Date.now() < rateLimitUntil) return;
     const now = Date.now();
@@ -19066,7 +19470,8 @@ async function refreshFixedExpiryButtonQuotes() {
   if (calcInFlight) return;
   if (!currentSymbol || !lastSpot) return;
   const expiryChoice = getTradeExpiryChoice();
-  if (expiryChoice.mode !== "fixed") return;
+  const tradeMode = getActiveTradeMode();
+  if (expiryChoice.mode !== "fixed" && tradeMode !== "multipliers") return;
 
   calcInFlight = true;
   lastProposalError = null;
@@ -19080,39 +19485,21 @@ async function refreshFixedExpiryButtonQuotes() {
       return;
     }
 
-    const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
-    const isRiseFall = getActiveTradeMode() === "rise_fall";
+    const effectiveExpiry = tradeMode === "multipliers"
+      ? { seconds: 1, unit: "s", label: `x${getMultiplierSettings().multiplier}` }
+      : getEffectiveRiseFallSignalExpiry();
     const nextQuotes = { CALL: null, PUT: null };
 
     for (const direction of ["CALL", "PUT"]) {
       try {
-        let proposal;
-        let barrierInfo = null;
-        if (isRiseFall) {
-          proposal = await getProposal({
-            symbol: currentSymbol,
-            contractType: direction,
-            barrier: null,
-            stake,
-            durationSec: effectiveExpiry.seconds,
-            durationUnit: effectiveExpiry.unit,
-          });
-        } else {
-          barrierInfo = getHigherLowerBarrier(direction);
-          if (!barrierInfo) {
-            nextQuotes[direction] = null;
-            continue;
-          }
-          proposal = await getBarrierProposal({
-            symbol: currentSymbol,
-            direction,
-            barrier: barrierInfo.barrier,
-            fallbackBarrier: formatPrice(barrierInfo.display, currentPip),
-            stake,
-            durationSec: effectiveExpiry.seconds,
-            durationUnit: effectiveExpiry.unit,
-          });
-        }
+        const { proposal, barrierInfo } = await getTradeModeProposal({
+          symbol: currentSymbol,
+          direction,
+          stake,
+          durationSec: effectiveExpiry.seconds,
+          durationUnit: effectiveExpiry.unit,
+          tradeMode,
+        });
 
         const payout = Number(proposal.payout);
         const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
@@ -19166,11 +19553,18 @@ async function refreshProposals() {
     lastProposalError = null;
     const tradeMode = getActiveTradeMode();
     const isRiseFall = tradeMode === "rise_fall";
+    const isDurationDirectional = ["rise_fall", "touch_no_touch", "vanillas"].includes(tradeMode);
     const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
     const primaryExpiry = proposalExpiries[0];
     quickDirectionQuotes = { CALL: null, PUT: null };
 
-    if (isRiseFall) {
+    if (tradeMode === "multipliers") {
+      proposals = [];
+      await refreshFixedExpiryButtonQuotes();
+      return;
+    }
+
+    if (isDurationDirectional) {
       const expiryChoice = getTradeExpiryChoice();
       proposals = [];
       if (expiryChoice.mode === "candle_end") {
@@ -19189,13 +19583,13 @@ async function refreshProposals() {
               continue;
             }
             try {
-              const proposal = await getProposal({
+              const { proposal, barrierInfo } = await getTradeModeProposal({
                 symbol: currentSymbol,
-                contractType: direction,
-                barrier: null,
+                direction,
                 stake,
                 durationSec,
                 durationUnit: "s",
+                tradeMode,
               });
               const payout = proposal.payout;
               const askPrice = proposal.ask_price ?? proposal.buy_price ?? stake;
@@ -19206,8 +19600,8 @@ async function refreshProposals() {
                 profitPct: stake ? ((payout - stake) / stake) * 100 : null,
                 proposalId: proposal.id,
                 askPrice,
-                barrier: null,
-                offset: null,
+                barrier: barrierInfo?.display ?? null,
+                offset: barrierInfo?.offset ?? null,
                 expiryLabel,
               };
               if (direction === currentDirection) proposals.push(item);
@@ -19385,10 +19779,26 @@ function renderTradeList() {
   if (!tradeListEl) return;
   updateProposalDirectionButtons();
   updateTradeProfitSummary();
-  const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const tradeMode = getActiveTradeMode();
+  const isRiseFall = tradeMode === "rise_fall";
+  const isProposalListMode = ["rise_fall", "touch_no_touch", "vanillas"].includes(tradeMode);
 
-  if (!isRiseFall && calcInFlight && proposalLoadingDirection === currentDirection && !proposals.length) {
+  if (!isProposalListMode && calcInFlight && proposalLoadingDirection === currentDirection && !proposals.length) {
     tradeListEl.innerHTML = `<div class="trade-meta">Loading ${getDirectionLabel(currentDirection)} proposals...</div>`;
+    return;
+  }
+
+  if (tradeMode === "multipliers") {
+    const quote = getQuoteForDirection(currentDirection);
+    const settings = getMultiplierSettings();
+    const payoutText = quote?.payout == null ? "--" : Number(quote.payout).toFixed(2);
+    const tpText = settings.limitOrder?.take_profit ? `TP ${settings.limitOrder.take_profit}` : "TP off";
+    const slText = settings.limitOrder?.stop_loss ? `SL ${settings.limitOrder.stop_loss}` : "SL off";
+    const cancelText = settings.cancellation ? `Cancel ${settings.cancellation}` : "Cancel off";
+    tradeListEl.innerHTML = `
+      <div class="trade-meta">Multiplier ${settings.multiplier}x - ${tpText} - ${slText} - ${cancelText}</div>
+      <div class="trade-meta">Expected payout: ${payoutText}</div>
+    `;
     return;
   }
 
@@ -19398,8 +19808,6 @@ function renderTradeList() {
   }
 
   const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
-  const directionLabel = getDirectionLabel(currentDirection);
-  const dirClass = currentDirection === "CALL" ? "higher" : "lower";
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
   const expiryChoice = getTradeExpiryChoice();
@@ -19407,11 +19815,11 @@ function renderTradeList() {
     tradeListEl.innerHTML = errorBanner;
     return;
   }
-  const listItems = isRiseFall
+  const listItems = isProposalListMode
     ? proposals
     : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
 
-  if (isRiseFall && calcInFlight && !listItems.length) {
+  if (isProposalListMode && calcInFlight && !listItems.length) {
     tradeListEl.innerHTML = "";
     return;
   }
@@ -19421,7 +19829,7 @@ function renderTradeList() {
     const itemDirectionLabel = getDirectionLabel(itemDirection);
     const itemDirClass = itemDirection === "CALL" ? "higher" : "lower";
     const countdown = item.expiry ? formatCountdown(item.expiry) : item.expiryLabel || "--";
-    const fallbackBarrier = !isRiseFall && item.barrier == null ? getHigherLowerBarrier(itemDirection) : null;
+    const fallbackBarrier = !isProposalListMode && item.barrier == null ? getHigherLowerBarrier(itemDirection) : null;
     const barrierText = item.barrier == null
       ? fallbackBarrier?.display == null ? "--" : formatPrice(fallbackBarrier.display, currentPip)
       : formatPrice(item.barrier, currentPip);
@@ -19435,14 +19843,14 @@ function renderTradeList() {
     const priceAttr = item.askPrice != null ? `data-price=\"${item.askPrice}\"` : "";
     const directionAttr = itemDirection ? `data-direction=\"${itemDirection}\"` : "";
     const expiryText = `Expiry: ${item.expiryLabel || "Candle end"}${item.expiry ? ` (${countdown})` : ""}`;
-    const metaText = isRiseFall
+    const metaText = isRiseFall || tradeMode === "vanillas"
       ? expiryText
-      : `${expiryText} • Barrier: ${barrierText} (offset ${offsetText})`;
+      : `${expiryText} - Barrier: ${barrierText} (offset ${offsetText})`;
     const titleTimeText = item.expiry ? `ends in ${countdown}` : item.expiryLabel || "on click";
     return `
       <div class="trade-row">
         <button class="trade-btn ${itemDirClass}" data-expiry="${item.expiry || ""}" ${directionAttr} ${proposalId} ${priceAttr}>
-          <div class="trade-title"><span class="trade-tag">${itemDirectionLabel}</span> • ${titleTimeText}</div>
+          <div class="trade-title"><span class="trade-tag">${itemDirectionLabel}</span> - ${titleTimeText}</div>
           <div class="trade-meta">Profit: ${profitText} (${pctText}%)</div>
           <div class="trade-meta">${metaText}</div>
         </button>
@@ -19586,6 +19994,19 @@ async function init() {
   mainRiseFallExpirySelectEl = document.getElementById("mainRiseFallExpirySelect");
   sidebarStakeInputEl = document.getElementById("sidebarStakeInput");
   sidebarBarrierInputEl = document.getElementById("sidebarBarrierInput");
+  advancedTradeFieldsEl = document.getElementById("advancedTradeFields");
+  barrierModeFieldEl = document.getElementById("barrierModeField");
+  barrierModeSelectEl = document.getElementById("barrierModeSelect");
+  barrierValueFieldEl = document.getElementById("barrierValueField");
+  barrierValueInputEl = document.getElementById("barrierValueInput");
+  multiplierValueFieldEl = document.getElementById("multiplierValueField");
+  multiplierValueInputEl = document.getElementById("multiplierValueInput");
+  multiplierTpFieldEl = document.getElementById("multiplierTpField");
+  multiplierTpInputEl = document.getElementById("multiplierTpInput");
+  multiplierSlFieldEl = document.getElementById("multiplierSlField");
+  multiplierSlInputEl = document.getElementById("multiplierSlInput");
+  multiplierCancelFieldEl = document.getElementById("multiplierCancelField");
+  multiplierCancelSelectEl = document.getElementById("multiplierCancelSelect");
   tradeProfitSummaryEl = document.getElementById("tradeProfitSummary");
   tradeListEl = document.getElementById("tradeList");
   tradeResultsEl = document.getElementById("tradeResults");
@@ -20835,7 +21256,7 @@ async function init() {
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       const direction = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
-      if (getActiveTradeMode() === "rise_fall" || getTradeExpiryChoice().mode === "fixed") {
+      if (getActiveTradeMode() !== "higher_lower" || getTradeExpiryChoice().mode === "fixed") {
         executeDirectionQuote(direction);
         return;
       }
@@ -20862,6 +21283,16 @@ async function init() {
   sidebarBarrierInputEl?.addEventListener("input", () => {
     syncBarrierControls(sidebarBarrierInputEl);
     scheduleProposalRefresh(true);
+  });
+  [barrierModeSelectEl, barrierValueInputEl, multiplierValueInputEl, multiplierTpInputEl, multiplierSlInputEl, multiplierCancelSelectEl].forEach((el) => {
+    el?.addEventListener("input", () => {
+      scheduleProposalRefresh(true);
+      renderMiniChart(getBuiltCandles());
+    });
+    el?.addEventListener("change", () => {
+      scheduleProposalRefresh(true);
+      renderMiniChart(getBuiltCandles());
+    });
   });
   desktopTradeTypeSelectEl?.addEventListener("change", () => {
     setActiveTab(desktopTradeTypeSelectEl.value);

@@ -81,6 +81,9 @@
           <select id="desktopTradeTypeSelect" class="field-input" aria-label="Select your trade type">
             <option value="rise_fall">Rise/Fall</option>
             <option value="higher_lower">Higher/Lower</option>
+            <option value="touch_no_touch">Touch/No Touch</option>
+            <option value="multipliers">Multipliers</option>
+            <option value="vanillas">Vanillas</option>
           </select>
         </div>
       </section>
@@ -89,6 +92,9 @@
       <nav id="tradeModeTabs" class="trade-tabs" role="tablist">
         <button class="tab active" data-tab="rise_fall" role="tab" aria-selected="true">Rise/Fall</button>
         <button class="tab" data-tab="higher_lower" role="tab" aria-selected="false">Higher/Lower</button>
+        <button class="tab" data-tab="touch_no_touch" role="tab" aria-selected="false">Touch/No Touch</button>
+        <button class="tab" data-tab="multipliers" role="tab" aria-selected="false">Multipliers</button>
+        <button class="tab" data-tab="vanillas" role="tab" aria-selected="false">Vanillas</button>
       </nav>
 
       <section class="symbol-row">
@@ -308,9 +314,12 @@
           <div class="proposal-config">
           <div class="field">
             <div class="field-label">Select your trade type</div>
-            <select id="sidebarTradeTypeSelect" class="field-input" aria-label="Select your trade type">
+          <select id="sidebarTradeTypeSelect" class="field-input" aria-label="Select your trade type">
               <option value="rise_fall">Rise/Fall</option>
               <option value="higher_lower">Higher/Lower</option>
+              <option value="touch_no_touch">Touch/No Touch</option>
+              <option value="multipliers">Multipliers</option>
+              <option value="vanillas">Vanillas</option>
             </select>
           </div>
           <div id="riseFallExpiryField" class="field">
@@ -334,6 +343,43 @@
           <div id="sidebarBarrierField" class="field">
             <div class="field-label">Barrier offset</div>
             <input id="sidebarBarrierInput" class="field-input" type="number" min="0.0001" step="0.0001" value="0.5" />
+          </div>
+          <div id="advancedTradeFields" class="advanced-trade-fields">
+            <div id="barrierModeField" class="field">
+              <div class="field-label">Barrier mode</div>
+              <select id="barrierModeSelect" class="field-input" aria-label="Barrier mode">
+                <option value="positive">Positive offset</option>
+                <option value="negative">Negative offset</option>
+                <option value="absolute">Absolute price</option>
+              </select>
+            </div>
+            <div id="barrierValueField" class="field">
+              <div class="field-label">Barrier value</div>
+              <input id="barrierValueInput" class="field-input" type="number" step="0.0001" value="0.5" />
+            </div>
+            <div id="multiplierValueField" class="field">
+              <div class="field-label">Multiplier</div>
+              <input id="multiplierValueInput" class="field-input" type="number" min="20" step="1" value="50" />
+            </div>
+            <div id="multiplierTpField" class="field">
+              <div class="field-label">Take profit</div>
+              <input id="multiplierTpInput" class="field-input" type="number" min="0" step="0.01" value="0" placeholder="Optional" />
+            </div>
+            <div id="multiplierSlField" class="field">
+              <div class="field-label">Stop loss</div>
+              <input id="multiplierSlInput" class="field-input" type="number" min="0" step="0.01" value="0" placeholder="Optional" />
+            </div>
+            <div id="multiplierCancelField" class="field">
+              <div class="field-label">Deal cancellation</div>
+              <select id="multiplierCancelSelect" class="field-input" aria-label="Deal cancellation">
+                <option value="">Off</option>
+                <option value="5m">5 minutes</option>
+                <option value="10m">10 minutes</option>
+                <option value="15m">15 minutes</option>
+                <option value="30m">30 minutes</option>
+                <option value="60m">1 hour</option>
+              </select>
+            </div>
           </div>
         </div>
           <div id="hlButtons" class="hl-buttons proposal-direction" role="group" aria-label="Trade direction">
