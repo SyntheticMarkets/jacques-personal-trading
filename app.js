@@ -1315,15 +1315,17 @@ function renderTradeChartMarkers(ctx, viewport = chartViewportState) {
       ctx.stroke();
       ctx.setLineDash([]);
       const label = `Entry ${formatPrice(entryPrice, currentPip)}`;
-      const labelW = Math.max(70, ctx.measureText(label).width + 14);
-      const labelX = clamp(bounds.right - labelW - 8, bounds.left + 4, bounds.right - labelW);
-      const labelY = clamp(visibleEntryY - 14, bounds.top + 12, bounds.bottom - 12);
+      const labelPadX = 10;
+      const labelW = Math.max(88, ctx.measureText(label).width + labelPadX * 2);
+      const labelH = 22;
+      const labelX = clamp(bounds.right - labelW - 12, bounds.left + 4, bounds.right - labelW - 12);
+      const labelY = clamp(visibleEntryY - labelH / 2, bounds.top + 4, bounds.bottom - labelH - 4);
       ctx.fillStyle = "rgba(45, 140, 255, 0.92)";
       ctx.beginPath();
-      ctx.roundRect(labelX, labelY - 10, labelW, 20, 6);
+      ctx.roundRect(labelX, labelY, labelW, labelH, 6);
       ctx.fill();
       ctx.fillStyle = "#ffffff";
-      ctx.fillText(label, labelX + 7, labelY);
+      ctx.fillText(label, labelX + labelPadX, labelY + labelH / 2);
     }
     if (marker.isClosed && marker.exitPrice != null && marker.exitTime != null) {
       const exitX = getChartXForTime(Number(marker.exitTime), viewport);
