@@ -14050,7 +14050,9 @@ function updateProposalDirectionButtons() {
   directionButtons.forEach((btn) => {
     const btnDirection = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
     const quote = getQuoteForDirection(btnDirection);
-    const isLoading = !isRiseFall && !isFixedExpiry && proposalLoadingDirection === btnDirection && calcInFlight;
+    const isLoading = isFixedExpiry
+      ? calcInFlight
+      : !isRiseFall && proposalLoadingDirection === btnDirection && calcInFlight;
     const pctText = isFixedExpiry && Number.isFinite(quote?.payout)
       ? `Payout ${quote.payout.toFixed(2)}`
       : isLoading
@@ -18942,6 +18944,7 @@ function buildExpiries() {
     updateProposalDirectionButtons();
     updateTradeProfitSummary();
     renderTradeList();
+    scheduleProposalRefresh(true);
   } else {
     renderTradeList();
     scheduleProposalRefresh(true);
@@ -19027,6 +19030,17 @@ async function getBarrierProposal({ symbol, direction, barrier, fallbackBarrier,
 
 function scheduleProposalRefresh(force = false) {
   if (!currentSymbol || !lastSpot) return;
+  if (getTradeExpiryChoice().mode === "fixed") {
+    if (calcInFlight) return;
+    if (Date.now() < rateLimitUntil) return;
+    const now = Date.now();
+    if (!force && now - lastCalcAt < MIN_REFRESH_MS) return;
+    lastCalcAt = now;
+    refreshFixedExpiryButtonQuotes().catch((err) => {
+      setStatus(err.message, true);
+    });
+    return;
+  }
   if (!shouldAutoQuoteProposals()) {
     proposals = [];
     quickDirectionQuotes = { CALL: null, PUT: null };
@@ -19046,6 +19060,89 @@ function scheduleProposalRefresh(force = false) {
   refreshProposals().catch((err) => {
     setStatus(err.message, true);
   });
+}
+
+async function refreshFixedExpiryButtonQuotes() {
+  if (calcInFlight) return;
+  if (!currentSymbol || !lastSpot) return;
+  const expiryChoice = getTradeExpiryChoice();
+  if (expiryChoice.mode !== "fixed") return;
+
+  calcInFlight = true;
+  lastProposalError = null;
+  renderTradeList();
+  try {
+    const stake = parseTradeNumber(stakeInput?.value ?? sidebarStakeInputEl?.value, 0);
+    if (!stake) {
+      quickDirectionQuotes = { CALL: null, PUT: null };
+      updateProposalDirectionButtons();
+      updateTradeProfitSummary();
+      return;
+    }
+
+    const effectiveExpiry = getEffectiveRiseFallSignalExpiry();
+    const isRiseFall = getActiveTradeMode() === "rise_fall";
+    const nextQuotes = { CALL: null, PUT: null };
+
+    for (const direction of ["CALL", "PUT"]) {
+      try {
+        let proposal;
+        let barrierInfo = null;
+        if (isRiseFall) {
+          proposal = await getProposal({
+            symbol: currentSymbol,
+            contractType: direction,
+            barrier: null,
+            stake,
+            durationSec: effectiveExpiry.seconds,
+            durationUnit: effectiveExpiry.unit,
+          });
+        } else {
+          barrierInfo = getHigherLowerBarrier(direction);
+          if (!barrierInfo) {
+            nextQuotes[direction] = null;
+            continue;
+          }
+          proposal = await getBarrierProposal({
+            symbol: currentSymbol,
+            direction,
+            barrier: barrierInfo.barrier,
+            fallbackBarrier: formatPrice(barrierInfo.display, currentPip),
+            stake,
+            durationSec: effectiveExpiry.seconds,
+            durationUnit: effectiveExpiry.unit,
+          });
+        }
+
+        const payout = Number(proposal.payout);
+        const askPrice = Number(proposal.ask_price ?? proposal.buy_price ?? stake);
+        nextQuotes[direction] = {
+          payout: Number.isFinite(payout) ? payout : null,
+          profitPct: Number.isFinite(payout) && stake ? ((payout - stake) / stake) * 100 : null,
+          proposalId: null,
+          askPrice: Number.isFinite(askPrice) ? askPrice : null,
+          barrier: barrierInfo?.display ?? null,
+          offset: barrierInfo?.offset ?? null,
+          expiry: null,
+          expiryLabel: effectiveExpiry.label,
+        };
+      } catch (err) {
+        lastProposalError = err?.message || "Proposal error";
+        if (lastProposalError.toLowerCase().includes("rate limit")) {
+          rateLimitUntil = Date.now() + RATE_LIMIT_COOLDOWN_MS;
+        }
+        nextQuotes[direction] = null;
+      }
+    }
+
+    quickDirectionQuotes = nextQuotes;
+    updateProposalDirectionButtons();
+    updateTradeProfitSummary();
+    renderTradeList();
+  } finally {
+    calcInFlight = false;
+    updateProposalDirectionButtons();
+  }
 }
 
 async function refreshProposals() {
