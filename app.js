@@ -14046,11 +14046,18 @@ function getDefaultBarrierForDisplay(displayName) {
 function updateProposalDirectionButtons() {
   if (!directionButtons?.length) return;
   const isRiseFall = getActiveTradeMode() === "rise_fall";
+  const isFixedExpiry = getTradeExpiryChoice().mode === "fixed";
   directionButtons.forEach((btn) => {
     const btnDirection = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
     const quote = getQuoteForDirection(btnDirection);
-    const isLoading = !isRiseFall && proposalLoadingDirection === btnDirection && calcInFlight;
-    const pctText = isLoading ? "Loading..." : Number.isFinite(quote?.profitPct) ? `${quote.profitPct.toFixed(1)}%` : "--";
+    const isLoading = !isRiseFall && !isFixedExpiry && proposalLoadingDirection === btnDirection && calcInFlight;
+    const pctText = isFixedExpiry && Number.isFinite(quote?.payout)
+      ? `Payout ${quote.payout.toFixed(2)}`
+      : isLoading
+      ? "Loading..."
+      : Number.isFinite(quote?.profitPct)
+        ? `${quote.profitPct.toFixed(1)}%`
+        : "--";
     btn.classList.toggle("active", currentDirection === btnDirection);
     btn.classList.toggle("loading", isLoading);
     btn.innerHTML = `
@@ -19299,20 +19306,13 @@ function renderTradeList() {
   const errorBanner = lastProposalError ? `<div class="trade-meta">Error: ${lastProposalError}</div>` : "";
 
   const expiryChoice = getTradeExpiryChoice();
-  const fixedExpiryItems = ["CALL", "PUT"].map((direction) => ({
-    direction,
-    payout: null,
-    profitPct: null,
-    proposalId: null,
-    askPrice: null,
-    expiry: null,
-    expiryLabel: expiryChoice.label,
-  }));
-  const listItems = expiryChoice.mode === "fixed"
-    ? fixedExpiryItems
-    : isRiseFall
-      ? proposals
-      : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
+  if (expiryChoice.mode === "fixed") {
+    tradeListEl.innerHTML = errorBanner;
+    return;
+  }
+  const listItems = isRiseFall
+    ? proposals
+    : proposalExpiries.map((expiry, idx) => ({ ...(proposals[idx] || {}), expiry }));
 
   if (isRiseFall && calcInFlight && !listItems.length) {
     tradeListEl.innerHTML = "";
@@ -20738,7 +20738,7 @@ async function init() {
   directionButtons.forEach((btn) => {
     btn.addEventListener("click", () => {
       const direction = btn.dataset.direction === "PUT" ? "PUT" : "CALL";
-      if (getActiveTradeMode() === "rise_fall") {
+      if (getActiveTradeMode() === "rise_fall" || getTradeExpiryChoice().mode === "fixed") {
         executeDirectionQuote(direction);
         return;
       }
