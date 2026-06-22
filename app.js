@@ -344,6 +344,7 @@ const MAX_CANDLE_TICKS = 32;
 const CHART_INDICATOR_OPTIONS = [
   { value: "INSTITUTIONAL_FOREX_ENGINE", label: "15m Institutional Forex Engine" },
   { value: "INSTITUTIONAL_SMC_ENGINE", label: "Institutional SMC Engine" },
+  { value: "MTF_SMC_STRUCTURE_MAP", label: "MTF SMC Structure Map" },
   { value: "INST_EXECUTION_MODEL", label: "Institutional Model" },
   { value: "INST_LEVEL_BEHAVIOR", label: "Institutional Level Behavior" },
   { value: "ALGO_BEHAVIOR_ENGINE", label: "Algo Behavior Engine" },
@@ -408,7 +409,7 @@ const CHART_INDICATOR_GROUPS = [
     key: "SMC",
     label: "SMC",
     category: "SIGNALS",
-    items: ["INSTITUTIONAL_SMC_ENGINE", "SMC_WELO_TRADES", "SMC_SETUP_08", "SMC_PRO_COMBO"],
+    items: ["MTF_SMC_STRUCTURE_MAP", "INSTITUTIONAL_SMC_ENGINE", "SMC_WELO_TRADES", "SMC_SETUP_08", "SMC_PRO_COMBO"],
   },
   {
     key: "VOL_SIG",
@@ -468,6 +469,7 @@ const CHART_INDICATOR_GROUPS = [
 const MARKET_SCANNER_INDICATORS = [
   "INSTITUTIONAL_FOREX_ENGINE",
   "INSTITUTIONAL_SMC_ENGINE",
+  "MTF_SMC_STRUCTURE_MAP",
   "INST_EXECUTION_MODEL",
   "INST_LEVEL_BEHAVIOR",
   "ALGO_BEHAVIOR_ENGINE",
@@ -3663,6 +3665,34 @@ function buildInstitutionalSmcEngine(candles, options = {}) {
     ? `${signal.direction} ${signal.grade} ${signal.confidence}% institutional SMC`
     : `${signal.action} ${scoring.score}% institutional SMC`;
   return engine;
+}
+
+function buildMtfSmcStructureMap(candles, options = {}) {
+  const engine = buildInstitutionalSmcEngine(candles, options);
+  const htfBias = engine.frames?.htf?.bias || "RANGE";
+  const itfBias = engine.frames?.itf?.bias || "RANGE";
+  const ltfBias = engine.frames?.ltf?.bias || "RANGE";
+  const alignedBullish = htfBias === "BULLISH" && (itfBias === "BULLISH" || ltfBias === "BULLISH");
+  const alignedBearish = htfBias === "BEARISH" && (itfBias === "BEARISH" || ltfBias === "BEARISH");
+  const directionalBias = alignedBullish ? "BUY" : alignedBearish ? "SELL" : engine.signal?.direction || null;
+  const internalEvent = engine.frames?.ltf?.latestStructure || engine.frames?.itf?.latestStructure || null;
+  const majorEvent = engine.frames?.htf?.latestStructure || null;
+  const confidence = clamp(
+    Math.round((engine.score || 0) + (alignedBullish || alignedBearish ? 8 : 0) + (internalEvent ? 4 : 0)),
+    0,
+    100,
+  );
+  return {
+    ...engine,
+    mapDirection: directionalBias,
+    mapConfidence: confidence,
+    mapAction: directionalBias ? directionalBias : "WAIT",
+    mapSummary: directionalBias
+      ? `${directionalBias} ${confidence}/100 MTF SMC alignment`
+      : `WAIT ${confidence}/100 MTF SMC alignment`,
+    majorEvent,
+    internalEvent,
+  };
 }
 
 function buildICTFibLevels(structureEvents) {
@@ -9322,6 +9352,7 @@ function renderMiniChart(candles) {
   const hasLiquiditySweepOB = activeChartIndicators.has("LIQ_SWEEP_OB") && isChartIndicatorNativeTimeframe("LIQ_SWEEP_OB");
   const hasLDMSS = activeChartIndicators.has("LDMSS") && isChartIndicatorNativeTimeframe("LDMSS");
   const hasInstitutionalSMCEngine = activeChartIndicators.has("INSTITUTIONAL_SMC_ENGINE");
+  const hasMtfSmcStructureMap = activeChartIndicators.has("MTF_SMC_STRUCTURE_MAP");
   const hasWeloSMC = activeChartIndicators.has("SMC_WELO_TRADES");
   const hasSMCSetup08 = activeChartIndicators.has("SMC_SETUP_08") && isChartIndicatorNativeTimeframe("SMC_SETUP_08");
   const hasSMCProCombo = activeChartIndicators.has("SMC_PRO_COMBO") && isChartIndicatorNativeTimeframe("SMC_PRO_COMBO");
@@ -9338,7 +9369,7 @@ function renderMiniChart(candles) {
   const hasChannelsPatterns = activeChartIndicators.has("CHANNELS_PATTERNS") && isChartIndicatorNativeTimeframe("CHANNELS_PATTERNS");
 
   const mtfIndicatorBadges = Array.from(activeChartIndicators)
-    .filter((value) => !isChartIndicatorNativeTimeframe(value) && !["SMC_WELO_TRADES", "INSTITUTIONAL_SMC_ENGINE"].includes(value))
+    .filter((value) => !isChartIndicatorNativeTimeframe(value) && !["SMC_WELO_TRADES", "INSTITUTIONAL_SMC_ENGINE", "MTF_SMC_STRUCTURE_MAP"].includes(value))
     .map((value) => {
       const tf = getChartIndicatorTimeframe(value);
       const source = getChartIndicatorAnalysisCandles(value, candles);
@@ -10440,6 +10471,207 @@ function renderMiniChart(candles) {
     ctx.fillText(`HTF ${engine.hierarchy.htfLabel}: ${engine.frames.htf?.bias || "--"}`, panelX + 10, panelY + 29);
     ctx.fillText(`ITF ${engine.hierarchy.itfLabel}: ${engine.frames.itf?.bias || "--"} • LTF ${engine.hierarchy.ltfLabel}: ${engine.frames.ltf?.bias || "--"}`, panelX + 10, panelY + 45);
     ctx.fillText(`Stats ${engine.stats.winRate}% WR • ${engine.stats.total} tested`, panelX + 10, panelY + 61);
+    ctx.restore();
+  }
+
+  if (hasMtfSmcStructureMap) {
+    const map = buildMtfSmcStructureMap(candles, {
+      symbol: currentSymbol,
+      baseSeconds: getChartTimeframeSeconds(),
+    });
+    const visibleStartTime = Number(candles[start]?.time ?? candles[start]?.epoch ?? 0);
+    const visibleEndTime = Number(candles[Math.max(start, end - 1)]?.time ?? candles[Math.max(start, end - 1)]?.epoch ?? visibleStartTime) + getChartTimeframeSeconds();
+    const xForTime = (time, center = true) => {
+      const value = Number(time);
+      if (!Number.isFinite(value) || !Number.isFinite(visibleStartTime)) return NaN;
+      return leftPad + (((value - visibleStartTime) / Math.max(1, getChartTimeframeSeconds())) * slotW) + (center ? slotW / 2 : 0);
+    };
+    const xForFrameIndex = (frame, index, seconds, center = true) => {
+      const candle = frame?.candles?.[index];
+      const time = Number(candle?.time ?? candle?.epoch);
+      const x = xForTime(time + (center ? 0 : Math.max(1, Number(seconds) || 1)), center);
+      return Number.isFinite(x) ? x : NaN;
+    };
+    const rangeVisible = (startTime, endTime) => Number.isFinite(startTime)
+      && Number.isFinite(endTime)
+      && endTime >= visibleStartTime
+      && startTime <= visibleEndTime;
+    const drawMtfTag = (text, x, y, color, options = {}) => {
+      const label = String(text || "");
+      if (!label || !Number.isFinite(x) || !Number.isFinite(y)) return;
+      const size = options.size || 10;
+      ctx.save();
+      ctx.font = `${options.bold === false ? "" : "bold "}${size}px Segoe UI, sans-serif`;
+      const padX = options.padX || 7;
+      const boxW = Math.min(170, ctx.measureText(label).width + padX * 2);
+      const boxH = Math.max(17, size + 8);
+      const align = options.align || "center";
+      const rawX = align === "left" ? x : align === "right" ? x - boxW : x - boxW / 2;
+      const boxX = clamp(rawX, leftPad + 3, width - rightPad - boxW - 3);
+      const boxY = clamp(y - boxH / 2, topPad + 3, topPad + plotH - boxH - 3);
+      ctx.fillStyle = options.fill || "rgba(8, 13, 23, 0.9)";
+      ctx.strokeStyle = color;
+      ctx.lineWidth = options.lineWidth || 1;
+      ctx.beginPath();
+      ctx.roundRect(boxX, boxY, boxW, boxH, 6);
+      ctx.fill();
+      ctx.stroke();
+      ctx.fillStyle = color;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(label, boxX + boxW / 2, boxY + boxH / 2, boxW - padX * 2);
+      ctx.restore();
+    };
+    const drawStructureLayer = (frame, label, seconds, style) => {
+      const frameCandles = frame?.candles || [];
+      const smc = frame?.smc || {};
+      const events = (smc.structureEvents || []).slice(style.eventLimit || -6);
+      const swings = (smc.swings || []).slice(style.swingLimit || -8);
+      events.forEach((event) => {
+        const pivotCandle = frameCandles[event.pivotIndex];
+        const breakCandle = frameCandles[event.breakIndex];
+        const startTime = Number(pivotCandle?.time ?? pivotCandle?.epoch);
+        const endTime = Number(breakCandle?.time ?? breakCandle?.epoch) + Math.max(1, seconds);
+        if (!rangeVisible(startTime, endTime)) return;
+        const x1 = clamp(xForFrameIndex(frame, event.pivotIndex, seconds), leftPad, width - rightPad);
+        const x2 = clamp(xForFrameIndex(frame, event.breakIndex, seconds), leftPad, width - rightPad);
+        const y = toY(event.pivotPrice);
+        if (![x1, x2, y].every(Number.isFinite)) return;
+        const bullish = event.direction === "UP";
+        const color = bullish ? style.bull : style.bear;
+        const structureText = event.type === "MSS" ? "CHoCH" : "BOS";
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = style.lineWidth || 1.3;
+        ctx.setLineDash(style.dash || (event.type === "MSS" ? [7, 5] : []));
+        ctx.beginPath();
+        ctx.moveTo(x1, y);
+        ctx.lineTo(Math.max(x2, x1 + 10), y);
+        ctx.stroke();
+        ctx.restore();
+        drawMtfTag(`${label} ${structureText} ${bullish ? "UP" : "DOWN"}`, (x1 + x2) / 2, y + (bullish ? -14 : 14), color, {
+          size: style.tagSize,
+          lineWidth: style.lineWidth > 1.5 ? 1.2 : 1,
+        });
+      });
+      swings.forEach((swing) => {
+        const candle = frameCandles[swing.index];
+        const time = Number(candle?.time ?? candle?.epoch);
+        if (!rangeVisible(time, time + Math.max(1, seconds))) return;
+        const x = xForFrameIndex(frame, swing.index, seconds);
+        const y = toY(swing.price);
+        if (![x, y].every(Number.isFinite)) return;
+        const high = swing.type === "HIGH";
+        const color = high ? style.swingHigh : style.swingLow;
+        drawMtfTag(`${label} ${swing.label}`, x, y + (high ? -18 : 18), color, {
+          size: Math.max(9, (style.tagSize || 10) - 1),
+          fill: style.swingFill || "rgba(8, 13, 23, 0.82)",
+        });
+      });
+    };
+    const drawPoiZone = (zone) => {
+      if (!Number.isFinite(zone?.top) || !Number.isFinite(zone?.bottom)) return;
+      const isItf = String(zone.layer || "").startsWith("ITF");
+      const frame = isItf ? map.frames?.itf : map.frames?.htf;
+      const seconds = isItf ? map.hierarchy?.itfSeconds : map.hierarchy?.htfSeconds;
+      const frameCandles = frame?.candles || [];
+      const startIndex = Number.isInteger(zone.index) ? zone.index : zone.startIndex;
+      const endIndex = Number.isInteger(zone.drawEndIndex) ? zone.drawEndIndex : Number.isInteger(zone.endIndex) ? zone.endIndex : frameCandles.length - 1;
+      const startTime = Number(frameCandles[startIndex]?.time ?? frameCandles[startIndex]?.epoch);
+      const endTime = Number(frameCandles[endIndex]?.time ?? frameCandles[endIndex]?.epoch) + Math.max(1, Number(seconds) || 1);
+      if (!rangeVisible(startTime, endTime)) return;
+      const x1 = clamp(xForTime(startTime, false), leftPad, width - rightPad);
+      const x2 = clamp(xForTime(endTime, false), leftPad, width - rightPad);
+      const topY = toY(Math.max(zone.top, zone.bottom));
+      const bottomY = toY(Math.min(zone.top, zone.bottom));
+      if (![x1, x2, topY, bottomY].every(Number.isFinite)) return;
+      const bullish = zone.direction === "UP";
+      const color = bullish ? "#2dd4bf" : "#fb7185";
+      ctx.save();
+      ctx.fillStyle = bullish
+        ? (isItf ? "rgba(45, 212, 191, 0.08)" : "rgba(20, 184, 166, 0.13)")
+        : (isItf ? "rgba(251, 113, 133, 0.08)" : "rgba(244, 63, 94, 0.13)");
+      ctx.strokeStyle = color;
+      ctx.lineWidth = isItf ? 1 : 1.3;
+      ctx.setLineDash(isItf ? [5, 4] : []);
+      ctx.fillRect(x1, topY, Math.max(4, x2 - x1), Math.max(4, bottomY - topY));
+      ctx.strokeRect(x1, topY, Math.max(4, x2 - x1), Math.max(4, bottomY - topY));
+      ctx.restore();
+      drawMtfTag(zone.layer || "POI", x1 + 8, topY + 13, color, { size: 9, align: "left", fill: "rgba(8, 13, 23, 0.72)" });
+    };
+
+    const htfBias = map.frames?.htf?.bias || "RANGE";
+    const background = htfBias === "BULLISH"
+      ? "rgba(13, 148, 136, 0.035)"
+      : htfBias === "BEARISH"
+        ? "rgba(190, 18, 60, 0.035)"
+        : "rgba(148, 163, 184, 0.025)";
+    ctx.save();
+    ctx.fillStyle = background;
+    ctx.fillRect(leftPad, topPad, plotW, plotH);
+    ctx.restore();
+
+    map.poiZones.slice(-7).forEach(drawPoiZone);
+    drawStructureLayer(map.frames?.htf, map.hierarchy?.htfLabel || "HTF", map.hierarchy?.htfSeconds || getChartTimeframeSeconds(), {
+      bull: "#22c55e",
+      bear: "#ef4444",
+      swingHigh: "#f87171",
+      swingLow: "#5eead4",
+      lineWidth: 2.2,
+      tagSize: 11,
+      eventLimit: -5,
+      swingLimit: -6,
+    });
+    drawStructureLayer(map.frames?.itf, map.hierarchy?.itfLabel || "ITF", map.hierarchy?.itfSeconds || getChartTimeframeSeconds(), {
+      bull: "#60a5fa",
+      bear: "#f97316",
+      swingHigh: "#fb7185",
+      swingLow: "#38bdf8",
+      lineWidth: 1.35,
+      tagSize: 10,
+      dash: [6, 4],
+      eventLimit: -6,
+      swingLimit: -8,
+    });
+    drawStructureLayer(map.frames?.ltf, "Internal", map.hierarchy?.ltfSeconds || getChartTimeframeSeconds(), {
+      bull: "rgba(45, 212, 191, 0.92)",
+      bear: "rgba(251, 113, 133, 0.92)",
+      swingHigh: "rgba(248, 113, 113, 0.9)",
+      swingLow: "rgba(103, 232, 249, 0.9)",
+      lineWidth: 1,
+      tagSize: 9,
+      dash: [3, 5],
+      eventLimit: -5,
+      swingLimit: -6,
+      swingFill: "rgba(8, 13, 23, 0.64)",
+    });
+
+    const panelW = Math.min(360, Math.max(260, plotW * 0.26));
+    const panelH = 106;
+    const panelX = clamp(width - rightPad - panelW - 10, leftPad + 8, width - rightPad - panelW - 8);
+    const panelY = topPad + 12;
+    const panelColor = map.mapDirection === "BUY" ? "#22c55e" : map.mapDirection === "SELL" ? "#ef4444" : "#94a3b8";
+    ctx.save();
+    ctx.fillStyle = "rgba(8, 13, 23, 0.9)";
+    ctx.strokeStyle = panelColor;
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.roundRect(panelX, panelY, panelW, panelH, 8);
+    ctx.fill();
+    ctx.stroke();
+    ctx.fillStyle = panelColor;
+    ctx.font = "bold 13px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(`${map.mapAction} ${map.mapConfidence}/100`, panelX + 12, panelY + 10);
+    ctx.fillStyle = "#cbd5e1";
+    ctx.font = "bold 10px Segoe UI, sans-serif";
+    ctx.fillText("MTF SMC Structure Map", panelX + 12, panelY + 31);
+    ctx.fillStyle = "#9fb6d4";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillText(`HTF ${map.hierarchy?.htfLabel || "--"}: ${map.frames?.htf?.bias || "--"}`, panelX + 12, panelY + 51);
+    ctx.fillText(`ITF ${map.hierarchy?.itfLabel || "--"}: ${map.frames?.itf?.bias || "--"}`, panelX + 12, panelY + 67);
+    ctx.fillText(`Internal ${map.hierarchy?.ltfLabel || "--"}: ${map.frames?.ltf?.bias || "--"}`, panelX + 12, panelY + 83);
     ctx.restore();
   }
 
@@ -12796,6 +13028,16 @@ function buildIndicatorSignalAlerts(candles) {
     }
   }
 
+  if (activeChartIndicators.has("MTF_SMC_STRUCTURE_MAP")) {
+    const map = buildMtfSmcStructureMap(candles, {
+      symbol: currentSymbol,
+      baseSeconds: getChartTimeframeSeconds(),
+    });
+    if (map.mapDirection && map.mapConfidence >= 60) {
+      addAlert("MTF_SMC_STRUCTURE_MAP", candles.length - 1, map.mapDirection, map.mapSummary || map.summary, candles.length);
+    }
+  }
+
   if (activeChartIndicators.has("INST_EXECUTION_MODEL")) {
     const source = alertCandlesFor("INST_EXECUTION_MODEL");
     const iem = buildInstitutionalExecutionModel(source, {});
@@ -14873,6 +15115,33 @@ function scanMainSignalIndicator(indicator, candles, frame, frameWeight, frameSe
           isSetup: false,
         });
       }
+    } else if (indicator === "MTF_SMC_STRUCTURE_MAP") {
+      const map = buildMtfSmcStructureMap(candles, {
+        symbol: currentSymbol,
+        baseSeconds: frameSeconds,
+      });
+      if (map.mapDirection) {
+        pushMainIndicatorVote(votes, {
+          direction: map.mapDirection,
+          weight: frameWeight * Math.max(2.6, map.mapConfidence / 24),
+          indicator,
+          frame,
+          price: map.signal?.price ?? candles[count - 1]?.close,
+          reason: map.mapSummary || map.summary,
+          index: count - 1,
+          candleCount: count,
+        });
+      } else if (map.frames?.htf?.bias === "BULLISH" || map.frames?.htf?.bias === "BEARISH") {
+        pushMainIndicatorVote(votes, {
+          direction: map.frames.htf.bias === "BULLISH" ? "BUY" : "SELL",
+          weight: frameWeight * Math.max(1, map.mapConfidence / 60),
+          indicator,
+          frame,
+          price: candles[count - 1]?.close,
+          reason: map.mapSummary || map.aiSummary,
+          isSetup: false,
+        });
+      }
     } else if (indicator === "INSTITUTIONAL_SMC_ENGINE") {
       const engine = buildInstitutionalSmcEngine(candles, {
         symbol: currentSymbol,
@@ -15643,6 +15912,7 @@ function findAskAiSymbolFromCommand(command) {
 function findAskAiIndicatorFromCommand(command) {
   const text = String(command || "").toLowerCase();
   const aliases = [
+    ["MTF_SMC_STRUCTURE_MAP", ["mtf smc map", "mtf structure map", "smc structure map", "higher timeframe structure", "internal structure map"]],
     ["INSTITUTIONAL_SMC_ENGINE", ["institutional smc", "smc engine", "smart money engine", "multi timeframe smc", "mtf smc"]],
     ["SMC_WELO_TRADES", ["welo", "welo smc", "smart money concepts"]],
     ["ICT_LIQUIDITY", ["liquidity"]],
